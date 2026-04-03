@@ -338,7 +338,8 @@ def api_auto_snap_prop():
     if err:
         return err, code
     ds = request.args.get("dataset", "")
-    return jsonify({"dataset": ds, "value": get_auto_snapshot_property(host, ds)})
+    prop = get_auto_snapshot_property(host, ds)
+    return jsonify({"dataset": ds, "value": prop["value"], "source": prop["source"]})
 
 
 @app.route("/api/auto-snapshot/set", methods=["POST"])
