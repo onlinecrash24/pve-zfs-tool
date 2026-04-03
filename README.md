@@ -65,7 +65,7 @@ A Docker-based web application for managing ZFS pools, datasets, snapshots, and 
 
 ```bash
 # Clone the repository
-git clone https://git.myantispam.de/onlinecrash/zfz-tool.git
+git clone https://github.com/onlinecrash24/pve-zfs-tool.git
 cd pve-zfz-tool
 
 # Start the container
