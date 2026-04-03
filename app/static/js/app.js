@@ -960,7 +960,9 @@ async function viewAutoSnapshot() {
     dsCard.appendChild(h("div", { className: "card-header" }, "Dataset Auto-Snapshot Settings"));
     const table = h("table");
     table.appendChild(h("thead", {}, h("tr", {}, [
-        h("th", {}, "Dataset"), h("th", {}, "Auto-Snapshot"), h("th", {}, "Actions"),
+        h("th", {}, "Dataset"),
+        h("th", { style: "text-align:center;width:160px" }, "Auto-Snapshot"),
+        h("th", { style: "text-align:right" }, "Actions"),
     ])));
     const tbody = h("tbody", { id: "autosnap-tbody" });
     table.appendChild(tbody);
@@ -972,32 +974,63 @@ async function viewAutoSnapshot() {
     const tbodyEl = document.getElementById("autosnap-tbody");
     for (const ds of datasets) {
         const prop = await API.get(`/api/auto-snapshot/property?host=${currentHost}&dataset=${ds.name}`);
-        const val = prop.value || "-";
+        const val = prop.value;
+        const source = prop.source || "";
+        // Determine effective state:
+        // "true" = explicitly enabled or inherited as true
+        // "false" = explicitly disabled or inherited as false
+        // "-" or anything else = not set at all
         const isActive = val === "true";
         const isInactive = val === "false";
+        const isInherited = source.startsWith("inherited") || source === "default";
+        const isNotSet = val === "-" || val === "" || (!isActive && !isInactive);
+
         const tr = h("tr");
         tr.appendChild(h("td", {}, ds.name));
+
+        // Status column with icon
         const valTd = h("td", { style: "text-align:center" });
         if (isActive) {
-            valTd.appendChild(h("span", { style: "color:var(--success);font-size:18px", title: "Active" }, "\u2714"));
+            const wrap = h("span", { style: "display:inline-flex;align-items:center;gap:6px" });
+            wrap.appendChild(h("span", { style: "color:var(--success);font-size:20px;line-height:1" }, "\u2714"));
+            if (isInherited) wrap.appendChild(h("span", { style: "font-size:10px;color:var(--text-secondary)" }, "(inherited)"));
+            valTd.appendChild(wrap);
         } else if (isInactive) {
-            valTd.appendChild(h("span", { style: "color:var(--danger);font-size:18px", title: "Inactive" }, "\u2718"));
+            const wrap = h("span", { style: "display:inline-flex;align-items:center;gap:6px" });
+            wrap.appendChild(h("span", { style: "color:var(--danger);font-size:20px;line-height:1" }, "\u2718"));
+            if (isInherited) wrap.appendChild(h("span", { style: "font-size:10px;color:var(--text-secondary)" }, "(inherited)"));
+            valTd.appendChild(wrap);
         } else {
-            valTd.appendChild(h("span", { style: "color:var(--text-secondary);font-size:14px", title: "Not set (inherits from parent)" }, "\u2014"));
+            valTd.appendChild(h("span", { style: "color:var(--text-secondary);font-size:13px" }, "not set"));
         }
         tr.appendChild(valTd);
-        const actTd = h("td");
-        const bg = h("div", { className: "btn-group" });
+
+        // Actions column
+        const actTd = h("td", { style: "text-align:right" });
+        const bg = h("div", { className: "btn-group", style: "justify-content:flex-end" });
         const enableBtn = h("button", {
-            className: `btn btn-sm btn-success`,
-            onClick: () => toggleAutoSnap(ds.name, true),
+            className: "btn btn-sm btn-success",
         }, "Enable");
-        if (isActive) { enableBtn.disabled = true; enableBtn.style.opacity = "0.4"; enableBtn.style.cursor = "default"; }
         const disableBtn = h("button", {
-            className: `btn btn-sm btn-danger`,
-            onClick: () => toggleAutoSnap(ds.name, false),
+            className: "btn btn-sm btn-danger",
         }, "Disable");
-        if (isInactive) { disableBtn.disabled = true; disableBtn.style.opacity = "0.4"; disableBtn.style.cursor = "default"; }
+
+        if (isActive) {
+            enableBtn.disabled = true;
+            enableBtn.style.opacity = "0.35";
+            enableBtn.style.cursor = "not-allowed";
+            disableBtn.addEventListener("click", () => toggleAutoSnap(ds.name, false));
+        } else if (isInactive) {
+            disableBtn.disabled = true;
+            disableBtn.style.opacity = "0.35";
+            disableBtn.style.cursor = "not-allowed";
+            enableBtn.addEventListener("click", () => toggleAutoSnap(ds.name, true));
+        } else {
+            // Not set — both clickable
+            enableBtn.addEventListener("click", () => toggleAutoSnap(ds.name, true));
+            disableBtn.addEventListener("click", () => toggleAutoSnap(ds.name, false));
+        }
+
         bg.appendChild(enableBtn);
         bg.appendChild(disableBtn);
         actTd.appendChild(bg);
