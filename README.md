@@ -66,13 +66,13 @@ A Docker-based web application for managing ZFS pools, datasets, snapshots, and 
 ```bash
 # Clone the repository
 git clone https://git.myantispam.de/onlinecrash/zfz-tool.git
-cd zfz-tool
+cd pve-zfz-tool
 
 # Start the container
 docker compose up -d --build
 
 # Open the web UI
-# http://localhost:5000
+# http://DOCKER-HOST-IP:5000
 ```
 
 ## Setup
