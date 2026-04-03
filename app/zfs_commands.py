@@ -265,10 +265,13 @@ def get_auto_snapshot_status(host):
 
 
 def get_auto_snapshot_property(host, dataset):
-    result = run_command(host, f"zfs get com.sun:auto-snapshot {dataset} -H -o value")
+    result = run_command(host, f"zfs get com.sun:auto-snapshot {dataset} -H -o value,source")
     if result["success"]:
-        return result["stdout"].strip()
-    return "unknown"
+        parts = result["stdout"].strip().split("\t")
+        value = parts[0] if parts else "-"
+        source = parts[1] if len(parts) > 1 else "none"
+        return {"value": value, "source": source}
+    return {"value": "-", "source": "none"}
 
 
 def set_auto_snapshot(host, dataset, enabled=True, label=None):
