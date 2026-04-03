@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZFS Tool – Proxmox VE</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>&#x1F4BE; <span>ZFS Tool</span></h1>
+                <div class="subtitle">Proxmox VE Management</div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <div class="nav-section">Overview</div>
+                <div class="nav-item active" data-view="home">
+                    <span class="icon">&#x1F3E0;</span> <span>Home</span>
+                </div>
+                <div class="nav-item" data-view="hosts">
+                    <span class="icon">&#x1F5A5;</span> <span>Hosts</span>
+                </div>
+
+                <div class="nav-section">ZFS</div>
+                <div class="nav-item" data-view="pools">
+                    <span class="icon">&#x1F4CA;</span> <span>Pools</span>
+                </div>
+                <div class="nav-item" data-view="datasets">
+                    <span class="icon">&#x1F4C1;</span> <span>Datasets</span>
+                </div>
+                <div class="nav-item" data-view="snapshots">
+                    <span class="icon">&#x1F4F8;</span> <span>Snapshots</span>
+                </div>
+
+                <div class="nav-section">Proxmox</div>
+                <div class="nav-item" data-view="guests">
+                    <span class="icon">&#x1F5A5;</span> <span>VMs & CTs</span>
+                </div>
+
+                <div class="nav-section">Automation</div>
+                <div class="nav-item" data-view="autosnap">
+                    <span class="icon">&#x23F0;</span> <span>Auto-Snapshot</span>
+                </div>
+
+                <div class="nav-section">System</div>
+                <div class="nav-item" data-view="health">
+                    <span class="icon">&#x1FA7A;</span> <span>Health</span>
+                </div>
+                <div class="nav-item" data-view="notifications">
+                    <span class="icon">&#x1F514;</span> <span>Notifications</span>
+                </div>
+            </nav>
+
+            <div class="host-selector">
+                <label>Active Host</label>
+                <select id="host-select">
+                    <option value="">-- Select Host --</option>
+                </select>
+            </div>
+        </aside>
+
+        <!-- Main -->
+        <main class="main-content">
+            <div id="main-view"></div>
+        </main>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal-overlay" id="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <span id="modal-title">Modal</span>
+                <button class="close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-footer" id="modal-footer">
+                <button class="btn" onclick="closeModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
