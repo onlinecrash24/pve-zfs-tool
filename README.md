@@ -72,7 +72,7 @@ cd pve-zfz-tool
 docker compose up -d --build
 
 # Open the web UI
-# http://DOCKER-HOST-IP:5000
+http://DOCKER-HOST-IP:5000
 ```
 
 ## Setup
