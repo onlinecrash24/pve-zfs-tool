@@ -4,29 +4,37 @@ A Docker-based web application for managing ZFS pools, datasets, snapshots, and 
 
 ## Features
 
-### ZFS Management
+### ZFS Pool Management
 - **Pool Overview** -- Status, IO statistics, health, fragmentation, dedup ratio
 - **Pool Scrub** -- Start scrubs directly from the UI
+- **Pool Upgrade** -- Automatically detects if a feature upgrade is available (green button), with confirmation before upgrading
 - **Pool History** -- View recent pool activity
-- **Dataset Management** -- List, create, destroy datasets; view and set properties
-- **Compression** -- View compression ratios and configure compression per dataset
+
+### Dataset Management
+- **List & Filter** -- View all datasets with type, compression, used/available space
+- **Create & Destroy** -- Create new datasets with optional compression settings
+- **Properties** -- View and modify all ZFS dataset properties
 
 ### Snapshot Management
-- **List Snapshots** -- View all snapshots, filter by dataset
+- **Interactive Timeline** -- Visual timeline grouped by dataset, newest first, with color-coded dots (blue = newest, auto vs. manual distinction)
+- **Table View** -- Classic table view with type badges (zvol/filesystem), switchable via dropdown
 - **Create Snapshots** -- Manual snapshots with custom names, recursive support
-- **Rollback** -- Rollback to any snapshot (with option to destroy newer snapshots)
+- **Rollback** -- Smart rollback that auto-detects VMs/LXC containers, stops them before rollback and restarts them afterwards
 - **Clone** -- Clone snapshots into new datasets
-- **Diff** -- View changes between snapshots
+- **Diff** -- View filesystem changes since a snapshot (filesystem datasets only, with mounted-check and error handling)
 - **Delete** -- Remove individual snapshots
+- **Filter** -- Filter snapshots by dataset in both timeline and table view
 
 ### Proxmox VM/CT Integration
 - **Guest Overview** -- List all VMs and LXC containers with status
 - **Per-Guest Snapshots** -- View ZFS snapshots specific to a VM or container
-- **Guest Snapshot Rollback** -- Rollback individual guest disks to a previous state
+- **Smart Rollback** -- Automatically stops VM/LXC before rollback and restarts afterwards
 
 ### ZFS Auto-Snapshot
-- **Status** -- Check if zfs-auto-snapshot is installed, view cron/timer config
+- **Status** -- Check if zfs-auto-snapshot is installed, view cron/timer configuration
 - **Per-Dataset Config** -- Enable/disable auto-snapshot per dataset and label (frequent, hourly, daily, weekly, monthly)
+- **Visual Status** -- Green checkmark when active, red X when inactive, dash when inheriting from parent
+- **Smart Buttons** -- Enable button disabled when already active, Disable button disabled when already inactive
 
 ### Health & Monitoring
 - **ARC Statistics** -- Adaptive Replacement Cache hit/miss rates and memory usage
@@ -36,18 +44,20 @@ A Docker-based web application for managing ZFS pools, datasets, snapshots, and 
 ### Notifications
 - **Telegram** -- Receive notifications via Telegram bot
 - **Gotify** -- Receive notifications via self-hosted Gotify server
+- **Test Notifications** -- Send test messages to verify configuration
 - **Configurable Events** -- Enable/disable notifications per event type:
   - Scrub started/finished
   - Snapshot created/deleted
   - Rollback performed
   - Pool errors/degraded state
+  - Pool upgraded
   - Health warnings
   - Host offline
   - Auto-snapshot events
 
 ### Multi-Host SSH
 - **SSH Key Auto-Generation** -- Ed25519 key pair generated on first start
-- **Public Key Display** -- Shown on the home page for easy copy to Proxmox hosts
+- **Public Key Display** -- Shown on the home page with copy button for easy deployment to Proxmox hosts
 - **Multiple Hosts** -- Add and manage multiple Proxmox VE nodes
 - **Connection Test** -- Verify SSH connectivity per host
 
@@ -55,14 +65,14 @@ A Docker-based web application for managing ZFS pools, datasets, snapshots, and 
 
 ```bash
 # Clone the repository
-git clone https://github.com/onlinecrash24/pve-zfs-tool.git
-cd pve-zfz-tool
+git clone https://git.myantispam.de/onlinecrash/zfz-tool.git
+cd zfz-tool
 
 # Start the container
 docker compose up -d --build
 
 # Open the web UI
-# http://docker-host-ip:5000
+# http://localhost:5000
 ```
 
 ## Setup
@@ -84,11 +94,13 @@ docker compose up -d --build
 2. Get your Chat ID via [@userinfobot](https://t.me/userinfobot) or [@getidsbot](https://t.me/getidsbot)
 3. For group notifications, add the bot to the group and use the group Chat ID (starts with `-100`)
 4. Enter Bot Token and Chat ID in the Notifications settings
+5. Click "Send Test" to verify
 
 ### Gotify
 1. Set up a [Gotify](https://gotify.net/) server
 2. Create an application in Gotify and copy the app token
 3. Enter the server URL and token in the Notifications settings
+4. Click "Send Test" to verify
 
 ## Configuration
 
