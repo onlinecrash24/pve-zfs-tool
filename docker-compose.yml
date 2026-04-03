@@ -1,0 +1,16 @@
+services:
+  zfs-tool:
+    build: .
+    container_name: zfs-tool
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ssh-keys:/root/.ssh
+      - zfs-data:/app/data
+    environment:
+      - SECRET_KEY=change-me-in-production
+
+volumes:
+  ssh-keys:
+  zfs-data:
