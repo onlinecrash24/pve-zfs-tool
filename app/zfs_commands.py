@@ -148,7 +148,7 @@ def get_snapshots(host, dataset=None):
                 ds_types[p[0]] = p[1]
     snapshots = []
     for line in result["stdout"].strip().splitlines():
-        parts = line.split("\t")
+        parts = line.split("\t", 3)
         if len(parts) >= 4:
             full_name = parts[0]
             ds, snap = full_name.rsplit("@", 1) if "@" in full_name else (full_name, "")
@@ -159,7 +159,7 @@ def get_snapshots(host, dataset=None):
                 "ds_type": ds_types.get(ds, "unknown"),
                 "used": parts[1],
                 "refer": parts[2],
-                "creation": parts[3],
+                "creation": parts[3].strip(),
             })
     return snapshots
 
