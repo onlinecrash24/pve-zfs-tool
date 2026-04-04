@@ -118,7 +118,6 @@ async function renderView() {
         datasets: viewDatasets,
         snapshots: viewSnapshots,
         guests: viewGuests,
-        autosnap: viewAutoSnapshot,
         health: viewHealth,
         notifications: viewNotifications,
     };
@@ -137,21 +136,20 @@ async function viewHome() {
     // Header
     container.appendChild(h("div", { className: "page-header" }, [
         h("h2", {}, "ZFS Tool for Proxmox VE"),
-        h("p", {}, "Manage ZFS pools, snapshots, and auto-snapshot across your Proxmox hosts."),
+        h("p", {}, "Manage ZFS pools, snapshots, and VM/CT rollbacks across your Proxmox hosts via SSH."),
     ]));
 
     // SSH Key
     const keyCard = h("div", { className: "card" });
     keyCard.appendChild(h("div", { className: "card-header" }, [
         h("span", {}, "SSH Public Key"),
-        h("button", { className: "btn btn-sm", onClick: () => copyKey(key.key) }, "Copy"),
+        h("button", { className: "btn btn-sm btn-primary", onClick: () => copyKey(key.key) }, "Copy"),
     ]));
     const keyBody = h("div", { className: "card-body" });
     if (key.key) {
-        const pre = h("div", { className: "key-display" }, key.key);
+        const pre = h("div", { className: "key-display", id: "ssh-key-display" }, key.key);
         keyBody.appendChild(pre);
         keyBody.appendChild(h("p", {
-            className: "",
             style: "margin-top:10px;font-size:13px;color:var(--text-secondary)"
         }, 'Add this key to ~/.ssh/authorized_keys on your Proxmox hosts to enable SSH access.'));
     } else {
@@ -177,6 +175,68 @@ async function viewHome() {
         container.appendChild(statsGrid);
     }
 
+    // Feature overview
+    const featureCard = h("div", { className: "card", style: "margin-top:16px" });
+    featureCard.appendChild(h("div", { className: "card-header" }, "Features"));
+    const featureBody = h("div", { className: "card-body" });
+    featureBody.innerHTML = `
+        <div class="grid grid-2" style="gap:20px">
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">ZFS Pools</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>Pool status, IO statistics, health overview</li>
+                    <li>Start scrubs directly from the UI</li>
+                    <li>Automatic upgrade detection with one-click upgrade</li>
+                    <li>Pool history and event log</li>
+                </ul>
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">Snapshots</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>Interactive timeline and table view</li>
+                    <li>Create manual snapshots with custom names</li>
+                    <li>Rollback with automatic VM/LXC stop &amp; restart</li>
+                    <li>Clone snapshots, diff filesystem changes</li>
+                </ul>
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">Proxmox Integration</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>List all VMs and LXC containers</li>
+                    <li>View ZFS snapshots per guest</li>
+                    <li>Smart rollback: stops guest, rolls back, restarts</li>
+                </ul>
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">Health &amp; Notifications</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>ARC cache statistics, ZFS events</li>
+                    <li>SMART disk health per pool</li>
+                    <li>Telegram &amp; Gotify notifications</li>
+                    <li>Configurable alerts for scrub, rollback, errors</li>
+                </ul>
+            </div>
+        </div>
+    `;
+    featureCard.appendChild(featureBody);
+    container.appendChild(featureCard);
+
+    // Setup guide
+    const setupCard = h("div", { className: "card", style: "margin-top:16px" });
+    setupCard.appendChild(h("div", { className: "card-header" }, "Quick Setup"));
+    const setupBody = h("div", { className: "card-body" });
+    setupBody.innerHTML = `
+        <ol style="font-size:13px;color:var(--text-secondary);line-height:2;padding-left:18px">
+            <li>Copy the <strong>SSH public key</strong> above</li>
+            <li>Add it to <code>~/.ssh/authorized_keys</code> on your Proxmox host(s)</li>
+            <li>Go to <strong>Hosts</strong> and add your Proxmox node (IP, port, user)</li>
+            <li>Click <strong>Test</strong> to verify the connection</li>
+            <li>Select the host from the dropdown and start managing ZFS</li>
+        </ol>
+    `;
+    setupCard.appendChild(setupBody);
+    container.appendChild(setupCard);
+
     setContent(container);
 }
 
@@ -190,7 +250,34 @@ function makeStatCard(label, value, extra) {
 
 function copyKey(key) {
     if (!key) return;
-    navigator.clipboard.writeText(key).then(() => toast("Key copied!", "success"));
+    // navigator.clipboard only works on HTTPS or localhost
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(key).then(() => toast("Key copied!", "success"));
+    } else {
+        // Fallback for HTTP connections
+        const ta = document.createElement("textarea");
+        ta.value = key;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand("copy");
+            toast("Key copied!", "success");
+        } catch (e) {
+            // Last resort: select the key text for manual copy
+            const el = document.getElementById("ssh-key-display");
+            if (el) {
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                toast("Key selected — press Ctrl+C to copy", "info");
+            }
+        }
+        document.body.removeChild(ta);
+    }
 }
 
 // -- Hosts -----------------------------------------------------------------
@@ -481,7 +568,6 @@ async function viewDatasets() {
         const bg = h("div", { className: "btn-group" });
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, "Properties"));
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => createSnapshotForDs(ds.name) }, "Snapshot"));
-        bg.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: () => destroyDataset(ds.name) }, "Destroy"));
         actTd.appendChild(bg);
         tr.appendChild(actTd);
         tbody.appendChild(tr);
@@ -551,7 +637,7 @@ async function viewSnapshots() {
     statsGrid.appendChild(makeStatCard("Auto-Snapshots", autoSnaps.length, ""));
     container.appendChild(statsGrid);
 
-    // Filter + View toggle
+    // Filter + Search + View toggle
     const filterCard = h("div", { className: "card" });
     const filterBody = h("div", { className: "card-body" });
     const filterRow = h("div", { className: "form-row" });
@@ -564,12 +650,24 @@ async function viewSnapshots() {
     sel.addEventListener("change", applySnapshotFilter);
     dsGroup.appendChild(sel);
     filterRow.appendChild(dsGroup);
+    // Search
+    const searchGroup = h("div", { className: "form-group" });
+    searchGroup.appendChild(h("label", {}, "Search"));
+    const searchInput = h("input", {
+        className: "form-control",
+        id: "snap-search",
+        placeholder: "Search snapshot name...",
+        type: "text",
+    });
+    searchInput.addEventListener("input", applySnapshotFilter);
+    searchGroup.appendChild(searchInput);
+    filterRow.appendChild(searchGroup);
     // View toggle
     const viewGroup = h("div", { className: "form-group" });
     viewGroup.appendChild(h("label", {}, "View"));
     const viewSel = h("select", { className: "form-control", id: "snap-view-mode" });
-    viewSel.appendChild(h("option", { value: "timeline" }, "Timeline"));
     viewSel.appendChild(h("option", { value: "table" }, "Table"));
+    viewSel.appendChild(h("option", { value: "timeline" }, "Timeline"));
     viewSel.addEventListener("change", applySnapshotFilter);
     viewGroup.appendChild(viewSel);
     filterRow.appendChild(viewGroup);
@@ -588,8 +686,16 @@ async function viewSnapshots() {
 
 function applySnapshotFilter() {
     const ds = document.getElementById("snap-filter-ds").value;
+    const search = (document.getElementById("snap-search")?.value || "").toLowerCase().trim();
     const mode = document.getElementById("snap-view-mode").value;
-    const filtered = ds ? _allSnapshots.filter(s => s.dataset === ds) : _allSnapshots;
+    let filtered = ds ? _allSnapshots.filter(s => s.dataset === ds) : _allSnapshots;
+    if (search) {
+        filtered = filtered.filter(s =>
+            s.snapshot.toLowerCase().includes(search) ||
+            s.dataset.toLowerCase().includes(search) ||
+            s.creation.toLowerCase().includes(search)
+        );
+    }
 
     const tlContainer = document.getElementById("snap-timeline-container");
     const tableCard = document.getElementById("snap-table-card");
@@ -671,7 +777,6 @@ function renderTimeline(snapshots) {
             if (!isVolume) {
                 actions.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
             }
-            actions.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: () => destroySnap(snap) }, "Delete"));
             content.appendChild(actions);
 
             node.appendChild(content);
@@ -721,7 +826,6 @@ function renderSnapshotTable(snapshots) {
         if (!isVolume) {
             bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
         }
-        bg.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: () => destroySnap(snap) }, "Delete"));
         actTd.appendChild(bg);
         tr.appendChild(actTd);
         tbody.appendChild(tr);
@@ -876,7 +980,6 @@ async function showGuestSnapshots(guest, pools) {
                 <td>
                     <div class="btn-group">
                         <button class="btn btn-sm btn-warning" onclick="rollbackGuestSnap('${escapeHtml(s.full_name)}')">Rollback</button>
-                        <button class="btn btn-sm btn-danger" onclick="destroyGuestSnap('${escapeHtml(s.full_name)}')">Delete</button>
                     </div>
                 </td>
             </tr>`;
