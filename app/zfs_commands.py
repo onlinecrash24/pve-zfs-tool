@@ -404,30 +404,62 @@ def get_pve_cts(host):
 
 
 def get_vm_snapshots(host, pool, vmid, vm_type="qemu"):
-    """Find ZFS snapshots belonging to a specific VM/CT."""
+    """Find ZFS snapshots belonging to a specific VM/CT without grep."""
+
+    # Prefix je nach Typ
     prefix = f"subvol-{vmid}" if vm_type == "lxc" else f"vm-{vmid}"
+
+    # Alle Snapshots holen (einmalig, sauber)
     result = run_command(
         host,
-        f"zfs list -t snapshot -H -o name,used,refer,creation -s creation -r {pool} 2>/dev/null | grep '{prefix}'"
+        f"zfs list -t snapshot -H -o name,used,refer,creation -s creation 2>/dev/null"
     )
-    if not result["success"] and not result["stdout"]:
+
+    if not result["success"] or not result["stdout"]:
         return []
+
     snapshots = []
+
     for line in result["stdout"].strip().splitlines():
         parts = line.split("\t")
-        if len(parts) >= 4:
-            full_name = parts[0]
-            ds, snap = full_name.rsplit("@", 1) if "@" in full_name else (full_name, "")
-            snapshots.append({
-                "full_name": full_name,
-                "dataset": ds,
-                "snapshot": snap,
-                "used": parts[1],
-                "refer": parts[2],
-                "creation": parts[3],
-            })
-    return snapshots
+        if len(parts) < 4:
+            continue
 
+        full_name = parts[0]
+
+        # dataset@snapshot sauber trennen
+        if "@" not in full_name:
+            continue
+
+        dataset, snap = full_name.rsplit("@", 1)
+
+        # 🔍 Präzises Matching:
+        # Dataset muss exakt vm-<id> oder subvol-<id> enthalten
+        # (nicht vm-1010 etc.)
+        ds_name = dataset.split("/")[-1]
+
+        if not ds_name.startswith(prefix):
+            continue
+
+        # Optional noch strenger:
+        # exakt vm-<id> oder vm-<id>-disk-*
+        if vm_type == "qemu":
+            if not (ds_name == prefix or ds_name.startswith(f"{prefix}-disk-")):
+                continue
+        else:
+            if not (ds_name == prefix or ds_name.startswith(f"{prefix}-disk-")):
+                continue
+
+        snapshots.append({
+            "full_name": full_name,
+            "dataset": dataset,
+            "snapshot": snap,
+            "used": parts[1],
+            "refer": parts[2],
+            "creation": parts[3],
+        })
+
+    return snapshots
 
 # ---------------------------------------------------------------------------
 # File-Level Restore (LXC / filesystem snapshots)
