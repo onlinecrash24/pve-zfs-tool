@@ -415,6 +415,24 @@ def api_restore_unmount():
     return jsonify(result)
 
 
+@app.route("/api/restore/clones")
+def api_restore_clones():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    from app.zfs_commands import list_restore_clones
+    return jsonify(list_restore_clones(host))
+
+
+@app.route("/api/restore/cleanup", methods=["POST"])
+def api_restore_cleanup():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    from app.zfs_commands import cleanup_restore_clones
+    return jsonify(cleanup_restore_clones(host))
+
+
 @app.route("/api/restore/browse")
 def api_restore_browse():
     host, err, code = _require_host()
