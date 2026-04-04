@@ -12,34 +12,35 @@ A Docker-based web application for managing ZFS pools, datasets, snapshots, and 
 
 ### Dataset Management
 - **List & Filter** -- View all datasets with type, compression, used/available space
-- **Create & Destroy** -- Create new datasets with optional compression settings
+- **Create Datasets** -- Create new datasets with optional compression settings
 - **Properties** -- View and modify all ZFS dataset properties
 
 ### Snapshot Management
 - **Interactive Timeline** -- Visual timeline grouped by dataset, newest first, with color-coded dots (blue = newest, auto vs. manual distinction)
-- **Table View** -- Classic table view with type badges (zvol/filesystem), switchable via dropdown
+- **Table View** -- Classic table view (default) with type badges (zvol/filesystem), switchable via dropdown
+- **Search** -- Filter snapshots by dataset name in both timeline and table view
 - **Create Snapshots** -- Manual snapshots with custom names, recursive support
 - **Rollback** -- Smart rollback that auto-detects VMs/LXC containers, stops them before rollback and restarts them afterwards
-- **Clone** -- Clone snapshots into new datasets
-- **Diff** -- View filesystem changes since a snapshot (filesystem datasets only, with mounted-check and error handling)
-- **Delete** -- Remove individual snapshots
-- **Filter** -- Filter snapshots by dataset in both timeline and table view
+- **Clone** -- Clone snapshots via modal dialog with target datastore/pool selector, editable clone name (default: `{name}_CLONE`), supports cross-pool cloning via `zfs send | zfs recv`
+- **Diff** -- View changes for filesystem datasets (`zfs diff`) and zvol/VM snapshots (incremental send estimates, snapshot properties, size overview)
+- **Delete** -- Remove manually created snapshots only (auto-snapshots are protected from deletion)
 
 ### Proxmox VM/CT Integration
 - **Guest Overview** -- List all VMs and LXC containers with status
 - **Per-Guest Snapshots** -- View ZFS snapshots specific to a VM or container
 - **Smart Rollback** -- Automatically stops VM/LXC before rollback and restarts afterwards
-
-### ZFS Auto-Snapshot
-- **Status** -- Check if zfs-auto-snapshot is installed, view cron/timer configuration
-- **Per-Dataset Config** -- Enable/disable auto-snapshot per dataset and label (frequent, hourly, daily, weekly, monthly)
-- **Visual Status** -- Green checkmark when active, red X when inactive, dash when inheriting from parent
-- **Smart Buttons** -- Enable button disabled when already active, Disable button disabled when already inactive
+- **File-Level Restore** -- Browse and restore individual files from LXC container snapshots:
+  - Mounts snapshot as readonly clone
+  - Navigate files via breadcrumb file browser
+  - Preview text files directly in the UI
+  - Restore individual files or entire directories back to the live container
+  - Automatic cleanup: restore clone is unmounted when closing the browser (via X, backdrop click, or close button)
 
 ### Health & Monitoring
 - **ARC Statistics** -- Adaptive Replacement Cache hit/miss rates and memory usage
 - **ZFS Events** -- Recent ZFS kernel events
 - **SMART Status** -- Disk health for all drives in each pool
+- **Restore Clone Cleanup** -- View and destroy leftover restore-mount datasets with one-click cleanup
 
 ### Notifications
 - **Telegram** -- Receive notifications via Telegram bot
@@ -53,11 +54,11 @@ A Docker-based web application for managing ZFS pools, datasets, snapshots, and 
   - Pool upgraded
   - Health warnings
   - Host offline
-  - Auto-snapshot events
+  - File restore actions
 
 ### Multi-Host SSH
 - **SSH Key Auto-Generation** -- Ed25519 key pair generated on first start
-- **Public Key Display** -- Shown on the home page with copy button for easy deployment to Proxmox hosts
+- **Public Key Display** -- Shown on the home page with copy button (works on HTTP and HTTPS)
 - **Multiple Hosts** -- Add and manage multiple Proxmox VE nodes
 - **Connection Test** -- Verify SSH connectivity per host
 
