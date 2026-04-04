@@ -14,6 +14,8 @@ from app.zfs_commands import (
     rollback_snapshot, clone_snapshot, diff_snapshot,
     get_auto_snapshot_status, get_auto_snapshot_property, set_auto_snapshot,
     get_pve_vms, get_pve_cts, get_vm_snapshots,
+    snapshot_mount, snapshot_unmount, snapshot_browse,
+    snapshot_read_file, snapshot_restore_file, snapshot_restore_dir,
     estimate_send_size, estimate_incremental_size,
     get_arc_stats, get_zfs_events, get_smart_status,
 )
@@ -301,6 +303,15 @@ def api_clone_snapshot():
     return jsonify(clone_snapshot(host, data["snapshot"], data["clone_name"]))
 
 
+@app.route("/api/snapshots/clone-targets")
+def api_clone_targets():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    from app.zfs_commands import get_clone_targets
+    return jsonify(get_clone_targets(host))
+
+
 @app.route("/api/snapshots/diff")
 def api_diff_snapshot():
     host, err, code = _require_host()
@@ -378,6 +389,88 @@ def api_pve_guest_snapshots():
     vmid = request.args.get("vmid", "")
     vm_type = request.args.get("type", "qemu")
     return jsonify(get_vm_snapshots(host, pool, vmid, vm_type))
+
+
+# ---------------------------------------------------------------------------
+# API: File-Level Restore (LXC)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/restore/mount", methods=["POST"])
+def api_restore_mount():
+    data = request.json
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = snapshot_mount(host, data.get("snapshot", ""))
+    return jsonify(result)
+
+
+@app.route("/api/restore/unmount", methods=["POST"])
+def api_restore_unmount():
+    data = request.json
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = snapshot_unmount(host, data.get("clone_ds", ""))
+    return jsonify(result)
+
+
+@app.route("/api/restore/browse")
+def api_restore_browse():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    mount_path = request.args.get("mount_path", "")
+    subpath = request.args.get("path", "")
+    return jsonify(snapshot_browse(host, mount_path, subpath))
+
+
+@app.route("/api/restore/preview")
+def api_restore_preview():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    mount_path = request.args.get("mount_path", "")
+    file_path = request.args.get("file", "")
+    return jsonify(snapshot_read_file(host, mount_path, file_path))
+
+
+@app.route("/api/restore/file", methods=["POST"])
+def api_restore_file():
+    data = request.json
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = snapshot_restore_file(
+        host,
+        data.get("mount_path", ""),
+        data.get("file_path", ""),
+        data.get("dest_path", ""),
+    )
+    if result.get("success"):
+        send_notification("rollback", "File Restored",
+                          f"File: {data.get('file_path')}\nTo: {data.get('dest_path')}\nHost: {host['name']}",
+                          priority=5)
+    return jsonify(result)
+
+
+@app.route("/api/restore/directory", methods=["POST"])
+def api_restore_dir():
+    data = request.json
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = snapshot_restore_dir(
+        host,
+        data.get("mount_path", ""),
+        data.get("dir_path", ""),
+        data.get("dest_path", ""),
+    )
+    if result.get("success"):
+        send_notification("rollback", "Directory Restored",
+                          f"Dir: {data.get('dir_path')}\nTo: {data.get('dest_path')}\nHost: {host['name']}",
+                          priority=5)
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

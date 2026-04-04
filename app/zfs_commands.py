@@ -210,22 +210,103 @@ def rollback_snapshot(host, full_name, force=False, destroy_recent=False, stop_g
 
 
 def clone_snapshot(host, full_name, clone_name):
-    return run_command(host, f"zfs clone {full_name} {clone_name}")
+    """Clone a snapshot. If clone_name is on a different pool, use send/recv."""
+    snap_pool = full_name.split("/")[0]
+    clone_pool = clone_name.split("/")[0]
+    if snap_pool == clone_pool:
+        return run_command(host, f"zfs clone {full_name} {clone_name}")
+    else:
+        # Cross-pool: send | recv, then promote
+        result = run_command(host, f"zfs send {full_name} | zfs recv {clone_name}")
+        if not result["success"]:
+            return result
+        # The received dataset is a dependent clone, promote it to be independent
+        promote = run_command(host, f"zfs promote {clone_name} 2>/dev/null")
+        result["promoted"] = promote.get("success", False)
+        return result
+
+
+def get_clone_targets(host):
+    """Get all pools and their top-level datasets as potential clone targets."""
+    result = run_command(host, "zpool list -H -o name")
+    if not result["success"]:
+        return {"pools": [], "datasets": []}
+    pools = []
+    datasets = []
+    for line in result["stdout"].strip().splitlines():
+        pool = line.strip()
+        if not pool:
+            continue
+        pools.append(pool)
+        # Get sub-datasets one level deep
+        ds_result = run_command(host, f"zfs list -H -o name -r -d 1 {pool}")
+        if ds_result["success"]:
+            for ds_line in ds_result["stdout"].strip().splitlines():
+                ds = ds_line.strip()
+                if ds and ds != pool:
+                    datasets.append(ds)
+    return {"pools": pools, "datasets": datasets}
 
 
 def diff_snapshot(host, snapshot1, snapshot2=None):
-    # zfs diff only works on filesystem datasets, not on zvols (volumes).
     ds_name = snapshot1.rsplit("@", 1)[0] if "@" in snapshot1 else snapshot1
+    snap_short = snapshot1.rsplit("@", 1)[1] if "@" in snapshot1 else ""
     type_check = run_command(host, f"zfs get -H -o value type {ds_name}")
     ds_type = type_check["stdout"].strip() if type_check["success"] else ""
-    if ds_type == "volume":
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": f"'{ds_name}' is a zvol (volume). 'zfs diff' only works on filesystem datasets.\n\nUse 'Rollback' instead to restore the volume to this snapshot state.",
-        }
 
-    # zfs diff also requires the dataset to be mounted
+    if ds_type == "volume":
+        # zvol: use zfs send -nv and property comparisons
+        output = f"=== Snapshot Info: {snapshot1} ===\n"
+        # Get snapshot properties
+        props = run_command(host, f"zfs get -H -o property,value used,referenced,written,creation {snapshot1}")
+        if props["success"]:
+            output += props["stdout"] + "\n"
+
+        # Find previous snapshot for incremental comparison
+        all_snaps = run_command(host, f"zfs list -t snapshot -H -o name,used,refer,creation -S creation -r {ds_name}")
+        snap_list = []
+        if all_snaps["success"]:
+            for sline in all_snaps["stdout"].strip().splitlines():
+                sparts = sline.split("\t", 3)
+                if len(sparts) >= 4:
+                    snap_list.append({"name": sparts[0], "used": sparts[1], "refer": sparts[2], "creation": sparts[3]})
+
+        # Find current snapshot index and previous
+        prev_snap = None
+        curr_idx = -1
+        for i, s in enumerate(snap_list):
+            if s["name"] == snapshot1:
+                curr_idx = i
+                if i + 1 < len(snap_list):
+                    prev_snap = snap_list[i + 1]["name"]  # list is newest-first
+                break
+
+        # Incremental send estimate (shows actual data change)
+        if prev_snap:
+            incr = run_command(host, f"zfs send -nvi {prev_snap} {snapshot1} 2>&1")
+            if incr["success"] and incr["stdout"].strip():
+                output += f"=== Data Changed (incremental from previous snapshot) ===\n{incr['stdout']}\n"
+            else:
+                output += f"=== Data Changed ===\n(Could not estimate incremental size)\n\n"
+        else:
+            # First snapshot - show full send size
+            send_est = run_command(host, f"zfs send -nv {snapshot1} 2>&1")
+            if send_est["success"] and send_est["stdout"].strip():
+                output += f"=== Full Send Size (first snapshot) ===\n{send_est['stdout']}\n"
+
+        # Show snapshot overview table
+        if snap_list:
+            output += f"=== All Snapshots ({len(snap_list)} total) ===\n"
+            output += f"{'Name':<60} {'Used':>8} {'Refer':>8}  Created\n"
+            output += "-" * 110 + "\n"
+            for s in snap_list:
+                marker = " <-- current" if s["name"] == snapshot1 else ""
+                short_name = s["name"].rsplit("@", 1)[-1] if "@" in s["name"] else s["name"]
+                output += f"{short_name:<60} {s['used']:>8} {s['refer']:>8}  {s['creation']}{marker}\n"
+
+        return {"success": True, "stdout": output, "stderr": "", "is_zvol": True}
+
+    # Filesystem: use zfs diff
     mount_check = run_command(host, f"zfs get -H -o value mounted {ds_name}")
     mounted = mount_check["stdout"].strip() if mount_check["success"] else ""
     if mounted == "no":
@@ -240,9 +321,9 @@ def diff_snapshot(host, snapshot1, snapshot2=None):
     else:
         cmd = f"zfs diff {snapshot1}"
     result = run_command(host, cmd)
-    # Provide helpful message on empty diff
     if result["success"] and not result["stdout"].strip():
         result["stdout"] = "(No changes since this snapshot)"
+    result["is_zvol"] = False
     return result
 
 
@@ -342,6 +423,124 @@ def get_vm_snapshots(host, pool, vmid, vm_type="qemu"):
                 "creation": parts[3],
             })
     return snapshots
+
+
+# ---------------------------------------------------------------------------
+# File-Level Restore (LXC / filesystem snapshots)
+# ---------------------------------------------------------------------------
+
+RESTORE_MOUNT_BASE = "/tmp/zfs-tool-restore"
+
+
+def snapshot_mount(host, snapshot):
+    """Clone a snapshot and mount it readonly for file browsing."""
+    ds_name = snapshot.rsplit("@", 1)[0] if "@" in snapshot else ""
+    snap_short = snapshot.rsplit("@", 1)[1] if "@" in snapshot else ""
+
+    # Only allow filesystem datasets
+    type_check = run_command(host, f"zfs get -H -o value type {ds_name}")
+    if type_check["success"] and type_check["stdout"].strip() != "filesystem":
+        return {"success": False, "stderr": "File restore only works on filesystem datasets (LXC containers)."}
+
+    clone_name = f"{ds_name}-restore-{snap_short}".replace("/", "-").replace("@", "-")
+    clone_ds = f"{ds_name.split('/')[0]}/restore-{clone_name}"
+    mount_path = f"{RESTORE_MOUNT_BASE}/{clone_name}"
+
+    # Cleanup any previous clone with this name
+    run_command(host, f"zfs destroy {clone_ds} 2>/dev/null")
+
+    # Clone the snapshot
+    clone_result = run_command(host, f"zfs clone -o mountpoint={mount_path} -o readonly=on {snapshot} {clone_ds}")
+    if not clone_result["success"]:
+        return {"success": False, "stderr": clone_result.get("stderr", "Clone failed")}
+
+    return {
+        "success": True,
+        "clone_ds": clone_ds,
+        "mount_path": mount_path,
+        "snapshot": snapshot,
+    }
+
+
+def snapshot_unmount(host, clone_ds):
+    """Destroy a restore clone to clean up."""
+    result = run_command(host, f"zfs destroy {clone_ds}")
+    return result
+
+
+def snapshot_browse(host, mount_path, subpath=""):
+    """List files/directories at a path inside a mounted snapshot."""
+    full_path = f"{mount_path}/{subpath}".rstrip("/")
+    # Sanitize path to prevent escaping
+    if ".." in full_path:
+        return {"success": False, "stderr": "Invalid path"}
+
+    result = run_command(host, f"ls -la --time-style=long-iso '{full_path}' 2>/dev/null")
+    if not result["success"]:
+        return {"success": False, "stderr": result.get("stderr", "Cannot list directory")}
+
+    entries = []
+    for line in result["stdout"].strip().splitlines():
+        if line.startswith("total"):
+            continue
+        parts = line.split(None, 7)
+        if len(parts) >= 8:
+            perms = parts[0]
+            size = parts[4]
+            date = f"{parts[5]} {parts[6]}"
+            name = parts[7]
+            if name in (".", ".."):
+                continue
+            entry_type = "dir" if perms.startswith("d") else ("link" if perms.startswith("l") else "file")
+            entries.append({
+                "name": name,
+                "type": entry_type,
+                "size": size,
+                "date": date,
+                "perms": perms,
+            })
+    return {"success": True, "entries": entries, "path": subpath or "/"}
+
+
+def snapshot_read_file(host, mount_path, file_path):
+    """Read a file from a mounted snapshot (for preview, max 100KB)."""
+    full_path = f"{mount_path}/{file_path}".rstrip("/")
+    if ".." in full_path:
+        return {"success": False, "stderr": "Invalid path"}
+
+    # Check file size first
+    size_check = run_command(host, f"stat -c%s '{full_path}' 2>/dev/null")
+    if size_check["success"]:
+        size = int(size_check["stdout"].strip() or "0")
+        if size > 102400:
+            return {"success": False, "stderr": f"File too large for preview ({size} bytes). Use 'Restore' to download."}
+
+    result = run_command(host, f"cat '{full_path}' 2>/dev/null")
+    return result
+
+
+def snapshot_restore_file(host, mount_path, file_path, dest_path):
+    """Copy a file from the mounted snapshot back to the live filesystem."""
+    src = f"{mount_path}/{file_path}".rstrip("/")
+    if ".." in src or ".." in dest_path:
+        return {"success": False, "stderr": "Invalid path"}
+
+    # Create parent directory if needed
+    run_command(host, f"mkdir -p \"$(dirname '{dest_path}')\"")
+
+    result = run_command(host, f"cp -a '{src}' '{dest_path}'")
+    return result
+
+
+def snapshot_restore_dir(host, mount_path, dir_path, dest_path):
+    """Recursively copy a directory from the mounted snapshot back to the live filesystem."""
+    src = f"{mount_path}/{dir_path}".rstrip("/")
+    if ".." in src or ".." in dest_path:
+        return {"success": False, "stderr": "Invalid path"}
+
+    run_command(host, f"mkdir -p '{dest_path}'")
+    result = run_command(host, f"cp -a '{src}/.' '{dest_path}/'")
+    return result
 
 
 # ---------------------------------------------------------------------------

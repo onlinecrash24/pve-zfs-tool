@@ -774,9 +774,7 @@ function renderTimeline(snapshots) {
             const actions = h("div", { className: "tl-actions" });
             actions.appendChild(h("button", { className: "btn btn-sm btn-warning", onClick: () => rollbackSnap(snap) }, "Rollback"));
             actions.appendChild(h("button", { className: "btn btn-sm", onClick: () => cloneSnap(snap) }, "Clone"));
-            if (!isVolume) {
-                actions.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
-            }
+            actions.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
             content.appendChild(actions);
 
             node.appendChild(content);
@@ -823,9 +821,7 @@ function renderSnapshotTable(snapshots) {
         const bg = h("div", { className: "btn-group" });
         bg.appendChild(h("button", { className: "btn btn-sm btn-warning", onClick: () => rollbackSnap(snap) }, "Rollback"));
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => cloneSnap(snap) }, "Clone"));
-        if (!isVolume) {
-            bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
-        }
+        bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
         actTd.appendChild(bg);
         tr.appendChild(actTd);
         tbody.appendChild(tr);
@@ -876,10 +872,69 @@ async function rollbackSnap(snap) {
 }
 
 async function cloneSnap(snap) {
-    const name = prompt("Clone dataset name:", snap.dataset + "-clone");
-    if (!name) return;
-    const r = await API.post("/api/snapshots/clone", { host: currentHost, snapshot: snap.full_name, clone_name: name });
-    toast(r.success ? "Clone created" : (r.stderr || "Clone failed"), r.success ? "success" : "error");
+    const defaultCloneName = snap.dataset.split("/").pop() + "_" + snap.snapshot + "_CLONE";
+    openModal("Clone Snapshot", '<div class="loading-placeholder"><span class="spinner"></span> Loading targets...</div>');
+    const targets = await API.get(`/api/snapshots/clone-targets?host=${currentHost}`);
+    const body = document.getElementById("modal-body");
+    const footer = document.getElementById("modal-footer");
+    if (!body) return;
+
+    const pools = targets.pools || [];
+    const datasets = targets.datasets || [];
+    const snapPool = snap.full_name.split("/")[0];
+
+    let optionsHtml = pools.map(p => `<option value="${escapeHtml(p)}"${p === snapPool ? " selected" : ""}>${escapeHtml(p)}</option>`).join("");
+    datasets.forEach(ds => {
+        optionsHtml += `<option value="${escapeHtml(ds)}">${escapeHtml(ds)}</option>`;
+    });
+
+    body.innerHTML = `
+        <div class="form-group">
+            <label>Source Snapshot</label>
+            <div style="font-family:monospace;font-size:13px;padding:8px 12px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;">${escapeHtml(snap.full_name)}</div>
+        </div>
+        <div class="form-group">
+            <label>Target Datastore / Pool</label>
+            <select class="form-control" id="clone-target-ds">${optionsHtml}</select>
+        </div>
+        <div class="form-group">
+            <label>Clone Name</label>
+            <input class="form-control" id="clone-name" value="${escapeHtml(defaultCloneName)}">
+            <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">Full path: <span id="clone-full-path">${escapeHtml(snapPool + "/" + defaultCloneName)}</span></div>
+        </div>
+    `;
+
+    const updatePath = () => {
+        const target = document.getElementById("clone-target-ds").value;
+        const name = document.getElementById("clone-name").value;
+        const pathEl = document.getElementById("clone-full-path");
+        if (pathEl) pathEl.textContent = target + "/" + name;
+    };
+    document.getElementById("clone-target-ds").addEventListener("change", updatePath);
+    document.getElementById("clone-name").addEventListener("input", updatePath);
+
+    footer.innerHTML = "";
+    const cancelBtn = h("button", { className: "btn", onClick: () => closeModal() }, "Cancel");
+    const cloneBtn = h("button", { className: "btn btn-primary", onClick: async () => {
+        const target = document.getElementById("clone-target-ds").value;
+        const name = document.getElementById("clone-name").value.trim();
+        if (!name) { toast("Clone name required", "error"); return; }
+        const fullClone = target + "/" + name;
+        cloneBtn.disabled = true;
+        cloneBtn.textContent = "Cloning...";
+        const r = await API.post("/api/snapshots/clone", { host: currentHost, snapshot: snap.full_name, clone_name: fullClone });
+        if (r.success) {
+            toast("Clone created: " + fullClone, "success");
+            closeModal();
+            viewSnapshots();
+        } else {
+            toast(r.stderr || "Clone failed", "error");
+            cloneBtn.disabled = false;
+            cloneBtn.textContent = "Clone";
+        }
+    }}, "Clone");
+    footer.appendChild(cancelBtn);
+    footer.appendChild(cloneBtn);
 }
 
 async function diffSnap(snap) {
@@ -974,12 +1029,14 @@ async function showGuestSnapshots(guest, pools) {
     } else {
         html += '<table><thead><tr><th>Snapshot</th><th>Used</th><th>Refer</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
         for (const s of snaps) {
+            const isLxc = guest.type === "lxc";
             html += `<tr>
                 <td><strong>${escapeHtml(s.snapshot)}</strong><br><span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(s.dataset)}</span></td>
                 <td>${s.used}</td><td>${s.refer}</td><td style="font-size:12px">${escapeHtml(s.creation)}</td>
                 <td>
                     <div class="btn-group">
                         <button class="btn btn-sm btn-warning" onclick="rollbackGuestSnap('${escapeHtml(s.full_name)}')">Rollback</button>
+                        ${isLxc ? `<button class="btn btn-sm btn-success" onclick="openFileRestore('${escapeHtml(s.full_name)}')">Restore Files</button>` : ''}
                     </div>
                 </td>
             </tr>`;
@@ -1018,6 +1075,205 @@ window.destroyGuestSnap = async function(fullName) {
     if (!confirm(`Delete snapshot ${fullName}?`)) return;
     const r = await API.post("/api/snapshots/destroy", { host: currentHost, snapshot: fullName });
     toast(r.success ? "Deleted" : (r.stderr || "Failed"), r.success ? "success" : "error");
+    closeModal();
+};
+
+// ---------------------------------------------------------------------------
+// File-Level Restore (LXC)
+// ---------------------------------------------------------------------------
+let _restoreSession = null; // { clone_ds, mount_path, snapshot }
+
+window.openFileRestore = async function(snapshotFullName) {
+    closeModal();
+    // Mount snapshot
+    toast("Mounting snapshot for file browsing...", "info");
+    const r = await API.post("/api/restore/mount", { host: currentHost, snapshot: snapshotFullName });
+    if (!r.success) {
+        toast(r.stderr || "Mount failed", "error");
+        return;
+    }
+    _restoreSession = {
+        clone_ds: r.clone_ds,
+        mount_path: r.mount_path,
+        snapshot: snapshotFullName,
+    };
+    toast("Snapshot mounted", "success");
+    browseRestorePath("");
+};
+
+async function browseRestorePath(subpath) {
+    if (!_restoreSession) return;
+    const { mount_path, snapshot, clone_ds } = _restoreSession;
+    const snapLabel = snapshot.includes("@") ? snapshot.split("@")[1] : snapshot;
+
+    // Build breadcrumb
+    const pathParts = subpath ? subpath.split("/").filter(Boolean) : [];
+    let breadcrumb = `<span class="restore-crumb" onclick="browseRestorePath('')">/</span>`;
+    let cumulative = "";
+    for (const part of pathParts) {
+        cumulative += (cumulative ? "/" : "") + part;
+        const p = cumulative;
+        breadcrumb += ` / <span class="restore-crumb" onclick="browseRestorePath('${escapeAttr(p)}')">${escapeHtml(part)}</span>`;
+    }
+
+    const modalHtml = `
+        <div style="margin-bottom:12px">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">Snapshot: <strong>${escapeHtml(snapLabel)}</strong></div>
+            <div style="font-size:13px;padding:6px 10px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;font-family:monospace">
+                ${breadcrumb}
+            </div>
+        </div>
+        <div id="restore-file-list">
+            <div class="loading-placeholder"><span class="spinner"></span> Loading...</div>
+        </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:11px;color:var(--text-secondary)">Click folders to navigate. Use Restore to copy files back to the live container.</span>
+            <button class="btn btn-sm btn-danger" onclick="closeFileRestore()">Close &amp; Unmount</button>
+        </div>
+    `;
+
+    openModal(`File Restore`, modalHtml);
+
+    // Fetch directory listing
+    const r = await API.get(`/api/restore/browse?host=${currentHost}&mount_path=${encodeURIComponent(mount_path)}&path=${encodeURIComponent(subpath)}`);
+    const listEl = document.getElementById("restore-file-list");
+    if (!listEl) return;
+
+    if (!r.success) {
+        listEl.innerHTML = `<div style="color:var(--danger)">${escapeHtml(r.stderr || "Failed to list directory")}</div>`;
+        return;
+    }
+
+    if (r.entries.length === 0) {
+        listEl.innerHTML = '<div style="color:var(--text-secondary)">Empty directory</div>';
+        return;
+    }
+
+    // Sort: dirs first, then files
+    const sorted = r.entries.sort((a, b) => {
+        if (a.type === "dir" && b.type !== "dir") return -1;
+        if (a.type !== "dir" && b.type === "dir") return 1;
+        return a.name.localeCompare(b.name);
+    });
+
+    let tableHtml = '<table><thead><tr><th style="width:24px"></th><th>Name</th><th>Size</th><th>Date</th><th>Actions</th></tr></thead><tbody>';
+    // Back link
+    if (subpath) {
+        const parentPath = pathParts.slice(0, -1).join("/");
+        tableHtml += `<tr style="cursor:pointer" onclick="browseRestorePath('${escapeAttr(parentPath)}')">
+            <td style="font-size:16px">&#x1F519;</td><td colspan="3" style="color:var(--accent)">..</td><td></td></tr>`;
+    }
+
+    for (const entry of sorted) {
+        const entryPath = subpath ? `${subpath}/${entry.name}` : entry.name;
+        const icon = entry.type === "dir" ? "&#x1F4C1;" : (entry.type === "link" ? "&#x1F517;" : "&#x1F4C4;");
+        const nameStyle = entry.type === "dir" ? "color:var(--accent);cursor:pointer" : "";
+        const nameClick = entry.type === "dir" ? `onclick="browseRestorePath('${escapeAttr(entryPath)}')"` : "";
+        const sizeDisplay = entry.type === "dir" ? "-" : entry.size;
+
+        let actions = "";
+        if (entry.type === "file") {
+            actions += `<button class="btn btn-sm" onclick="previewRestoreFile('${escapeAttr(entryPath)}')">Preview</button> `;
+            actions += `<button class="btn btn-sm btn-success" onclick="restoreFile('${escapeAttr(entryPath)}')">Restore</button>`;
+        } else if (entry.type === "dir") {
+            actions += `<button class="btn btn-sm btn-success" onclick="restoreDir('${escapeAttr(entryPath)}')">Restore Dir</button>`;
+        }
+
+        tableHtml += `<tr>
+            <td style="font-size:14px">${icon}</td>
+            <td style="${nameStyle}" ${nameClick}>${escapeHtml(entry.name)}</td>
+            <td style="font-size:12px;color:var(--text-secondary)">${sizeDisplay}</td>
+            <td style="font-size:11px;color:var(--text-secondary)">${escapeHtml(entry.date)}</td>
+            <td><div class="btn-group">${actions}</div></td>
+        </tr>`;
+    }
+    tableHtml += '</tbody></table>';
+    listEl.innerHTML = tableHtml;
+}
+
+window.previewRestoreFile = async function(filePath) {
+    if (!_restoreSession) return;
+    const r = await API.get(`/api/restore/preview?host=${currentHost}&mount_path=${encodeURIComponent(_restoreSession.mount_path)}&file=${encodeURIComponent(filePath)}`);
+    const fileName = filePath.split("/").pop();
+    // Open a second-level preview using an alert-style approach since modal is already open
+    const previewDiv = document.getElementById("restore-file-list");
+    if (!previewDiv) return;
+    const prevContent = previewDiv.innerHTML;
+    previewDiv.innerHTML = `
+        <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+            <strong>${escapeHtml(fileName)}</strong>
+            <button class="btn btn-sm" onclick="this.parentElement.parentElement.innerHTML = window._prevRestoreContent">Back</button>
+        </div>
+        <pre class="output" style="max-height:400px">${escapeHtml(r.success ? r.stdout : (r.stderr || "Cannot preview this file"))}</pre>
+    `;
+    window._prevRestoreContent = prevContent;
+};
+
+window.restoreFile = async function(filePath) {
+    if (!_restoreSession) return;
+    // Determine destination: the original path inside the LXC rootfs
+    // The mount_path is a clone of e.g. rpool/data/subvol-100-disk-0 which is the LXC rootfs
+    // The live dataset mountpoint is typically the same structure
+    const ds = _restoreSession.snapshot.split("@")[0];
+    const defaultDest = filePath.startsWith("/") ? filePath : `/${filePath}`;
+    const dest = prompt(`Restore to (path on live container filesystem):`, defaultDest);
+    if (!dest) return;
+
+    // Get original dataset mountpoint
+    const mountInfo = await API.get(`/api/datasets/properties?host=${currentHost}&dataset=${ds}`);
+    let liveMountpoint = "";
+    if (mountInfo.stdout) {
+        const m = mountInfo.stdout.match(/mountpoint\s+(\S+)\s+/);
+        if (m) liveMountpoint = m[1];
+    }
+    const fullDest = liveMountpoint ? `${liveMountpoint}/${dest.replace(/^\//, '')}` : dest;
+
+    if (!confirm(`Restore file:\n${filePath}\n\nTo:\n${fullDest}\n\nThis will overwrite the existing file!`)) return;
+
+    toast("Restoring file...", "info");
+    const r = await API.post("/api/restore/file", {
+        host: currentHost,
+        mount_path: _restoreSession.mount_path,
+        file_path: filePath,
+        dest_path: fullDest,
+    });
+    toast(r.success ? `File restored to ${fullDest}` : (r.stderr || "Restore failed"), r.success ? "success" : "error");
+};
+
+window.restoreDir = async function(dirPath) {
+    if (!_restoreSession) return;
+    const ds = _restoreSession.snapshot.split("@")[0];
+    const defaultDest = dirPath.startsWith("/") ? dirPath : `/${dirPath}`;
+    const dest = prompt(`Restore directory to (path on live container filesystem):`, defaultDest);
+    if (!dest) return;
+
+    const mountInfo = await API.get(`/api/datasets/properties?host=${currentHost}&dataset=${ds}`);
+    let liveMountpoint = "";
+    if (mountInfo.stdout) {
+        const m = mountInfo.stdout.match(/mountpoint\s+(\S+)\s+/);
+        if (m) liveMountpoint = m[1];
+    }
+    const fullDest = liveMountpoint ? `${liveMountpoint}/${dest.replace(/^\//, '')}` : dest;
+
+    if (!confirm(`Restore directory:\n${dirPath}\n\nTo:\n${fullDest}\n\nThis will overwrite existing files!`)) return;
+
+    toast("Restoring directory...", "info");
+    const r = await API.post("/api/restore/directory", {
+        host: currentHost,
+        mount_path: _restoreSession.mount_path,
+        dir_path: dirPath,
+        dest_path: fullDest,
+    });
+    toast(r.success ? `Directory restored to ${fullDest}` : (r.stderr || "Restore failed"), r.success ? "success" : "error");
+};
+
+window.closeFileRestore = async function() {
+    if (_restoreSession) {
+        toast("Unmounting snapshot...", "info");
+        await API.post("/api/restore/unmount", { host: currentHost, clone_ds: _restoreSession.clone_ds });
+        _restoreSession = null;
+        toast("Snapshot unmounted", "success");
+    }
     closeModal();
 };
 

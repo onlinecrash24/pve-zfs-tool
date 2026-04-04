@@ -450,6 +450,18 @@ pre.output {
     flex-wrap: wrap;
 }
 
+/* File Restore Breadcrumbs */
+.restore-crumb {
+    color: var(--accent);
+    cursor: pointer;
+    transition: color 0.15s;
+}
+
+.restore-crumb:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
+}
+
 /* Stat cards */
 .stat-card {
     background: var(--bg-card);
@@ -489,9 +501,9 @@ pre.output {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 10px;
-    width: 500px;
+    width: 700px;
     max-width: 90vw;
-    max-height: 80vh;
+    max-height: 85vh;
     overflow-y: auto;
 }
 
