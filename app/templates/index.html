@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -15,44 +15,52 @@
                 <div class="subtitle">Proxmox VE Management</div>
             </div>
 
-            <nav class="sidebar-nav">
-                <div class="nav-section">Overview</div>
+            <nav class="sidebar-nav" id="sidebar-nav">
+                <div class="nav-section" data-i18n="nav_overview">Overview</div>
                 <div class="nav-item active" data-view="home">
-                    <span class="icon">&#x1F3E0;</span> <span>Home</span>
+                    <span class="icon">&#x1F3E0;</span> <span data-i18n="nav_home">Home</span>
                 </div>
                 <div class="nav-item" data-view="hosts">
-                    <span class="icon">&#x1F5A5;</span> <span>Hosts</span>
+                    <span class="icon">&#x1F5A5;</span> <span data-i18n="nav_hosts">Hosts</span>
                 </div>
 
-                <div class="nav-section">ZFS</div>
+                <div class="nav-section" data-i18n="nav_zfs">ZFS</div>
                 <div class="nav-item" data-view="pools">
-                    <span class="icon">&#x1F4CA;</span> <span>Pools</span>
+                    <span class="icon">&#x1F4CA;</span> <span data-i18n="nav_pools">Pools</span>
                 </div>
                 <div class="nav-item" data-view="datasets">
-                    <span class="icon">&#x1F4C1;</span> <span>Datasets</span>
+                    <span class="icon">&#x1F4C1;</span> <span data-i18n="nav_datasets">Datasets</span>
                 </div>
                 <div class="nav-item" data-view="snapshots">
-                    <span class="icon">&#x1F4F8;</span> <span>Snapshots</span>
+                    <span class="icon">&#x1F4F8;</span> <span data-i18n="nav_snapshots">Snapshots</span>
                 </div>
 
-                <div class="nav-section">Proxmox</div>
+                <div class="nav-section" data-i18n="nav_proxmox">Proxmox</div>
                 <div class="nav-item" data-view="guests">
-                    <span class="icon">&#x1F5A5;</span> <span>VMs & CTs</span>
+                    <span class="icon">&#x1F5A5;</span> <span data-i18n="nav_vms_cts">VMs & CTs</span>
                 </div>
 
-                <div class="nav-section">System</div>
+                <div class="nav-section" data-i18n="nav_system">System</div>
                 <div class="nav-item" data-view="health">
-                    <span class="icon">&#x1FA7A;</span> <span>Health</span>
+                    <span class="icon">&#x1FA7A;</span> <span data-i18n="nav_health">Health</span>
                 </div>
                 <div class="nav-item" data-view="notifications">
-                    <span class="icon">&#x1F514;</span> <span>Notifications</span>
+                    <span class="icon">&#x1F514;</span> <span data-i18n="nav_notifications">Notifications</span>
                 </div>
             </nav>
 
             <div class="host-selector">
-                <label>Active Host</label>
+                <label data-i18n="active_host">Active Host</label>
                 <select id="host-select">
                     <option value="">-- Select Host --</option>
+                </select>
+            </div>
+
+            <div class="host-selector" style="border-top: none; padding-top: 0;">
+                <label data-i18n="language">Language</label>
+                <select id="lang-select">
+                    <option value="en">English</option>
+                    <option value="de">Deutsch</option>
                 </select>
             </div>
         </aside>
@@ -80,6 +88,7 @@
     <!-- Toast -->
     <div class="toast-container" id="toast-container"></div>
 
+    <script src="/static/js/i18n.js"></script>
     <script src="/static/js/app.js"></script>
 </body>
 </html>
