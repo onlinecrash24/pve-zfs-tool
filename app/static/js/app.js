@@ -775,6 +775,9 @@ function renderTimeline(snapshots) {
             actions.appendChild(h("button", { className: "btn btn-sm btn-warning", onClick: () => rollbackSnap(snap) }, "Rollback"));
             actions.appendChild(h("button", { className: "btn btn-sm", onClick: () => cloneSnap(snap) }, "Clone"));
             actions.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
+            if (!isAuto) {
+                actions.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: () => destroySnap(snap) }, "Delete"));
+            }
             content.appendChild(actions);
 
             node.appendChild(content);
@@ -822,6 +825,10 @@ function renderSnapshotTable(snapshots) {
         bg.appendChild(h("button", { className: "btn btn-sm btn-warning", onClick: () => rollbackSnap(snap) }, "Rollback"));
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => cloneSnap(snap) }, "Clone"));
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, "Diff"));
+        const isAutoSnap = snap.snapshot.startsWith("zfs-auto-snap") || snap.snapshot.startsWith("autosnap");
+        if (!isAutoSnap) {
+            bg.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: () => destroySnap(snap) }, "Delete"));
+        }
         actTd.appendChild(bg);
         tr.appendChild(actTd);
         tbody.appendChild(tr);
@@ -1267,14 +1274,8 @@ window.restoreDir = async function(dirPath) {
     toast(r.success ? `Directory restored to ${fullDest}` : (r.stderr || "Restore failed"), r.success ? "success" : "error");
 };
 
-window.closeFileRestore = async function() {
-    if (_restoreSession) {
-        toast("Unmounting snapshot...", "info");
-        await API.post("/api/restore/unmount", { host: currentHost, clone_ds: _restoreSession.clone_ds });
-        _restoreSession = null;
-        toast("Snapshot unmounted", "success");
-    }
-    closeModal();
+window.closeFileRestore = function() {
+    closeModal(); // closeModal handles unmount automatically
 };
 
 // -- Auto-Snapshot ---------------------------------------------------------
@@ -1455,6 +1456,49 @@ async function viewHealth() {
         h("pre", { className: "output" }, events.stdout || events.stderr || "No events"),
     ]));
     container.appendChild(evCard);
+
+    // Restore clones cleanup
+    const restoreClones = await API.get(`/api/restore/clones?host=${currentHost}`);
+    const rcCard = h("div", { className: "card" });
+    const rcHeader = h("div", { className: "card-header" });
+    rcHeader.appendChild(h("span", {}, `Restore Clones (${restoreClones.length || 0} mounted)`));
+    if (restoreClones.length > 0) {
+        rcHeader.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: async () => {
+            if (!confirm(`Destroy all ${restoreClones.length} restore clone(s)?`)) return;
+            const r = await API.post("/api/restore/cleanup", { host: currentHost });
+            if (r.success) {
+                toast(`Cleaned up ${r.destroyed.length} restore clone(s)`, "success");
+            } else {
+                toast(`Errors: ${r.errors.join(", ")}`, "error");
+            }
+            viewHealth();
+        }}, "Cleanup All"));
+    }
+    rcCard.appendChild(rcHeader);
+    const rcBody = h("div", { className: "card-body" });
+    if (restoreClones.length > 0) {
+        const tbl = h("table");
+        const thead = h("thead");
+        const thr = h("tr");
+        ["Dataset", "Mountpoint", "Used", "Created"].forEach(t => thr.appendChild(h("th", {}, t)));
+        thead.appendChild(thr);
+        tbl.appendChild(thead);
+        const tbd = h("tbody");
+        for (const rc of restoreClones) {
+            const tr = h("tr");
+            tr.appendChild(h("td", { style: "font-family:monospace;font-size:12px" }, rc.name));
+            tr.appendChild(h("td", { style: "font-family:monospace;font-size:12px" }, rc.mountpoint));
+            tr.appendChild(h("td", {}, rc.used));
+            tr.appendChild(h("td", { style: "font-size:12px" }, rc.creation));
+            tbd.appendChild(tr);
+        }
+        tbl.appendChild(tbd);
+        rcBody.appendChild(tbl);
+    } else {
+        rcBody.appendChild(h("div", { className: "empty-state" }, "No leftover restore clones found."));
+    }
+    rcCard.appendChild(rcBody);
+    container.appendChild(rcCard);
 
     // SMART check per pool
     const pools = await API.get(`/api/pools?host=${currentHost}`);
@@ -1679,6 +1723,14 @@ function openModal(title, bodyHtml, onConfirm) {
 
 function closeModal() {
     document.getElementById("modal-overlay").classList.remove("active");
+    // Always unmount restore session when modal closes
+    if (_restoreSession) {
+        const session = _restoreSession;
+        _restoreSession = null;
+        API.post("/api/restore/unmount", { host: currentHost, clone_ds: session.clone_ds })
+            .then(() => toast("Restore snapshot unmounted", "success"))
+            .catch(() => {});
+    }
 }
 
 function escapeHtml(s) {

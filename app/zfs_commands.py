@@ -177,7 +177,11 @@ def destroy_snapshot(host, full_name, recursive=False):
     if recursive:
         cmd += " -r"
     cmd += f" {full_name}"
-    return run_command(host, cmd)
+    result = run_command(host, cmd)
+    # If snapshot has dependent clones (e.g. restore clones), retry with -R
+    if not result["success"] and "dependent clones" in result.get("stderr", ""):
+        result = run_command(host, f"zfs destroy -R {full_name}")
+    return result
 
 
 def rollback_snapshot(host, full_name, force=False, destroy_recent=False, stop_guest=False, vmid=None, vm_type=None):
@@ -447,10 +451,10 @@ def snapshot_mount(host, snapshot):
     mount_path = f"{RESTORE_MOUNT_BASE}/{clone_name}"
 
     # Cleanup any previous clone with this name
-    run_command(host, f"zfs destroy {clone_ds} 2>/dev/null")
+    run_command(host, f"zfs destroy -r {clone_ds} 2>/dev/null")
 
-    # Clone the snapshot
-    clone_result = run_command(host, f"zfs clone -o mountpoint={mount_path} -o readonly=on {snapshot} {clone_ds}")
+    # Clone the snapshot (disable auto-snapshot to prevent children)
+    clone_result = run_command(host, f"zfs clone -o mountpoint={mount_path} -o readonly=on -o com.sun:auto-snapshot=false {snapshot} {clone_ds}")
     if not clone_result["success"]:
         return {"success": False, "stderr": clone_result.get("stderr", "Clone failed")}
 
@@ -463,9 +467,40 @@ def snapshot_mount(host, snapshot):
 
 
 def snapshot_unmount(host, clone_ds):
-    """Destroy a restore clone to clean up."""
-    result = run_command(host, f"zfs destroy {clone_ds}")
+    """Destroy a restore clone and all its children (auto-snapshots) to clean up."""
+    result = run_command(host, f"zfs destroy -r {clone_ds}")
     return result
+
+
+def list_restore_clones(host):
+    """List all leftover restore-* datasets."""
+    result = run_command(host, "zfs list -H -o name,mountpoint,used,creation -t filesystem | grep '/restore-'")
+    clones = []
+    if result["success"] and result["stdout"].strip():
+        for line in result["stdout"].strip().splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) >= 4:
+                clones.append({
+                    "name": parts[0],
+                    "mountpoint": parts[1],
+                    "used": parts[2],
+                    "creation": parts[3],
+                })
+    return clones
+
+
+def cleanup_restore_clones(host):
+    """Destroy all leftover restore-* datasets."""
+    clones = list_restore_clones(host)
+    destroyed = []
+    errors = []
+    for clone in clones:
+        r = run_command(host, f"zfs destroy -r {clone['name']}")
+        if r["success"]:
+            destroyed.append(clone["name"])
+        else:
+            errors.append(f"{clone['name']}: {r.get('stderr', 'unknown error')}")
+    return {"destroyed": destroyed, "errors": errors, "success": len(errors) == 0}
 
 
 def snapshot_browse(host, mount_path, subpath=""):
