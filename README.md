@@ -2,8 +2,6 @@
   <img src="app/static/img/logo.png" alt="PVE ZFS Tool" width="500">
 </p>
 
-<h1 align="center">PVE ZFS Tool</h1>
-
 <p align="center">A Docker-based web application for managing ZFS pools, datasets, snapshots, and auto-snapshots across one or more Proxmox VE hosts via SSH.</p>
 
 ## Features
@@ -70,14 +68,14 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/onlinecrash24/pve-zfs-tool.git
-cd pve-zfz-tool
+git clone https://git.myantispam.de/onlinecrash/zfz-tool.git
+cd zfz-tool
 
 # Start the container
 docker compose up -d --build
 
 # Open the web UI
-http://DOCKER-HOST-IP:5000
+# http://DOCKER-HOST-IP:5000
 ```
 
 ## Setup
