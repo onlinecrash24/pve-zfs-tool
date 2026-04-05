@@ -2,7 +2,7 @@
 <p align="center">
   <img src="app/static/img/logo.png" alt="PVE ZFS Tool" width="500">
 </p>
-<p align="center">A Docker-based web application for managing ZFS pools, datasets, snapshots, and auto-snapshots across one or more Proxmox VE hosts via SSH.</p>
+A Docker-based web application for managing ZFS pools, datasets, snapshots, and auto-snapshots across one or more Proxmox VE hosts via SSH.
 
 ## Features
 
