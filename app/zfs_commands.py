@@ -461,6 +461,7 @@ def get_vm_snapshots(host, pool, vmid, vm_type="qemu"):
 
     return snapshots
 
+
 # ---------------------------------------------------------------------------
 # File-Level Restore (LXC / filesystem snapshots)
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ const TRANSLATIONS = {
         select_host_first: "Please select a host first",
 
         // Home
-        home_title: "ZFS Tool for Proxmox VE",
+        home_title: "PVE ZFS Tool",
         home_subtitle: "Manage ZFS pools, snapshots, and VM/CT rollbacks across your Proxmox hosts via SSH.",
         ssh_public_key: "SSH Public Key",
         copy: "Copy",
@@ -321,7 +321,7 @@ const TRANSLATIONS = {
         select_host_first: "Bitte zuerst einen Host ausw\u00e4hlen",
 
         // Home
-        home_title: "ZFS Tool f\u00fcr Proxmox VE",
+        home_title: "PVE ZFS Tool",
         home_subtitle: "Verwalte ZFS-Pools, Snapshots und VM/CT-Rollbacks auf deinen Proxmox-Hosts via SSH.",
         ssh_public_key: "SSH Public Key",
         copy: "Kopieren",
