@@ -516,7 +516,7 @@ def api_smart():
     host, err, code = _require_host()
     if err:
         return err, code
-    pool = request.args.get("pool", "")
+    pool = request.args.get("pool", "") or None
     return jsonify(get_smart_status(host, pool))
 
 

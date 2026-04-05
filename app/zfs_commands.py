@@ -639,14 +639,111 @@ def get_zfs_events(host, limit=30):
     return result
 
 
-def get_smart_status(host, pool_name):
-    """Get SMART status of all disks in a pool."""
-    vdevs = run_command(host, f"zpool status {pool_name} | grep -oP '/dev/\\S+'")
-    if not vdevs["success"]:
-        return {"success": False, "stderr": "Could not detect disks"}
-    disks = vdevs["stdout"].strip().splitlines()
-    results = {}
-    for disk in disks:
-        smart = run_command(host, f"smartctl -H {disk} 2>/dev/null | grep -i 'overall-health\\|result'")
-        results[disk] = smart.get("stdout", "").strip()
-    return {"success": True, "disks": results}
+def get_smart_status(host, pool_name=None):
+    """Get SMART status of all disks across all pools, grouped by pool."""
+    import re
+
+    # Step 1: Get pool names to exclude them from disk list
+    pool_list_result = run_command(host, "zpool list -H -o name")
+    pool_names = set()
+    if pool_list_result["success"]:
+        pool_names = {p.strip() for p in pool_list_result["stdout"].strip().splitlines() if p.strip()}
+
+    # Step 2: Parse zpool status to find disks per pool
+    if pool_name:
+        status_cmd = f"zpool status {pool_name}"
+    else:
+        status_cmd = "zpool status"
+    status = run_command(host, status_cmd)
+    if not status["success"]:
+        return {"success": False, "stderr": status.get("stderr", "Could not get pool status")}
+
+    # Skip patterns: vdev types, headers, metadata lines
+    skip_patterns = re.compile(
+        r'^(mirror|raidz[123]?|log|cache|spare|special|dedup|NAME|state:|'
+        r'status:|action:|scan:|config:|errors:|pool:|see:)',
+        re.IGNORECASE
+    )
+    states = {"ONLINE", "DEGRADED", "FAULTED", "UNAVAIL", "OFFLINE", "REMOVED", "AVAIL", "INUSE"}
+
+    # Parse: track current pool, collect disks per pool
+    pools_disks = {}  # {pool_name: [disk_id, ...]}
+    current_pool = None
+    for line in status["stdout"].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0]
+
+        # Detect pool line (pool name at minimal indentation with ONLINE state)
+        if name in pool_names and parts[1] in states:
+            current_pool = name
+            if current_pool not in pools_disks:
+                pools_disks[current_pool] = []
+            continue
+
+        # Skip headers, vdev labels (mirror-0, raidz1-0, logs, cache, etc.)
+        if skip_patterns.match(name):
+            continue
+        # Also skip mirror-N, raidz-N style entries
+        if re.match(r'^(mirror|raidz[123]?|log|cache|spare|special|dedup)-\d+$', name, re.IGNORECASE):
+            continue
+
+        # Must have a valid state column
+        if parts[1] in states and current_pool:
+            pools_disks[current_pool].append(name)
+
+    if not pools_disks or all(len(v) == 0 for v in pools_disks.values()):
+        return {"success": False, "stderr": "No disks found in pool status output"}
+
+    # Step 3: Resolve disks and query SMART, grouped by pool
+    result_pools = {}  # {pool_name: [{disk, dev, status}, ...]}
+    seen_base_disks = {}  # base_disk -> smart result (cache to avoid duplicate queries)
+
+    for pname, disk_ids in pools_disks.items():
+        pool_disks = []
+        for disk_id in disk_ids:
+            # Resolve to /dev/ path
+            if disk_id.startswith("/dev/"):
+                dev_path = disk_id
+            else:
+                resolve = run_command(host, f"readlink -f /dev/disk/by-id/{disk_id} 2>/dev/null")
+                if resolve["success"] and resolve["stdout"].strip().startswith("/dev/"):
+                    dev_path = resolve["stdout"].strip()
+                else:
+                    dev_path = f"/dev/{disk_id}"
+
+            # Strip partition to get base disk
+            strip = run_command(host, f"lsblk -no PKNAME {dev_path} 2>/dev/null | head -1")
+            if strip["success"] and strip["stdout"].strip():
+                base_disk = f"/dev/{strip['stdout'].strip()}"
+            else:
+                base = re.sub(r'p?\d+$', '', dev_path)
+                base_disk = base if base != dev_path or not dev_path[-1].isdigit() else dev_path
+
+            # Query SMART (cached per base disk)
+            if base_disk not in seen_base_disks:
+                smart = run_command(host, f"smartctl -H {base_disk} 2>&1 | grep -iE 'overall-health|result|PASSED|FAILED'")
+                health_line = smart.get("stdout", "").strip()
+                if not health_line:
+                    smart2 = run_command(host, f"smartctl -H {base_disk} 2>&1")
+                    out = smart2.get("stdout", "")
+                    if "PASSED" in out:
+                        health_line = "PASSED"
+                    elif "FAILED" in out:
+                        health_line = "FAILED"
+                    else:
+                        health_line = "Unknown"
+                seen_base_disks[base_disk] = health_line
+
+            pool_disks.append({
+                "id": disk_id,
+                "dev": base_disk,
+                "status": seen_base_disks[base_disk],
+            })
+        result_pools[pname] = pool_disks
+
+    return {"success": True, "pools": result_pools}

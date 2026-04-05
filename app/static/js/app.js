@@ -1433,6 +1433,33 @@ async function viewHealth() {
     arcCard.appendChild(arcBody);
     container.appendChild(arcCard);
 
+    // SMART status (all disks across all pools, grouped by pool)
+    const smart = await API.get(`/api/health/smart?host=${currentHost}`);
+    const smartCard = h("div", { className: "card" });
+    smartCard.appendChild(h("div", { className: "card-header" }, "SMART Status"));
+    const smartBody = h("div", { className: "card-body" });
+    if (smart.pools && Object.keys(smart.pools).length > 0) {
+        let first = true;
+        for (const [poolName, disks] of Object.entries(smart.pools)) {
+            smartBody.appendChild(h("div", { style: `font-weight:600;margin-bottom:8px;font-size:14px${first ? "" : ";margin-top:16px;padding-top:12px;border-top:1px solid var(--border)"}` }, `Pool: ${poolName}`));
+            first = false;
+            for (const disk of disks) {
+                const ok = disk.status.toLowerCase().includes("passed");
+                const failed = disk.status.toLowerCase().includes("failed");
+                const badgeCls = ok ? "badge-online" : failed ? "badge-offline" : "badge-stopped";
+                smartBody.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px;padding-left:12px" }, [
+                    h("code", { style: "font-size:12px" }, disk.dev),
+                    h("span", { style: "font-size:11px;color:var(--text-secondary)" }, `(${disk.id})`),
+                    h("span", { className: `badge ${badgeCls}` }, disk.status || t("unknown")),
+                ]));
+            }
+        }
+    } else {
+        smartBody.appendChild(h("p", { style: "color:var(--text-secondary)" }, smart.stderr || t("no_smart")));
+    }
+    smartCard.appendChild(smartBody);
+    container.appendChild(smartCard);
+
     // Events
     const evCard = h("div", { className: "card" });
     evCard.appendChild(h("div", { className: "card-header" }, t("recent_events")));
@@ -1483,28 +1510,6 @@ async function viewHealth() {
     }
     rcCard.appendChild(rcBody);
     container.appendChild(rcCard);
-
-    // SMART check per pool
-    const pools = await API.get(`/api/pools?host=${currentHost}`);
-    for (const pool of pools) {
-        const smart = await API.get(`/api/health/smart?host=${currentHost}&pool=${pool.name}`);
-        const smartCard = h("div", { className: "card" });
-        smartCard.appendChild(h("div", { className: "card-header" }, t("smart_status", pool.name)));
-        const smartBody = h("div", { className: "card-body" });
-        if (smart.disks) {
-            for (const [disk, status] of Object.entries(smart.disks)) {
-                const ok = status.toLowerCase().includes("passed") || status.toLowerCase().includes("ok");
-                smartBody.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" }, [
-                    h("code", {}, disk),
-                    h("span", { className: `badge ${ok ? "badge-online" : "badge-offline"}` }, status || t("unknown")),
-                ]));
-            }
-        } else {
-            smartBody.appendChild(h("p", { style: "color:var(--text-secondary)" }, smart.stderr || t("no_smart")));
-        }
-        smartCard.appendChild(smartBody);
-        container.appendChild(smartCard);
-    }
 
     setContent(container);
 }
