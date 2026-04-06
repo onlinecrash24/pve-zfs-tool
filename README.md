@@ -8,7 +8,7 @@
 
 ### ZFS Pool Management
 - **Pool Overview** -- Status, IO statistics, health, fragmentation, dedup ratio
-- **Pool Scrub** -- Start scrubs directly from the UI
+- **Pool Scrub** -- Start scrubs directly from the UI with automatic completion notification
 - **Pool Upgrade** -- Automatically detects if a feature upgrade is available (green button), with confirmation before upgrading
 - **Pool History** -- View recent pool activity
 
@@ -41,13 +41,15 @@
 ### Health & Monitoring
 - **ARC Statistics** -- Adaptive Replacement Cache hit/miss rates and memory usage
 - **ZFS Events** -- Recent ZFS kernel events
-- **SMART Status** -- Disk health for all drives in each pool
+- **SMART Status** -- Disk health for all drives in each pool (resolved via `/dev/disk/by-id/`)
 - **Restore Clone Cleanup** -- View and destroy leftover restore-mount datasets with one-click cleanup
 
 ### Notifications
 - **Telegram** -- Receive notifications via Telegram bot
 - **Gotify** -- Receive notifications via self-hosted Gotify server
-- **Test Notifications** -- Send test messages to verify configuration
+- **Matrix** -- Receive notifications via Matrix room (Client-Server API)
+- **Scrub Monitor** -- Background thread detects scrub completion and sends notification automatically
+- **Test Notifications** -- Send test messages per channel to verify configuration
 - **Configurable Events** -- Enable/disable notifications per event type:
   - Scrub started/finished
   - Snapshot created/deleted
@@ -57,6 +59,11 @@
   - Health warnings
   - Host offline
   - File restore actions
+
+### Authentication & i18n
+- **Login** -- Session-based authentication, credentials configurable via environment variables
+- **Language Switch** -- English and German with instant UI re-render, persisted in localStorage
+- **Session Management** -- Automatic redirect to login on session expiry (401 handling)
 
 ### Multi-Host SSH
 - **SSH Key Auto-Generation** -- Ed25519 key pair generated on first start
@@ -76,19 +83,21 @@ docker compose up -d --build
 
 # Open the web UI
 http://DOCKER-HOST-IP:5000
+Default login: admin / password
 ```
 
 ## Setup
 
 1. **Start the container** -- The SSH key pair is generated automatically on first start.
-2. **Copy the public key** -- The public key is displayed on the home page. Copy it.
-3. **Add to Proxmox hosts** -- Paste the key into `~/.ssh/authorized_keys` on each Proxmox host:
+2. **Login** -- Open the web UI and log in with the default credentials (`admin` / `password`). Change them in `docker-compose.yml`.
+3. **Copy the public key** -- The public key is displayed on the home page. Copy it.
+4. **Add to Proxmox hosts** -- Paste the key into `~/.ssh/authorized_keys` on each Proxmox host:
    ```bash
    echo "ssh-ed25519 AAAA... zfs-tool@docker" >> /root/.ssh/authorized_keys
    ```
-4. **Add hosts in the UI** -- Go to "Hosts", add name, IP, port, and user.
-5. **Test connection** -- Click "Test" to verify SSH connectivity.
-6. **Manage ZFS** -- Select a host from the dropdown and explore pools, snapshots, etc.
+5. **Add hosts in the UI** -- Go to "Hosts", add name, IP, port, and user.
+6. **Test connection** -- Click "Test" to verify SSH connectivity.
+7. **Manage ZFS** -- Select a host from the dropdown and explore pools, snapshots, etc.
 
 ## Notifications Setup
 
@@ -105,6 +114,13 @@ http://DOCKER-HOST-IP:5000
 3. Enter the server URL and token in the Notifications settings
 4. Click "Send Test" to verify
 
+### Matrix
+1. Get your homeserver URL (e.g. `https://matrix.org`)
+2. Get an access token from Element: Settings → Help & About → Access Token
+3. Get the room ID (e.g. `!abc123:matrix.org`) from room settings in Element
+4. Enter homeserver URL, access token, and room ID in the Notifications settings
+5. Click "Send Test" to verify
+
 ## Configuration
 
 Environment variables in `docker-compose.yml`:
@@ -112,6 +128,8 @@ Environment variables in `docker-compose.yml`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SECRET_KEY` | `change-me-in-production` | Flask session secret key |
+| `ADMIN_USER` | `admin` | Login username |
+| `ADMIN_PASSWORD` | `password` | Login password |
 
 Persistent volumes:
 
@@ -138,12 +156,14 @@ zfs-tool/
     ├── main.py              # Flask API routes
     ├── ssh_manager.py       # SSH connection & host management
     ├── zfs_commands.py      # ZFS command wrappers via SSH
-    ├── notifications.py     # Telegram & Gotify notifications
+    ├── notifications.py     # Telegram, Gotify & Matrix notifications
     ├── templates/
-    │   └── index.html       # Single-page application
+    │   ├── index.html       # Single-page application
+    │   └── login.html       # Login page
     └── static/
         ├── css/style.css    # Dark theme UI
-        └── js/app.js        # Frontend logic
+        ├── js/app.js        # Frontend logic
+        └── js/i18n.js       # EN/DE translations
 ```
 
 ## License
