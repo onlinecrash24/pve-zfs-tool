@@ -3,9 +3,13 @@
 // ---------------------------------------------------------------------------
 
 const API = {
+    async _handle(r) {
+        if (r.status === 401) { window.location.href = "/login"; throw new Error("Not authenticated"); }
+        return r.json();
+    },
     async get(url) {
         const r = await fetch(url);
-        return r.json();
+        return this._handle(r);
     },
     async post(url, data) {
         const r = await fetch(url, {
@@ -13,7 +17,7 @@ const API = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(data),
         });
-        return r.json();
+        return this._handle(r);
     },
     async del(url, data) {
         const r = await fetch(url, {
@@ -21,7 +25,7 @@ const API = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(data),
         });
-        return r.json();
+        return this._handle(r);
     },
 };
 
@@ -1605,6 +1609,46 @@ async function viewNotifications() {
     gtCard.appendChild(gtBody);
     container.appendChild(gtCard);
 
+    // --- Matrix Card ---
+    const mxCard = h("div", { className: "card" });
+    mxCard.appendChild(h("div", { className: "card-header" }, [
+        h("span", {}, t("matrix")),
+        h("span", {
+            className: `badge ${config.matrix?.enabled ? "badge-online" : "badge-offline"}`,
+        }, config.matrix?.enabled ? t("enabled") : t("disabled")),
+    ]));
+    const mxBody = h("div", { className: "card-body" });
+    mxBody.innerHTML = `
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="mx-enabled" ${config.matrix?.enabled ? "checked" : ""}>
+                ${escapeHtml(t("enable_matrix"))}
+            </label>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>${escapeHtml(t("homeserver"))}</label>
+                <input class="form-control" id="mx-homeserver" placeholder="https://matrix.org" value="${escapeAttr(config.matrix?.homeserver || "")}">
+            </div>
+            <div class="form-group">
+                <label>${escapeHtml(t("access_token_label"))}</label>
+                <input class="form-control" id="mx-token" placeholder="syt_..." value="${escapeAttr(config.matrix?.access_token || "")}">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>${escapeHtml(t("room_id"))}</label>
+            <input class="form-control" id="mx-room" placeholder="!abc123:matrix.org" value="${escapeAttr(config.matrix?.room_id || "")}">
+        </div>
+        <div class="btn-group" style="margin-top:8px">
+            <button class="btn btn-sm btn-success" id="mx-test-btn">${escapeHtml(t("send_test"))}</button>
+        </div>
+        <p style="margin-top:10px;font-size:12px;color:var(--text-secondary)">
+            ${t("mx_help")}
+        </p>
+    `;
+    mxCard.appendChild(mxBody);
+    container.appendChild(mxCard);
+
     // --- Event Configuration ---
     const evCard = h("div", { className: "card" });
     evCard.appendChild(h("div", { className: "card-header" }, t("event_config")));
@@ -1664,6 +1708,16 @@ async function viewNotifications() {
             r.success ? "success" : "error");
     });
 
+    document.getElementById("mx-test-btn").addEventListener("click", async () => {
+        const homeserver = document.getElementById("mx-homeserver").value.trim();
+        const accessToken = document.getElementById("mx-token").value.trim();
+        const roomId = document.getElementById("mx-room").value.trim();
+        if (!homeserver || !accessToken || !roomId) { toast(t("mx_fields_required"), "error"); return; }
+        const r = await API.post("/api/notifications/test/matrix", { homeserver, access_token: accessToken, room_id: roomId });
+        toast(r.success ? t("mx_test_sent") : t("mx_failed", r.detail || t("error")),
+            r.success ? "success" : "error");
+    });
+
     document.getElementById("notify-save-btn").addEventListener("click", async () => {
         const events = {};
         document.querySelectorAll(".ev-checkbox").forEach(cb => {
@@ -1679,6 +1733,12 @@ async function viewNotifications() {
                 enabled: document.getElementById("gt-enabled").checked,
                 url: document.getElementById("gt-url").value.trim(),
                 token: document.getElementById("gt-token").value.trim(),
+            },
+            matrix: {
+                enabled: document.getElementById("mx-enabled").checked,
+                homeserver: document.getElementById("mx-homeserver").value.trim(),
+                access_token: document.getElementById("mx-token").value.trim(),
+                room_id: document.getElementById("mx-room").value.trim(),
             },
             events,
         };
@@ -1771,6 +1831,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     document.getElementById("modal-overlay").addEventListener("click", (e) => {
         if (e.target === e.currentTarget) closeModal();
+    });
+
+    // Logout button
+    document.getElementById("logout-btn").addEventListener("click", async () => {
+        if (!confirm(t("logout_confirm"))) return;
+        await API.post("/api/logout", {});
+        window.location.href = "/login";
     });
 
     navigate("home");
