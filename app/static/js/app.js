@@ -199,7 +199,7 @@ async function viewHome() {
     featureCard.appendChild(h("div", { className: "card-header" }, t("features")));
     const featureBody = h("div", { className: "card-body" });
     featureBody.innerHTML = `
-        <div class="grid grid-2" style="gap:20px">
+        <div class="grid grid-3" style="gap:20px">
             <div>
                 <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_pools_title"))}</h4>
                 <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
@@ -232,7 +232,22 @@ async function viewHome() {
                     <li>${escapeHtml(t("feat_health_1"))}</li>
                     <li>${escapeHtml(t("feat_health_2"))}</li>
                     <li>${escapeHtml(t("feat_health_3"))}</li>
-                    <li>${escapeHtml(t("feat_health_4"))}</li>
+                </ul>
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_notify_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_notify_1"))}</li>
+                    <li>${escapeHtml(t("feat_notify_2"))}</li>
+                    <li>${escapeHtml(t("feat_notify_3"))}</li>
+                </ul>
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_auth_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_auth_1"))}</li>
+                    <li>${escapeHtml(t("feat_auth_2"))}</li>
+                    <li>${escapeHtml(t("feat_auth_3"))}</li>
                 </ul>
             </div>
         </div>
