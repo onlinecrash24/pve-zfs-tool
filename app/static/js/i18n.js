@@ -274,6 +274,21 @@ const TRANSLATIONS = {
         url_token_required: "Server URL and Token required",
         saved: "Saved",
 
+        // Matrix
+        matrix: "Matrix",
+        enable_matrix: "Enable Matrix notifications",
+        homeserver: "Homeserver URL",
+        access_token_label: "Access Token",
+        room_id: "Room ID",
+        mx_help: 'Enter your Matrix homeserver URL (e.g. <code>https://matrix.org</code>), an access token, and the room ID (e.g. <code>!abc123:matrix.org</code>). You can get an access token from Element: Settings > Help & About > Access Token.',
+        mx_test_sent: "Matrix test sent!",
+        mx_failed: "Matrix failed: {0}",
+        mx_fields_required: "Homeserver, Access Token, and Room ID required",
+
+        // Logout
+        logout: "Logout",
+        logout_confirm: "Are you sure you want to logout?",
+
         // Events
         ev_scrub_started: "Scrub Started",
         ev_scrub_finished: "Scrub Finished",
@@ -556,6 +571,21 @@ const TRANSLATIONS = {
         token_chatid_required: "Bot-Token und Chat-ID erforderlich",
         url_token_required: "Server-URL und Token erforderlich",
         saved: "Gespeichert",
+
+        // Matrix
+        matrix: "Matrix",
+        enable_matrix: "Matrix-Benachrichtigungen aktivieren",
+        homeserver: "Homeserver-URL",
+        access_token_label: "Access-Token",
+        room_id: "Raum-ID",
+        mx_help: 'Gib deine Matrix-Homeserver-URL ein (z.B. <code>https://matrix.org</code>), einen Access-Token und die Raum-ID (z.B. <code>!abc123:matrix.org</code>). Den Access-Token findest du in Element: Einstellungen > Hilfe & \u00dcber > Access-Token.',
+        mx_test_sent: "Matrix-Test gesendet!",
+        mx_failed: "Matrix fehlgeschlagen: {0}",
+        mx_fields_required: "Homeserver, Access-Token und Raum-ID erforderlich",
+
+        // Logout
+        logout: "Abmelden",
+        logout_confirm: "M\u00f6chtest du dich wirklich abmelden?",
 
         // Events
         ev_scrub_started: "Scrub gestartet",

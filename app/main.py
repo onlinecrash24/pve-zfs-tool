@@ -1,6 +1,7 @@
 import os
 import time
-from flask import Flask, render_template, request, jsonify
+import functools
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 
 from app.ssh_manager import (
     load_hosts, add_host, remove_host, test_connection, get_public_key,
@@ -22,11 +23,65 @@ from app.zfs_commands import (
 from app.notifications import (
     load_config as load_notify_config,
     save_config as save_notify_config,
-    send_notification, test_telegram, test_gotify,
+    send_notification, test_telegram, test_gotify, test_matrix,
 )
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-me")
+
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "password")
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+def login_required(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("authenticated"):
+            # API requests get 401, page requests get redirect
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Not authenticated"}), 401
+            return redirect(url_for("login_page"))
+        return f(*args, **kwargs)
+    return wrapper
+
+
+@app.before_request
+def check_auth():
+    # Allow login page, login API, and static files without auth
+    allowed = ("/login", "/api/login", "/static/")
+    if any(request.path.startswith(p) for p in allowed):
+        return
+    if not session.get("authenticated"):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Not authenticated"}), 401
+        return redirect(url_for("login_page"))
+
+
+@app.route("/login")
+def login_page():
+    return render_template("login.html")
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.json or {}
+    username = data.get("username", "")
+    password = data.get("password", "")
+    if username == ADMIN_USER and password == ADMIN_PASSWORD:
+        session["authenticated"] = True
+        session.permanent = True
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Invalid credentials"}), 401
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"success": True})
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +602,17 @@ def api_test_telegram():
 def api_test_gotify():
     data = request.json
     result = test_gotify(data.get("url", ""), data.get("token", ""))
+    return jsonify(result)
+
+
+@app.route("/api/notifications/test/matrix", methods=["POST"])
+def api_test_matrix():
+    data = request.json
+    result = test_matrix(
+        data.get("homeserver", ""),
+        data.get("access_token", ""),
+        data.get("room_id", ""),
+    )
     return jsonify(result)
 
 
