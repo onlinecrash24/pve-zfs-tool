@@ -68,8 +68,8 @@
 
 ```bash
 # Clone the repository
-git clone https://git.myantispam.de/onlinecrash/zfz-tool.git
-cd zfz-tool
+git clone https://github.com/onlinecrash24/pve-zfs-tool.git
+cd pve-zfs-tool
 
 # Start the container
 docker compose up -d --build
