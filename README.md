@@ -73,17 +73,48 @@
 
 ## Quick Start
 
+### Option A – Pre-built image from ghcr.io (recommended)
+
+Create a `docker-compose.yml`:
+
+```yaml
+services:
+  pve-zfs-tool:
+    image: ghcr.io/onlinecrash24/pve-zfs-tool:latest
+    ports:
+      - "5000:5000"
+    volumes:
+      - ssh-keys:/root/.ssh
+      - zfs-data:/app/data
+    environment:
+      - SECRET_KEY=change-me-in-production
+      - ADMIN_USER=admin
+      - ADMIN_PASSWORD=password
+    restart: unless-stopped
+
+volumes:
+  ssh-keys:
+  zfs-data:
+```
+
 ```bash
-# Clone the repository
+docker compose up -d
+
+# Open the web UI
+# http://DOCKER-HOST-IP:5000
+# Default login: admin / password
+```
+
+### Option B – Build from source
+
+```bash
 git clone https://github.com/onlinecrash24/pve-zfs-tool.git
 cd pve-zfs-tool
-
-# Start the container
 docker compose up -d --build
 
 # Open the web UI
-http://DOCKER-HOST-IP:5000
-Default login: admin / password
+# http://DOCKER-HOST-IP:5000
+# Default login: admin / password
 ```
 
 ## Setup
