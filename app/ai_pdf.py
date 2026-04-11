@@ -119,6 +119,7 @@ def _render_markdown(pdf, content):
         if in_code:
             pdf.set_font(pdf._fn_mono, "", 8)
             pdf.set_fill_color(235, 235, 235)
+            pdf.set_x(pdf.l_margin)
             pdf.multi_cell(0, 4.5, pdf._s(line), fill=True)
             i += 1
             continue
@@ -148,10 +149,11 @@ def _render_markdown(pdf, content):
                     if next_s.startswith("|") and re.match(r'^\|[\s\-:]+(\|[\s\-:]+)+\|$', next_s):
                         is_header = True
                 pdf._f("B" if is_header else "", 8)
+                pdf.set_x(pdf.l_margin)  # Reset x to left margin
                 for cell_text in cells:
                     safe_text = pdf._s(cell_text)
-                    # Truncate if too long for cell
-                    pdf.cell(col_w, 5.5, safe_text[:int(col_w / 2)], border=1)
+                    max_chars = max(1, int(col_w / 2))
+                    pdf.cell(col_w, 5.5, safe_text[:max_chars], border=1)
                 pdf.ln()
             i += 1
             continue
@@ -182,9 +184,10 @@ def _render_markdown(pdf, content):
         if stripped.startswith("- ") or stripped.startswith("* "):
             pdf._f("", 9)
             text = stripped[2:]
+            pdf.set_x(pdf.l_margin)
             pdf.cell(8, 5, pdf._s("  -"))
             x = pdf.get_x()
-            w = pdf.w - x - pdf.r_margin
+            w = max(10, pdf.w - x - pdf.r_margin)
             pdf.multi_cell(w, 5, pdf._s(_strip_md(text)))
             i += 1
             continue
@@ -195,15 +198,17 @@ def _render_markdown(pdf, content):
             pdf._f("", 9)
             num = m.group(1)
             text = m.group(2)
+            pdf.set_x(pdf.l_margin)
             pdf.cell(10, 5, pdf._s(f"  {num}."))
             x = pdf.get_x()
-            w = pdf.w - x - pdf.r_margin
+            w = max(10, pdf.w - x - pdf.r_margin)
             pdf.multi_cell(w, 5, pdf._s(_strip_md(text)))
             i += 1
             continue
 
         # Normal paragraph – use multi_cell for automatic wrapping
         pdf._f("", 9)
+        pdf.set_x(pdf.l_margin)
         pdf.multi_cell(0, 5, pdf._s(_strip_md(stripped)))
         pdf.ln(1)
         i += 1
