@@ -67,7 +67,9 @@
 - **Actionable Recommendations** -- Prioritized suggestions for scrubs, cleanup, capacity planning
 - **Interactive Chat** -- Ask follow-up questions about your ZFS data
 - **Notification Integration** -- Optionally send reports via Telegram, Gotify, or Matrix
-- **Bilingual Reports** -- Generate reports in English or German
+- **Bilingual Reports** -- Reports follow the global UI language (English/German)
+- **Customizable System Prompt** -- Edit the AI prompt to reduce false positives for your environment
+- **PDF Export** -- Download reports as PDF
 
 ### Authentication & i18n
 - **Login** -- Session-based authentication, credentials configurable via environment variables
@@ -82,18 +84,46 @@
 
 ## Quick Start
 
+### Option 1: Docker Compose with GHCR Image (recommended)
+
+Create a `docker-compose.yml`:
+
+```yaml
+services:
+  zfs-tool:
+    image: ghcr.io/onlinecrash24/pve-zfs-tool:latest
+    container_name: zfs-tool
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ssh-keys:/root/.ssh
+      - zfs-data:/app/data
+    environment:
+      - SECRET_KEY=change-me-in-production
+      - ADMIN_USER=admin
+      - ADMIN_PASSWORD=password
+
+volumes:
+  ssh-keys:
+  zfs-data:
+```
+
 ```bash
-# Clone the repository
+docker compose up -d
+```
+
+### Option 2: Manual Build from Source
+
+```bash
 git clone https://github.com/onlinecrash24/pve-zfs-tool.git
 cd pve-zfs-tool
-
-# Start the container
 docker compose up -d --build
-
-# Open the web UI
-http://DOCKER-HOST-IP:5000
-Default login: admin / password
 ```
+
+---
+
+Open the web UI at `http://DOCKER-HOST-IP:5000` -- Default login: `admin` / `password`
 
 ## Setup
 
