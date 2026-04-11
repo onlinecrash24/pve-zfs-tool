@@ -129,9 +129,9 @@ def load_config_masked():
         key = cfg.get(provider, {}).get("api_key", "")
         if key and len(key) > 8:
             cfg[provider]["api_key"] = key[:4] + "..." + key[-4:]
-    # Include the default prompts so the UI can display them
-    lang = cfg.get("report_language", "en")
-    cfg["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT_DE if lang == "de" else DEFAULT_SYSTEM_PROMPT_EN
+    # Include both default prompts so the UI can display the right one per language
+    cfg["default_system_prompt_en"] = DEFAULT_SYSTEM_PROMPT_EN
+    cfg["default_system_prompt_de"] = DEFAULT_SYSTEM_PROMPT_DE
     return cfg
 
 
