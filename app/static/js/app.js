@@ -2283,7 +2283,19 @@ async function loadHostSelector() {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+    // Fetch CSRF token if not in sessionStorage (e.g. after page refresh)
+    if (!_csrfToken) {
+        try {
+            const r = await fetch("/api/csrf-token");
+            if (r.ok) {
+                const data = await r.json();
+                _csrfToken = data.csrf_token || "";
+                sessionStorage.setItem("csrf_token", _csrfToken);
+            }
+        } catch (e) { /* will redirect to login if not authenticated */ }
+    }
+
     // Set language selector to stored preference
     const langSel = document.getElementById("lang-select");
     langSel.value = getLang();
