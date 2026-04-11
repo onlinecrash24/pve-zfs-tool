@@ -1,10 +1,18 @@
 """ZFS command wrappers executed via SSH on remote Proxmox hosts."""
 
+import re
+import shlex
 import threading
 import time
 import logging
 
 from app.ssh_manager import run_command
+from app.validators import (
+    validate_pool_name, validate_zfs_name, validate_zfs_property,
+    validate_zfs_value, validate_vmid, validate_vm_type,
+    validate_path, validate_limit, validate_dataset_name,
+    validate_clone_name,
+)
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +27,7 @@ _scrub_lock = threading.Lock()
 
 def _monitor_scrub(host, pool_name):
     """Poll zpool status until scrub finishes, then send notification."""
+    pool_name = validate_pool_name(pool_name)
     key = f"{host['address']}:{pool_name}"
     try:
         # Wait a bit before first check to let the scrub start
@@ -108,21 +117,37 @@ def get_pools(host):
 
 
 def get_pool_status(host, pool_name):
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zpool status {pool_name}")
     return result
 
 
 def get_pool_iostat(host, pool_name):
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zpool iostat -v {pool_name}")
     return result
 
 
 def scrub_pool(host, pool_name):
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     return run_command(host, f"zpool scrub {pool_name}")
 
 
 def check_pool_upgrade(host, pool_name):
     """Check if a zpool feature upgrade is available."""
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"upgradable": False, "detail": str(e)}
     result = run_command(host, f"zpool status {pool_name}")
     if not result["success"]:
         return {"upgradable": False, "detail": result.get("stderr", "")}
@@ -144,10 +169,19 @@ def check_pool_upgrade(host, pool_name):
 
 def upgrade_pool(host, pool_name):
     """Upgrade a zpool to enable all available features."""
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     return run_command(host, f"zpool upgrade {pool_name}")
 
 
 def get_pool_history(host, pool_name, limit=50):
+    try:
+        pool_name = validate_pool_name(pool_name)
+        limit = validate_limit(limit, default=50, maximum=10000)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zpool history {pool_name} | tail -n {limit}")
     return result
 
@@ -157,6 +191,11 @@ def get_pool_history(host, pool_name, limit=50):
 # ---------------------------------------------------------------------------
 
 def get_datasets(host, pool_name=None):
+    if pool_name is not None:
+        try:
+            pool_name = validate_pool_name(pool_name)
+        except ValueError:
+            return []
     cmd = "zfs list -H -o name,used,avail,refer,mountpoint,type,compression,compressratio"
     if pool_name:
         cmd += f" -r {pool_name}"
@@ -181,15 +220,33 @@ def get_datasets(host, pool_name=None):
 
 
 def get_dataset_properties(host, dataset):
+    try:
+        dataset = validate_zfs_name(dataset, "Dataset")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zfs get all {dataset}")
     return result
 
 
 def set_dataset_property(host, dataset, prop, value):
+    try:
+        dataset = validate_zfs_name(dataset, "Dataset")
+        prop = validate_zfs_property(prop)
+        value = validate_zfs_value(value)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     return run_command(host, f"zfs set {prop}={value} {dataset}")
 
 
 def create_dataset(host, name, options=None):
+    try:
+        name = validate_dataset_name(name)
+        if options:
+            for k, v in options.items():
+                validate_zfs_property(k)
+                validate_zfs_value(v)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     cmd = f"zfs create"
     if options:
         for k, v in options.items():
@@ -199,6 +256,10 @@ def create_dataset(host, name, options=None):
 
 
 def destroy_dataset(host, name, recursive=False):
+    try:
+        name = validate_dataset_name(name)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     cmd = f"zfs destroy"
     if recursive:
         cmd += " -r"
@@ -211,6 +272,11 @@ def destroy_dataset(host, name, recursive=False):
 # ---------------------------------------------------------------------------
 
 def get_snapshots(host, dataset=None):
+    if dataset is not None:
+        try:
+            dataset = validate_zfs_name(dataset, "Dataset")
+        except ValueError:
+            return []
     cmd = "zfs list -t snapshot -H -o name,used,refer,creation -S creation"
     if dataset:
         cmd += f" -r {dataset}"
@@ -244,6 +310,11 @@ def get_snapshots(host, dataset=None):
 
 
 def create_snapshot(host, dataset, snap_name, recursive=False):
+    try:
+        dataset = validate_dataset_name(dataset)
+        snap_name = validate_zfs_name(snap_name, "Snapshot name")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     cmd = "zfs snapshot"
     if recursive:
         cmd += " -r"
@@ -252,6 +323,10 @@ def create_snapshot(host, dataset, snap_name, recursive=False):
 
 
 def destroy_snapshot(host, full_name, recursive=False):
+    try:
+        full_name = validate_zfs_name(full_name, "Snapshot")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     cmd = "zfs destroy"
     if recursive:
         cmd += " -r"
@@ -264,6 +339,13 @@ def destroy_snapshot(host, full_name, recursive=False):
 
 
 def rollback_snapshot(host, full_name, force=False, destroy_recent=False, stop_guest=False, vmid=None, vm_type=None):
+    try:
+        full_name = validate_zfs_name(full_name, "Snapshot")
+        if stop_guest and vmid:
+            vmid = validate_vmid(vmid)
+            vm_type = validate_vm_type(vm_type)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     results = {"stopped": False, "started": False}
 
     # Stop VM/LXC before rollback if requested
@@ -294,6 +376,11 @@ def rollback_snapshot(host, full_name, force=False, destroy_recent=False, stop_g
 
 def clone_snapshot(host, full_name, clone_name):
     """Clone a snapshot. If clone_name is on a different pool, use send/recv."""
+    try:
+        full_name = validate_zfs_name(full_name, "Snapshot")
+        clone_name = validate_clone_name(clone_name)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     snap_pool = full_name.split("/")[0]
     clone_pool = clone_name.split("/")[0]
     if snap_pool == clone_pool:
@@ -332,6 +419,12 @@ def get_clone_targets(host):
 
 
 def diff_snapshot(host, snapshot1, snapshot2=None):
+    try:
+        snapshot1 = validate_zfs_name(snapshot1, "Snapshot")
+        if snapshot2 is not None:
+            snapshot2 = validate_zfs_name(snapshot2, "Snapshot")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     ds_name = snapshot1.rsplit("@", 1)[0] if "@" in snapshot1 else snapshot1
     snap_short = snapshot1.rsplit("@", 1)[1] if "@" in snapshot1 else ""
     type_check = run_command(host, f"zfs get -H -o value type {ds_name}")
@@ -429,6 +522,10 @@ def get_auto_snapshot_status(host):
 
 
 def get_auto_snapshot_property(host, dataset):
+    try:
+        dataset = validate_dataset_name(dataset)
+    except ValueError:
+        return {"value": "-", "source": "none"}
     result = run_command(host, f"zfs get com.sun:auto-snapshot {dataset} -H -o value,source")
     if result["success"]:
         parts = result["stdout"].strip().split("\t")
@@ -439,6 +536,13 @@ def get_auto_snapshot_property(host, dataset):
 
 
 def set_auto_snapshot(host, dataset, enabled=True, label=None):
+    try:
+        dataset = validate_dataset_name(dataset)
+        if label:
+            if not re.match(r'^[a-zA-Z0-9_-]+$', label):
+                raise ValueError("Invalid auto-snapshot label: only alphanumeric, _, - allowed")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     prop = "com.sun:auto-snapshot"
     if label:
         prop += f":{label}"
@@ -484,6 +588,12 @@ def get_pve_cts(host):
 
 def get_vm_snapshots(host, pool, vmid, vm_type="qemu"):
     """Find ZFS snapshots belonging to a specific VM/CT without grep."""
+    try:
+        pool = validate_pool_name(pool)
+        vmid = validate_vmid(vmid)
+        vm_type = validate_vm_type(vm_type)
+    except ValueError:
+        return []
 
     # Prefix je nach Typ
     prefix = f"subvol-{vmid}" if vm_type == "lxc" else f"vm-{vmid}"
@@ -550,6 +660,10 @@ RESTORE_MOUNT_BASE = "/tmp/zfs-tool-restore"
 
 def snapshot_mount(host, snapshot):
     """Clone a snapshot and mount it readonly for file browsing."""
+    try:
+        snapshot = validate_zfs_name(snapshot, "Snapshot")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     ds_name = snapshot.rsplit("@", 1)[0] if "@" in snapshot else ""
     snap_short = snapshot.rsplit("@", 1)[1] if "@" in snapshot else ""
 
@@ -580,6 +694,10 @@ def snapshot_mount(host, snapshot):
 
 def snapshot_unmount(host, clone_ds):
     """Destroy a restore clone and all its children (auto-snapshots) to clean up."""
+    try:
+        clone_ds = validate_zfs_name(clone_ds, "Clone dataset")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zfs destroy -r {clone_ds}")
     return result
 
@@ -607,6 +725,11 @@ def cleanup_restore_clones(host):
     destroyed = []
     errors = []
     for clone in clones:
+        try:
+            validate_zfs_name(clone['name'], "Clone name")
+        except ValueError as e:
+            errors.append(f"{clone['name']}: {str(e)}")
+            continue
         r = run_command(host, f"zfs destroy -r {clone['name']}")
         if r["success"]:
             destroyed.append(clone["name"])
@@ -617,12 +740,22 @@ def cleanup_restore_clones(host):
 
 def snapshot_browse(host, mount_path, subpath=""):
     """List files/directories at a path inside a mounted snapshot."""
+    try:
+        mount_path = validate_path(mount_path, "Mount path")
+        if subpath:
+            subpath = validate_path(subpath, "Sub path")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     full_path = f"{mount_path}/{subpath}".rstrip("/")
-    # Sanitize path to prevent escaping
-    if ".." in full_path:
-        return {"success": False, "stderr": "Invalid path"}
 
-    result = run_command(host, f"ls -la --time-style=long-iso '{full_path}' 2>/dev/null")
+    # Realpath check: ensure full_path is under mount_path
+    realpath_check = run_command(host, f"realpath {shlex.quote(full_path)}")
+    if realpath_check["success"]:
+        resolved = realpath_check["stdout"].strip()
+        if not resolved.startswith(mount_path):
+            return {"success": False, "stderr": "Path escapes mount point"}
+
+    result = run_command(host, f"ls -la --time-style=long-iso {shlex.quote(full_path)} 2>/dev/null")
     if not result["success"]:
         return {"success": False, "stderr": result.get("stderr", "Cannot list directory")}
 
@@ -651,42 +784,74 @@ def snapshot_browse(host, mount_path, subpath=""):
 
 def snapshot_read_file(host, mount_path, file_path):
     """Read a file from a mounted snapshot (for preview, max 100KB)."""
+    try:
+        mount_path = validate_path(mount_path, "Mount path")
+        file_path = validate_path(file_path, "File path")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     full_path = f"{mount_path}/{file_path}".rstrip("/")
-    if ".." in full_path:
-        return {"success": False, "stderr": "Invalid path"}
+
+    # Realpath check: ensure full_path is under mount_path
+    realpath_check = run_command(host, f"realpath {shlex.quote(full_path)}")
+    if realpath_check["success"]:
+        resolved = realpath_check["stdout"].strip()
+        if not resolved.startswith(mount_path):
+            return {"success": False, "stderr": "Path escapes mount point"}
 
     # Check file size first
-    size_check = run_command(host, f"stat -c%s '{full_path}' 2>/dev/null")
+    size_check = run_command(host, f"stat -c%s {shlex.quote(full_path)} 2>/dev/null")
     if size_check["success"]:
         size = int(size_check["stdout"].strip() or "0")
         if size > 102400:
             return {"success": False, "stderr": f"File too large for preview ({size} bytes). Use 'Restore' to download."}
 
-    result = run_command(host, f"cat '{full_path}' 2>/dev/null")
+    result = run_command(host, f"cat {shlex.quote(full_path)} 2>/dev/null")
     return result
 
 
 def snapshot_restore_file(host, mount_path, file_path, dest_path):
     """Copy a file from the mounted snapshot back to the live filesystem."""
+    try:
+        mount_path = validate_path(mount_path, "Mount path")
+        file_path = validate_path(file_path, "File path")
+        dest_path = validate_path(dest_path, "Destination path")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     src = f"{mount_path}/{file_path}".rstrip("/")
-    if ".." in src or ".." in dest_path:
-        return {"success": False, "stderr": "Invalid path"}
+
+    # Realpath check: ensure src is under mount_path
+    realpath_check = run_command(host, f"realpath {shlex.quote(src)}")
+    if realpath_check["success"]:
+        resolved = realpath_check["stdout"].strip()
+        if not resolved.startswith(mount_path):
+            return {"success": False, "stderr": "Source path escapes mount point"}
 
     # Create parent directory if needed
-    run_command(host, f"mkdir -p \"$(dirname '{dest_path}')\"")
+    run_command(host, f"mkdir -p \"$(dirname {shlex.quote(dest_path)})\"")
 
-    result = run_command(host, f"cp -a '{src}' '{dest_path}'")
+    result = run_command(host, f"cp -a {shlex.quote(src)} {shlex.quote(dest_path)}")
     return result
 
 
 def snapshot_restore_dir(host, mount_path, dir_path, dest_path):
     """Recursively copy a directory from the mounted snapshot back to the live filesystem."""
+    try:
+        mount_path = validate_path(mount_path, "Mount path")
+        dir_path = validate_path(dir_path, "Directory path")
+        dest_path = validate_path(dest_path, "Destination path")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     src = f"{mount_path}/{dir_path}".rstrip("/")
-    if ".." in src or ".." in dest_path:
-        return {"success": False, "stderr": "Invalid path"}
 
-    run_command(host, f"mkdir -p '{dest_path}'")
-    result = run_command(host, f"cp -a '{src}/.' '{dest_path}/'")
+    # Realpath check: ensure src is under mount_path
+    realpath_check = run_command(host, f"realpath {shlex.quote(src)}")
+    if realpath_check["success"]:
+        resolved = realpath_check["stdout"].strip()
+        if not resolved.startswith(mount_path):
+            return {"success": False, "stderr": "Source path escapes mount point"}
+
+    run_command(host, f"mkdir -p {shlex.quote(dest_path)}")
+    result = run_command(host, f"cp -a {shlex.quote(src + '/.')} {shlex.quote(dest_path + '/')}")
     return result
 
 
@@ -695,11 +860,20 @@ def snapshot_restore_dir(host, mount_path, dir_path, dest_path):
 # ---------------------------------------------------------------------------
 
 def estimate_send_size(host, snapshot):
+    try:
+        snapshot = validate_zfs_name(snapshot, "Snapshot")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zfs send -nv {snapshot} 2>&1")
     return result
 
 
 def estimate_incremental_size(host, snap_from, snap_to):
+    try:
+        snap_from = validate_zfs_name(snap_from, "Snapshot (from)")
+        snap_to = validate_zfs_name(snap_to, "Snapshot (to)")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zfs send -nvi {snap_from} {snap_to} 2>&1")
     return result
 
@@ -714,13 +888,21 @@ def get_arc_stats(host):
 
 
 def get_zfs_events(host, limit=30):
+    try:
+        limit = validate_limit(limit, default=30, maximum=10000)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zpool events -v 2>/dev/null | tail -n {limit}")
     return result
 
 
 def get_smart_status(host, pool_name=None):
     """Get SMART status of all disks across all pools, grouped by pool."""
-    import re
+    if pool_name is not None:
+        try:
+            pool_name = validate_pool_name(pool_name)
+        except ValueError as e:
+            return {"success": False, "stderr": str(e)}
 
     # Step 1: Get pool names to exclude them from disk list
     pool_list_result = run_command(host, "zpool list -H -o name")
