@@ -734,9 +734,9 @@ def api_ai_report_pdf(report_id):
         from app.ai_pdf import generate_pdf
         pdf_bytes = generate_pdf(report)
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error("PDF generation failed: %s", e)
-        return jsonify({"error": "PDF generation failed"}), 500
+        import logging, traceback
+        logging.getLogger(__name__).error("PDF generation failed: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
 
     from flask import Response
     filename = f"ZFS_Report_{report['timestamp'].replace(' ', '_').replace(':', '-')}.pdf"
