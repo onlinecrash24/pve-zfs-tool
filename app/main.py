@@ -8,7 +8,7 @@ from app.ssh_manager import (
 )
 from app.zfs_commands import (
     get_pools, get_pool_status, get_pool_iostat, scrub_pool, get_pool_history,
-    check_pool_upgrade, upgrade_pool,
+    check_pool_upgrade, upgrade_pool, start_scrub_monitor,
     get_datasets, get_dataset_properties, set_dataset_property,
     create_dataset, destroy_dataset,
     get_snapshots, create_snapshot, destroy_snapshot,
@@ -24,6 +24,15 @@ from app.notifications import (
     load_config as load_notify_config,
     save_config as save_notify_config,
     send_notification, test_telegram, test_gotify, test_matrix,
+)
+from app.ai_reports import (
+    load_config_masked as load_ai_config,
+    save_config_unmasked as save_ai_config,
+    test_connection as test_ai_connection,
+    generate_report as generate_ai_report,
+    load_reports as load_ai_reports,
+    chat as ai_chat,
+    start_scheduler as start_ai_scheduler,
 )
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -199,11 +208,13 @@ def api_pool_scrub():
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    result = scrub_pool(host, data.get("pool", ""))
     pool_name = data.get("pool", "")
+    result = scrub_pool(host, pool_name)
     if result.get("success"):
         send_notification("scrub_started", "Scrub Started",
                           f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})")
+        # Start background monitor to detect scrub completion
+        start_scrub_monitor(host, pool_name)
     return jsonify(result)
 
 
@@ -627,6 +638,90 @@ def api_send_notification():
     )
     return jsonify(result)
 
+
+# ---------------------------------------------------------------------------
+# API: AI Reports
+# ---------------------------------------------------------------------------
+
+@app.route("/api/ai/config", methods=["GET"])
+def api_ai_config():
+    return jsonify(load_ai_config())
+
+
+@app.route("/api/ai/config", methods=["POST"])
+def api_save_ai_config_route():
+    data = request.json
+    save_ai_config(data)
+    start_ai_scheduler()
+    return jsonify({"success": True, "message": "Configuration saved"})
+
+
+@app.route("/api/ai/test", methods=["POST"])
+def api_ai_test():
+    result = test_ai_connection()
+    return jsonify(result)
+
+
+@app.route("/api/ai/report", methods=["POST"])
+def api_ai_generate_report():
+    data = request.json or {}
+    host_address = data.get("host")
+    lang = data.get("lang")
+    result = generate_ai_report(host_address, lang)
+    return jsonify(result)
+
+
+@app.route("/api/ai/reports", methods=["GET"])
+def api_ai_reports():
+    return jsonify(load_ai_reports())
+
+
+@app.route("/api/ai/report/pdf/<report_id>")
+def api_ai_report_pdf(report_id):
+    """Generate a PDF from a stored AI report."""
+    reports = load_ai_reports()
+    report = None
+    for r in reports:
+        if r.get("id") == report_id:
+            report = r
+            break
+    if not report:
+        return jsonify({"error": "Report not found"}), 404
+
+    try:
+        from app.ai_pdf import generate_pdf
+        pdf_bytes = generate_pdf(report)
+    except Exception as e:
+        return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
+
+    from flask import Response
+    filename = f"ZFS_Report_{report['timestamp'].replace(' ', '_').replace(':', '-')}.pdf"
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/api/ai/chat", methods=["POST"])
+def api_ai_chat():
+    data = request.json
+    question = data.get("question", "")
+    host_address = data.get("host")
+    lang = data.get("lang")
+    if not question.strip():
+        return jsonify({"error": "Question required"}), 400
+    result = ai_chat(question, host_address, lang)
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+
+# Start AI report scheduler if configured
+try:
+    start_ai_scheduler()
+except Exception:
+    pass
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
