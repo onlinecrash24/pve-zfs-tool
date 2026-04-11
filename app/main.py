@@ -738,12 +738,16 @@ def api_ai_report_pdf(report_id):
         logging.getLogger(__name__).error("PDF generation failed: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
 
-    from flask import Response
+    from flask import send_file
+    from io import BytesIO
     filename = f"ZFS_Report_{report['timestamp'].replace(' ', '_').replace(':', '-')}.pdf"
-    return Response(
-        pdf_bytes,
+    buf = BytesIO(bytes(pdf_bytes))
+    buf.seek(0)
+    return send_file(
+        buf,
         mimetype="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        as_attachment=True,
+        download_name=filename,
     )
 
 
