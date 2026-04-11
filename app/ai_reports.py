@@ -143,7 +143,25 @@ def save_config_unmasked(new_config):
         if new_key and "..." in new_key:
             # Masked key sent back – preserve existing
             new_config[provider]["api_key"] = existing.get(provider, {}).get("api_key", "")
+    # Clear system_prompt if it matches a default (so language switch works)
+    sp = new_config.get("system_prompt", "").strip()
+    if sp == DEFAULT_SYSTEM_PROMPT_EN.strip() or sp == DEFAULT_SYSTEM_PROMPT_DE.strip():
+        new_config["system_prompt"] = ""
     save_config(new_config)
+
+
+def list_ollama_models(base_url=None):
+    """Query available models from an Ollama instance."""
+    config = load_config()
+    url = (base_url or config.get("ollama", {}).get("base_url", "http://localhost:11434")).rstrip("/")
+    try:
+        req = urllib.request.Request(f"{url}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            models = [m.get("name", "") for m in data.get("models", [])]
+            return {"success": True, "models": sorted(models)}
+    except Exception as e:
+        return {"success": False, "error": str(e), "models": []}
 
 
 # ---------------------------------------------------------------------------
