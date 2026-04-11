@@ -484,13 +484,26 @@ def call_llm(messages):
 
 def test_connection():
     """Send a minimal test message to verify LLM connectivity."""
+    config = load_config()
+    provider = config.get("provider", "openai")
+
     messages = [
         {"role": "system", "content": "Respond with exactly: OK"},
         {"role": "user", "content": "Test connection. Reply with OK."},
     ]
-    result = call_llm(messages)
+
+    # Use a shorter timeout for test (30s instead of 300s)
+    if provider == "anthropic":
+        result = _call_anthropic(config.get("anthropic", {}), messages, timeout=30)
+    elif provider == "ollama":
+        result = _call_ollama(config.get("ollama", {}), messages, timeout=30)
+    elif provider == "custom":
+        result = _call_openai(config.get("custom", {}), messages, timeout=30)
+    else:
+        result = _call_openai(config.get("openai", {}), messages, timeout=30)
+
     if result.get("success"):
-        return {"success": True, "message": result.get("content", "OK")}
+        return {"success": True, "message": result.get("content", "OK")[:200]}
     return {"success": False, "message": result.get("error", "Unknown error")}
 
 

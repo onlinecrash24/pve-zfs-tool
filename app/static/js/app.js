@@ -2083,16 +2083,19 @@ async function viewAI() {
         const resultEl = document.getElementById("ai-test-result");
         resultEl.textContent = t("ai_testing");
         resultEl.style.color = "var(--text-secondary)";
-
-        // Save config first so test uses current values
-        await _saveAIConfig();
-
-        const r = await API.post("/api/ai/test", {});
-        if (r.success) {
-            resultEl.textContent = t("ai_test_success", r.message || "OK");
-            resultEl.style.color = "var(--success)";
-        } else {
-            resultEl.textContent = t("ai_test_failed", r.message || r.error || "Unknown");
+        try {
+            // Save config first so test uses current values
+            await _saveAIConfig();
+            const r = await API.post("/api/ai/test", {});
+            if (r.success) {
+                resultEl.textContent = t("ai_test_success", r.message || "OK");
+                resultEl.style.color = "var(--success)";
+            } else {
+                resultEl.textContent = t("ai_test_failed", r.message || r.error || "Unknown");
+                resultEl.style.color = "var(--danger)";
+            }
+        } catch (e) {
+            resultEl.textContent = t("ai_test_failed", e.message || "Request failed");
             resultEl.style.color = "var(--danger)";
         }
     });
