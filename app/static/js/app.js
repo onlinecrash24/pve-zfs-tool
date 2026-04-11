@@ -1922,7 +1922,7 @@ async function viewAI() {
                     <label>${escapeHtml(t("ai_system_prompt"))}</label>
                     <button class="btn btn-xs" id="ai-prompt-reset" style="font-size:11px;padding:2px 8px">${escapeHtml(t("ai_prompt_reset"))}</button>
                 </div>
-                <textarea id="ai-system-prompt" class="form-control" rows="6" style="margin-top:4px;font-size:12px;font-family:monospace">${escapeHtml(config.system_prompt || config.default_system_prompt || "")}</textarea>
+                <textarea id="ai-system-prompt" class="form-control" rows="6" style="margin-top:4px;font-size:12px;font-family:monospace">${escapeHtml(config.system_prompt || (getLang() === "de" ? config.default_system_prompt_de : config.default_system_prompt_en) || "")}</textarea>
                 <small style="color:var(--text-secondary)">${escapeHtml(t("ai_system_prompt_hint"))}</small>
             </div>
         </div>
@@ -1969,13 +1969,6 @@ async function viewAI() {
             <div id="ai-weekday-row" style="${sched.interval === "weekly" ? "" : "display:none"}">
                 <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
                 <select id="ai-sched-weekday" class="form-control" style="margin-top:4px">${weekdayOpts}</select>
-            </div>
-            <div>
-                <label>${escapeHtml(t("ai_report_language"))}</label>
-                <select id="ai-report-lang" class="form-control" style="margin-top:4px">
-                    <option value="en" ${config.report_language === "en" ? "selected" : ""}>English</option>
-                    <option value="de" ${config.report_language === "de" ? "selected" : ""}>Deutsch</option>
-                </select>
             </div>
             <div style="grid-column:1/-1">
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -2081,7 +2074,7 @@ async function viewAI() {
     // Reset system prompt to default
     document.getElementById("ai-prompt-reset").addEventListener("click", () => {
         const promptEl = document.getElementById("ai-system-prompt");
-        promptEl.value = config.default_system_prompt || "";
+        promptEl.value = (getLang() === "de" ? config.default_system_prompt_de : config.default_system_prompt_en) || "";
     });
 
     // Generate report
@@ -2095,7 +2088,7 @@ async function viewAI() {
         // Save config first so language/provider changes are applied
         await _saveAIConfig();
 
-        const lang = document.getElementById("ai-report-lang").value;
+        const lang = getLang();
         const r = await API.post("/api/ai/report", { host: currentHost, lang });
         btn.disabled = false;
         if (r.success) {
@@ -2139,7 +2132,7 @@ async function viewAI() {
                 responseEl.innerHTML = `<span style="color:var(--text-secondary)">${escapeHtml(t("ai_chat_thinking"))}</span>`;
                 chatBtn.disabled = true;
 
-                const lang = document.getElementById("ai-report-lang").value;
+                const lang = getLang();
                 const r = await API.post("/api/ai/chat", { question, host: currentHost, lang });
                 chatBtn.disabled = false;
                 if (r.success) {
@@ -2184,7 +2177,7 @@ async function _saveAIConfig() {
             hour: parseInt(document.getElementById("ai-sched-hour").value) || 6,
             weekday: parseInt(document.getElementById("ai-sched-weekday").value) || 0,
         },
-        report_language: document.getElementById("ai-report-lang").value,
+        report_language: getLang(),
         notify_on_report: document.getElementById("ai-notify-report").checked,
         system_prompt: document.getElementById("ai-system-prompt").value.trim(),
     };
