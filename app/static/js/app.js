@@ -2179,7 +2179,13 @@ async function _saveAIConfig() {
         },
         report_language: getLang(),
         notify_on_report: document.getElementById("ai-notify-report").checked,
-        system_prompt: document.getElementById("ai-system-prompt").value.trim(),
+        system_prompt: (() => {
+            const val = document.getElementById("ai-system-prompt").value.trim();
+            // If prompt matches a default, save empty (= use default for current language)
+            if (val === (config.default_system_prompt_en || "").trim() ||
+                val === (config.default_system_prompt_de || "").trim()) return "";
+            return val;
+        })(),
     };
     await API.post("/api/ai/config", newConfig);
 }
