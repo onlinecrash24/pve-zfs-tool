@@ -51,8 +51,18 @@ def remove_host(address):
     return True, "Host removed"
 
 
+KNOWN_HOSTS = os.path.join(DATA_DIR, "known_hosts")
+
+
 def get_ssh_client(host):
     client = paramiko.SSHClient()
+    # Load known hosts for host key verification
+    if os.path.exists(KNOWN_HOSTS):
+        try:
+            client.load_host_keys(KNOWN_HOSTS)
+        except Exception:
+            pass
+    # AutoAddPolicy on first connect, then keys are persisted for future verification
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(
         hostname=host["address"],
@@ -61,6 +71,11 @@ def get_ssh_client(host):
         key_filename=SSH_KEY,
         timeout=10,
     )
+    # Save host keys after successful connection for future verification
+    try:
+        client.get_host_keys().save(KNOWN_HOSTS)
+    except Exception:
+        pass
     return client
 
 

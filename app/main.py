@@ -1,6 +1,9 @@
 import os
 import time
 import functools
+import hashlib
+import hmac
+from datetime import timedelta
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 
 from app.ssh_manager import (
@@ -38,9 +41,15 @@ from app.ai_reports import (
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-me")
+app.permanent_session_lifetime = timedelta(hours=8)
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "password")
+
+# Rate limiting for login attempts
+_login_attempts = {}  # IP -> {"count": int, "last": float}
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -78,13 +87,38 @@ def login_page():
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
+    client_ip = request.remote_addr or "unknown"
+
+    # Rate limiting
+    now = time.time()
+    info = _login_attempts.get(client_ip, {"count": 0, "last": 0})
+    if info["count"] >= MAX_LOGIN_ATTEMPTS and (now - info["last"]) < LOGIN_LOCKOUT_SECONDS:
+        remaining = int(LOGIN_LOCKOUT_SECONDS - (now - info["last"]))
+        return jsonify({"success": False, "error": f"Too many attempts. Try again in {remaining}s"}), 429
+
+    # Reset counter if lockout period has passed
+    if (now - info["last"]) >= LOGIN_LOCKOUT_SECONDS:
+        info = {"count": 0, "last": now}
+
     data = request.json or {}
     username = data.get("username", "")
     password = data.get("password", "")
-    if username == ADMIN_USER and password == ADMIN_PASSWORD:
+
+    # Timing-safe comparison to prevent timing attacks
+    user_ok = hmac.compare_digest(username.encode(), ADMIN_USER.encode())
+    pass_ok = hmac.compare_digest(password.encode(), ADMIN_PASSWORD.encode())
+
+    if user_ok and pass_ok:
+        # Reset attempts on successful login
+        _login_attempts.pop(client_ip, None)
         session["authenticated"] = True
         session.permanent = True
         return jsonify({"success": True})
+
+    # Track failed attempt
+    info["count"] += 1
+    info["last"] = now
+    _login_attempts[client_ip] = info
     return jsonify({"success": False, "error": "Invalid credentials"}), 401
 
 
@@ -700,7 +734,9 @@ def api_ai_report_pdf(report_id):
         from app.ai_pdf import generate_pdf
         pdf_bytes = generate_pdf(report)
     except Exception as e:
-        return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
+        import logging
+        logging.getLogger(__name__).error("PDF generation failed: %s", e)
+        return jsonify({"error": "PDF generation failed"}), 500
 
     from flask import Response
     filename = f"ZFS_Report_{report['timestamp'].replace(' ', '_').replace(':', '-')}.pdf"
