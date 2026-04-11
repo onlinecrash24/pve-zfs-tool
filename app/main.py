@@ -47,6 +47,10 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-me")
 app.permanent_session_lifetime = timedelta(hours=8)
 
+# Support running behind a reverse proxy (NPM, nginx, Caddy, Traefik)
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
 # Secure cookie settings (effective when behind HTTPS reverse proxy)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -143,6 +147,14 @@ def api_login():
     info["last"] = now
     _login_attempts[client_ip] = info
     return jsonify({"success": False, "error": "Invalid credentials"}), 401
+
+
+@app.route("/api/csrf-token")
+def api_csrf_token():
+    """Return the CSRF token for the current session (creates one if missing)."""
+    if not session.get("csrf_token"):
+        session["csrf_token"] = secrets.token_hex(32)
+    return jsonify({"csrf_token": session["csrf_token"]})
 
 
 @app.route("/api/logout", methods=["POST"])
