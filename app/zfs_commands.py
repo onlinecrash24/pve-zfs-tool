@@ -1,6 +1,85 @@
 """ZFS command wrappers executed via SSH on remote Proxmox hosts."""
 
+import threading
+import time
+import logging
+
 from app.ssh_manager import run_command
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Scrub monitor – background thread that polls zpool status after a scrub
+# is started and fires a notification when it finishes.
+# ---------------------------------------------------------------------------
+
+_scrub_monitors = {}  # key = "host_addr:pool" → threading.Thread
+_scrub_lock = threading.Lock()
+
+
+def _monitor_scrub(host, pool_name):
+    """Poll zpool status until scrub finishes, then send notification."""
+    key = f"{host['address']}:{pool_name}"
+    try:
+        # Wait a bit before first check to let the scrub start
+        time.sleep(10)
+        max_checks = 1440  # max ~24h at 60s intervals
+        for _ in range(max_checks):
+            result = run_command(host, f"zpool status {pool_name}")
+            if not result.get("success"):
+                log.warning("Scrub monitor: failed to get pool status for %s", key)
+                break
+            stdout = result.get("stdout", "")
+            # Check if scrub is still in progress
+            if "scrub in progress" in stdout:
+                time.sleep(60)
+                continue
+            # Scrub finished – parse result
+            scrub_info = ""
+            for line in stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("scan:"):
+                    scrub_info = stripped
+                    break
+            # Determine if scrub completed or was cancelled
+            from app.notifications import send_notification
+            if "scrub repaired" in stdout:
+                # Extract repaired bytes and errors
+                send_notification(
+                    "scrub_finished",
+                    "Scrub Finished",
+                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}",
+                )
+            elif "scrub canceled" in stdout:
+                send_notification(
+                    "scrub_finished",
+                    "Scrub Cancelled",
+                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}",
+                )
+            else:
+                # Scrub not in progress and no clear result – it finished
+                send_notification(
+                    "scrub_finished",
+                    "Scrub Finished",
+                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}",
+                )
+            break
+    except Exception as e:
+        log.error("Scrub monitor error for %s: %s", key, e)
+    finally:
+        with _scrub_lock:
+            _scrub_monitors.pop(key, None)
+
+
+def start_scrub_monitor(host, pool_name):
+    """Start a background thread to monitor scrub completion."""
+    key = f"{host['address']}:{pool_name}"
+    with _scrub_lock:
+        if key in _scrub_monitors and _scrub_monitors[key].is_alive():
+            return  # Already monitoring
+        t = threading.Thread(target=_monitor_scrub, args=(host, pool_name), daemon=True)
+        t.start()
+        _scrub_monitors[key] = t
 
 
 # ---------------------------------------------------------------------------

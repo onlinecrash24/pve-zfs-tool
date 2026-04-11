@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
         "health_warning": True,
         "host_offline": True,
         "auto_snapshot": True,
+        "ai_report": True,
     },
 }
 
@@ -56,8 +57,11 @@ def load_config():
         cfg = json.load(f)
     merged = dict(DEFAULT_CONFIG)
     merged.update(cfg)
-    if "events" not in merged:
-        merged["events"] = dict(DEFAULT_CONFIG["events"])
+    # Ensure all default event types exist (merges new events into old configs)
+    default_events = dict(DEFAULT_CONFIG["events"])
+    saved_events = cfg.get("events", {})
+    default_events.update(saved_events)
+    merged["events"] = default_events
     # Ensure matrix section exists for older configs
     if "matrix" not in merged:
         merged["matrix"] = dict(DEFAULT_CONFIG["matrix"])
