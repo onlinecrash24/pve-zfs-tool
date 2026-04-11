@@ -2,10 +2,16 @@
 // ZFS Tool – Frontend Application
 // ---------------------------------------------------------------------------
 
+let _csrfToken = sessionStorage.getItem("csrf_token") || "";
+
 const API = {
     async _handle(r) {
         if (r.status === 401) { window.location.href = "/login"; throw new Error("Not authenticated"); }
+        if (r.status === 403) { throw new Error("CSRF token invalid – please reload the page"); }
         return r.json();
+    },
+    _headers(extra) {
+        return { "Content-Type": "application/json", "X-CSRF-Token": _csrfToken, ...extra };
     },
     async get(url) {
         const r = await fetch(url);
@@ -14,7 +20,7 @@ const API = {
     async post(url, data) {
         const r = await fetch(url, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: this._headers(),
             body: JSON.stringify(data),
         });
         return this._handle(r);
@@ -22,7 +28,7 @@ const API = {
     async del(url, data) {
         const r = await fetch(url, {
             method: "DELETE",
-            headers: { "Content-Type": "application/json" },
+            headers: this._headers(),
             body: JSON.stringify(data),
         });
         return this._handle(r);

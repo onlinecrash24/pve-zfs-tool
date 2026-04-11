@@ -1,8 +1,10 @@
 import os
 import time
+import secrets
 import functools
 import hashlib
 import hmac
+import logging
 from datetime import timedelta
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 
@@ -39,12 +41,26 @@ from app.ai_reports import (
     list_ollama_models,
 )
 
+log = logging.getLogger(__name__)
+
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-me")
 app.permanent_session_lifetime = timedelta(hours=8)
 
+# Secure cookie settings (effective when behind HTTPS reverse proxy)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+if os.environ.get("FORCE_HTTPS", "").lower() in ("1", "true", "yes"):
+    app.config["SESSION_COOKIE_SECURE"] = True
+
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "password")
+
+# Startup security warnings
+if app.secret_key == "dev-key-change-me":
+    log.warning("⚠️  SECRET_KEY is using the default value! Set a strong SECRET_KEY environment variable.")
+if ADMIN_USER == "admin" and ADMIN_PASSWORD == "password":
+    log.warning("⚠️  Using default credentials (admin/password)! Change ADMIN_USER and ADMIN_PASSWORD environment variables.")
 
 # Rate limiting for login attempts
 _login_attempts = {}  # IP -> {"count": int, "last": float}
@@ -79,6 +95,12 @@ def check_auth():
             return jsonify({"error": "Not authenticated"}), 401
         return redirect(url_for("login_page"))
 
+    # CSRF protection for state-changing requests
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        token = request.headers.get("X-CSRF-Token", "")
+        if not token or not hmac.compare_digest(token, session.get("csrf_token", "")):
+            return jsonify({"error": "CSRF token invalid"}), 403
+
 
 @app.route("/login")
 def login_page():
@@ -112,8 +134,9 @@ def api_login():
         # Reset attempts on successful login
         _login_attempts.pop(client_ip, None)
         session["authenticated"] = True
+        session["csrf_token"] = secrets.token_hex(32)
         session.permanent = True
-        return jsonify({"success": True})
+        return jsonify({"success": True, "csrf_token": session["csrf_token"]})
 
     # Track failed attempt
     info["count"] += 1
