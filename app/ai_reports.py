@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _scheduler_thread = None
 _scheduler_stop = threading.Event()
+_last_run_key = None  # Persists across scheduler restarts
 
 # Cache for latest collected data (used by chat)
 _latest_data = None
@@ -650,8 +651,8 @@ def _scheduler_loop():
     the schedule at runtime takes effect without restarting.  Uses a
     last-run date string to avoid the fragile 2-minute window approach.
     """
+    global _last_run_key
     log.info("AI report scheduler started")
-    last_run_date = None  # e.g. "2026-04-11" to avoid double-run on same day/week
 
     while not _scheduler_stop.is_set():
         try:
@@ -667,13 +668,12 @@ def _scheduler_loop():
 
             # Build a run-key that is unique per scheduled period
             if interval == "weekly":
-                # year-week-weekday so it triggers once per configured weekday per week
                 run_key = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
             else:
                 run_key = now.strftime("%Y-%m-%d")
 
             should_run = False
-            if now.hour >= target_hour and last_run_date != run_key:
+            if now.hour >= target_hour and _last_run_key != run_key:
                 if interval == "daily":
                     should_run = True
                 elif interval == "weekly" and now.weekday() == schedule.get("weekday", 0):
@@ -681,7 +681,7 @@ def _scheduler_loop():
 
             if should_run:
                 log.info("Scheduled AI report generation triggered (key=%s, hour=%s)", run_key, target_hour)
-                last_run_date = run_key
+                _last_run_key = run_key
                 try:
                     generate_report()
                 except Exception as e:
@@ -697,8 +697,13 @@ def _scheduler_loop():
 
 def start_scheduler():
     """Start the scheduler thread (always runs, checks config each cycle)."""
-    global _scheduler_thread
-    stop_scheduler()
+    global _scheduler_thread, _last_run_key
+    # Only start a new thread if one isn't already running
+    if _scheduler_thread and _scheduler_thread.is_alive():
+        return
+    # Set last_run_key to today so we don't immediately trigger on startup
+    if _last_run_key is None:
+        _last_run_key = datetime.now().strftime("%Y-%m-%d")
     _scheduler_stop.clear()
     _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
     _scheduler_thread.start()
