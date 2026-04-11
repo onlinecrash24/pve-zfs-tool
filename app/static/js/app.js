@@ -1927,7 +1927,13 @@ async function viewAI() {
                     <label>${escapeHtml(t("ai_system_prompt"))}</label>
                     <button class="btn btn-xs" id="ai-prompt-reset" style="font-size:11px;padding:2px 8px">${escapeHtml(t("ai_prompt_reset"))}</button>
                 </div>
-                <textarea id="ai-system-prompt" class="form-control" rows="6" style="margin-top:4px;font-size:12px;font-family:monospace">${escapeHtml(config.system_prompt || (getLang() === "de" ? config.default_system_prompt_de : config.default_system_prompt_en) || "")}</textarea>
+                <textarea id="ai-system-prompt" class="form-control" rows="6" style="margin-top:4px;font-size:12px;font-family:monospace">${escapeHtml((() => {
+                            const sp = (config.system_prompt || "").trim();
+                            const defEn = (config.default_system_prompt_en || "").trim();
+                            const defDe = (config.default_system_prompt_de || "").trim();
+                            if (!sp || sp === defEn || sp === defDe) return getLang() === "de" ? defDe : defEn;
+                            return sp;
+                        })())}</textarea>
                 <small style="color:var(--text-secondary)">${escapeHtml(t("ai_system_prompt_hint"))}</small>
             </div>
         </div>
@@ -2205,13 +2211,7 @@ async function _saveAIConfig() {
         },
         report_language: getLang(),
         notify_on_report: document.getElementById("ai-notify-report").checked,
-        system_prompt: (() => {
-            const val = document.getElementById("ai-system-prompt").value.trim();
-            // If prompt matches a default, save empty (= use default for current language)
-            if (val === (config.default_system_prompt_en || "").trim() ||
-                val === (config.default_system_prompt_de || "").trim()) return "";
-            return val;
-        })(),
+        system_prompt: document.getElementById("ai-system-prompt").value.trim(),
     };
     await API.post("/api/ai/config", newConfig);
 }
