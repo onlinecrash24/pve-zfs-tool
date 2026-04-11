@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/static/img/logo.png" alt="PVE ZFS Tool" width="400">
+  <img src="app/static/img/logo.png" alt="PVE ZFS Tool" width="500">
 </p>
 
 <p align="center">A Docker-based web application for managing ZFS pools, datasets, snapshots, and auto-snapshots across one or more Proxmox VE hosts via SSH.</p>
@@ -60,6 +60,15 @@
   - Host offline
   - File restore actions
 
+### AI Reports & Analysis
+- **Multi-Provider Support** -- OpenAI (GPT), Anthropic (Claude), Ollama (local), or any OpenAI-compatible API
+- **Daily/Weekly Reports** -- Automated ZFS infrastructure analysis on schedule
+- **Comprehensive Analysis** -- Pool health, storage capacity, scrub status, snapshot coverage, SMART health, anomalies
+- **Actionable Recommendations** -- Prioritized suggestions for scrubs, cleanup, capacity planning
+- **Interactive Chat** -- Ask follow-up questions about your ZFS data
+- **Notification Integration** -- Optionally send reports via Telegram, Gotify, or Matrix
+- **Bilingual Reports** -- Generate reports in English or German
+
 ### Authentication & i18n
 - **Login** -- Session-based authentication, credentials configurable via environment variables
 - **Language Switch** -- English and German with instant UI re-render, persisted in localStorage
@@ -73,48 +82,17 @@
 
 ## Quick Start
 
-### Option A – Pre-built image from ghcr.io (recommended)
-
-Create a `docker-compose.yml`:
-
-```yaml
-services:
-  pve-zfs-tool:
-    image: ghcr.io/onlinecrash24/pve-zfs-tool:latest
-    ports:
-      - "5000:5000"
-    volumes:
-      - ssh-keys:/root/.ssh
-      - zfs-data:/app/data
-    environment:
-      - SECRET_KEY=change-me-in-production
-      - ADMIN_USER=admin
-      - ADMIN_PASSWORD=password
-    restart: unless-stopped
-
-volumes:
-  ssh-keys:
-  zfs-data:
-```
-
 ```bash
-docker compose up -d
-
-# Open the web UI
-# http://DOCKER-HOST-IP:5000
-# Default login: admin / password
-```
-
-### Option B – Build from source
-
-```bash
+# Clone the repository
 git clone https://github.com/onlinecrash24/pve-zfs-tool.git
 cd pve-zfs-tool
+
+# Start the container
 docker compose up -d --build
 
 # Open the web UI
-# http://DOCKER-HOST-IP:5000
-# Default login: admin / password
+http://DOCKER-HOST-IP:5000
+Default login: admin / password
 ```
 
 ## Setup
@@ -187,6 +165,7 @@ zfs-tool/
     ├── main.py              # Flask API routes
     ├── ssh_manager.py       # SSH connection & host management
     ├── zfs_commands.py      # ZFS command wrappers via SSH
+    ├── ai_reports.py        # AI-powered ZFS analysis & reports
     ├── notifications.py     # Telegram, Gotify & Matrix notifications
     ├── templates/
     │   ├── index.html       # Single-page application

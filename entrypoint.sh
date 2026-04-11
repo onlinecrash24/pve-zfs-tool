@@ -21,4 +21,4 @@ cat "$KEY_FILE.pub"
 echo ""
 
 echo "==> Starting ZFS Tool..."
-exec gunicorn --bind 0.0.0.0:5000 --workers 2 --worker-class sync --preload --log-level info app.main:app
+exec gunicorn --bind 0.0.0.0:5000 --workers 2 --worker-class sync --timeout 300 --preload --log-level info app.main:app

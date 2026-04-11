@@ -139,6 +139,7 @@ async function renderView() {
         guests: viewGuests,
         health: viewHealth,
         notifications: viewNotifications,
+        ai: viewAI,
     };
     const fn = map[currentView] || viewHome;
     await fn();
@@ -240,6 +241,14 @@ async function viewHome() {
                     <li>${escapeHtml(t("feat_notify_1"))}</li>
                     <li>${escapeHtml(t("feat_notify_2"))}</li>
                     <li>${escapeHtml(t("feat_notify_3"))}</li>
+                </ul>
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_ai_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_ai_1"))}</li>
+                    <li>${escapeHtml(t("feat_ai_2"))}</li>
+                    <li>${escapeHtml(t("feat_ai_3"))}</li>
                 </ul>
             </div>
             <div>
@@ -1761,6 +1770,425 @@ async function viewNotifications() {
         toast(r.message || t("saved"), r.success ? "success" : "error");
         viewNotifications();
     });
+}
+
+// ---------------------------------------------------------------------------
+// Simple markdown renderer for AI reports
+// ---------------------------------------------------------------------------
+function renderMarkdown(text) {
+    if (!text) return "";
+    let html = escapeHtml(text);
+    // Code blocks
+    html = html.replace(/```([\s\S]*?)```/g, '<pre style="background:var(--bg-secondary);padding:12px;border-radius:6px;overflow-x:auto;font-size:13px"><code>$1</code></pre>');
+    // Bold
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // Italic
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    // Headers
+    html = html.replace(/^#### (.+)$/gm, '<h5 style="color:var(--accent);margin:12px 0 4px">$1</h5>');
+    html = html.replace(/^### (.+)$/gm, '<h4 style="color:var(--accent);margin:16px 0 6px">$1</h4>');
+    html = html.replace(/^## (.+)$/gm, '<h3 style="color:var(--accent);margin:18px 0 8px">$1</h3>');
+    html = html.replace(/^# (.+)$/gm, '<h3 style="color:var(--accent);margin:20px 0 8px;font-size:1.3em">$1</h3>');
+    // Horizontal rule
+    html = html.replace(/^---$/gm, '<hr style="border-color:var(--border);margin:16px 0">');
+    // Bullet lists
+    html = html.replace(/^[\-\*] (.+)$/gm, '<li style="margin-left:18px;line-height:1.8">$1</li>');
+    // Numbered lists
+    html = html.replace(/^\d+\. (.+)$/gm, '<li style="margin-left:18px;line-height:1.8;list-style-type:decimal">$1</li>');
+    // Line breaks
+    html = html.replace(/\n/g, '<br>');
+    // Clean up <br> after block elements
+    html = html.replace(/<\/h[345]><br>/g, '</h3>');
+    html = html.replace(/<\/li><br>/g, '</li>');
+    html = html.replace(/<\/pre><br>/g, '</pre>');
+    html = html.replace(/<hr[^>]*><br>/g, '<hr style="border-color:var(--border);margin:16px 0">');
+    return html;
+}
+
+// ---------------------------------------------------------------------------
+// AI Reports view
+// ---------------------------------------------------------------------------
+async function viewAI() {
+    if (!currentHost) {
+        setContent(h("div", { className: "page-header" }, [
+            h("h2", {}, t("ai_reports")),
+            h("p", { style: "color:var(--text-secondary)" }, t("select_host_first")),
+        ]));
+        return;
+    }
+
+    setContent(loading());
+    const config = await API.get("/api/ai/config");
+    const reports = await API.get("/api/ai/reports");
+
+    const container = h("div");
+
+    // Header
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("ai_reports")),
+        h("p", {}, t("ai_subtitle")),
+    ]));
+
+    // ---- Card 1: Provider Configuration ----
+    const provCard = h("div", { className: "card" });
+    provCard.appendChild(h("div", { className: "card-header" }, t("ai_provider_config")));
+    const provBody = h("div", { className: "card-body" });
+
+    const activeProvider = config.provider || "openai";
+    const oai = config.openai || {};
+    const ant = config.anthropic || {};
+    const oll = config.ollama || {};
+    const cust = config.custom || {};
+
+    provBody.innerHTML = `
+        <div class="grid grid-2" style="gap:16px">
+            <div style="grid-column:1/-1">
+                <label>${escapeHtml(t("ai_provider"))}</label>
+                <select id="ai-provider" class="form-control" style="margin-top:4px">
+                    <option value="openai" ${activeProvider === "openai" ? "selected" : ""}>${escapeHtml(t("ai_provider_openai"))}</option>
+                    <option value="anthropic" ${activeProvider === "anthropic" ? "selected" : ""}>${escapeHtml(t("ai_provider_anthropic"))}</option>
+                    <option value="ollama" ${activeProvider === "ollama" ? "selected" : ""}>${escapeHtml(t("ai_provider_ollama"))}</option>
+                    <option value="custom" ${activeProvider === "custom" ? "selected" : ""}>${escapeHtml(t("ai_provider_custom"))}</option>
+                </select>
+            </div>
+
+            <!-- OpenAI fields -->
+            <div id="ai-fields-openai" class="ai-provider-fields" style="grid-column:1/-1;display:${activeProvider === "openai" ? "block" : "none"}">
+                <div class="grid grid-2" style="gap:12px">
+                    <div>
+                        <label>${escapeHtml(t("ai_api_key"))}</label>
+                        <input id="ai-oai-key" class="form-control" type="password" value="${escapeAttr(oai.api_key || "")}" style="margin-top:4px">
+                    </div>
+                    <div>
+                        <label>${escapeHtml(t("ai_model"))}</label>
+                        <input id="ai-oai-model" class="form-control" value="${escapeAttr(oai.model || "gpt-4o-mini")}" style="margin-top:4px">
+                    </div>
+                    <div style="grid-column:1/-1">
+                        <label>${escapeHtml(t("ai_base_url"))}</label>
+                        <input id="ai-oai-url" class="form-control" value="${escapeAttr(oai.base_url || "https://api.openai.com/v1")}" style="margin-top:4px">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Anthropic fields -->
+            <div id="ai-fields-anthropic" class="ai-provider-fields" style="grid-column:1/-1;display:${activeProvider === "anthropic" ? "block" : "none"}">
+                <div class="grid grid-2" style="gap:12px">
+                    <div>
+                        <label>${escapeHtml(t("ai_api_key"))}</label>
+                        <input id="ai-ant-key" class="form-control" type="password" value="${escapeAttr(ant.api_key || "")}" style="margin-top:4px">
+                    </div>
+                    <div>
+                        <label>${escapeHtml(t("ai_model"))}</label>
+                        <input id="ai-ant-model" class="form-control" value="${escapeAttr(ant.model || "claude-sonnet-4-20250514")}" style="margin-top:4px">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Ollama fields -->
+            <div id="ai-fields-ollama" class="ai-provider-fields" style="grid-column:1/-1;display:${activeProvider === "ollama" ? "block" : "none"}">
+                <div class="grid grid-2" style="gap:12px">
+                    <div>
+                        <label>${escapeHtml(t("ai_base_url"))}</label>
+                        <input id="ai-oll-url" class="form-control" value="${escapeAttr(oll.base_url || "http://localhost:11434")}" style="margin-top:4px">
+                    </div>
+                    <div>
+                        <label>${escapeHtml(t("ai_model"))}</label>
+                        <input id="ai-oll-model" class="form-control" value="${escapeAttr(oll.model || "llama3")}" style="margin-top:4px">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Custom fields -->
+            <div id="ai-fields-custom" class="ai-provider-fields" style="grid-column:1/-1;display:${activeProvider === "custom" ? "block" : "none"}">
+                <div class="grid grid-2" style="gap:12px">
+                    <div style="grid-column:1/-1">
+                        <label>${escapeHtml(t("ai_base_url"))}</label>
+                        <input id="ai-cust-url" class="form-control" value="${escapeAttr(cust.base_url || "")}" placeholder="https://your-api.example.com/v1" style="margin-top:4px">
+                    </div>
+                    <div>
+                        <label>${escapeHtml(t("ai_api_key"))}</label>
+                        <input id="ai-cust-key" class="form-control" type="password" value="${escapeAttr(cust.api_key || "")}" style="margin-top:4px">
+                    </div>
+                    <div>
+                        <label>${escapeHtml(t("ai_model"))}</label>
+                        <input id="ai-cust-model" class="form-control" value="${escapeAttr(cust.model || "")}" style="margin-top:4px">
+                    </div>
+                </div>
+            </div>
+
+            <!-- System prompt -->
+            <div style="grid-column:1/-1">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <label>${escapeHtml(t("ai_system_prompt"))}</label>
+                    <button class="btn btn-xs" id="ai-prompt-reset" style="font-size:11px;padding:2px 8px">${escapeHtml(t("ai_prompt_reset"))}</button>
+                </div>
+                <textarea id="ai-system-prompt" class="form-control" rows="6" style="margin-top:4px;font-size:12px;font-family:monospace">${escapeHtml(config.system_prompt || config.default_system_prompt || "")}</textarea>
+                <small style="color:var(--text-secondary)">${escapeHtml(t("ai_system_prompt_hint"))}</small>
+            </div>
+        </div>
+
+        <div style="margin-top:16px;display:flex;gap:10px">
+            <button class="btn btn-sm" id="ai-test-btn">${escapeHtml(t("ai_test_connection"))}</button>
+            <button class="btn btn-sm btn-primary" id="ai-save-btn">${escapeHtml(t("ai_save_config"))}</button>
+            <span id="ai-test-result" style="font-size:13px;padding-top:6px"></span>
+        </div>
+    `;
+    provCard.appendChild(provBody);
+    container.appendChild(provCard);
+
+    // ---- Card 2: Schedule & Generate ----
+    const schedCard = h("div", { className: "card", style: "margin-top:16px" });
+    schedCard.appendChild(h("div", { className: "card-header" }, t("ai_schedule")));
+    const schedBody = h("div", { className: "card-body" });
+
+    const sched = config.schedule || {};
+    const weekdays = t("ai_weekdays").split(",");
+    let weekdayOpts = weekdays.map((d, i) =>
+        `<option value="${i}" ${sched.weekday === i ? "selected" : ""}>${escapeHtml(d)}</option>`
+    ).join("");
+
+    schedBody.innerHTML = `
+        <div class="grid grid-2" style="gap:16px">
+            <div style="grid-column:1/-1">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="ai-sched-enabled" ${sched.enabled ? "checked" : ""}>
+                    ${escapeHtml(t("ai_schedule_enable"))}
+                </label>
+            </div>
+            <div>
+                <label>${escapeHtml(t("ai_schedule_interval"))}</label>
+                <select id="ai-sched-interval" class="form-control" style="margin-top:4px">
+                    <option value="daily" ${sched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
+                    <option value="weekly" ${sched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
+                </select>
+            </div>
+            <div>
+                <label>${escapeHtml(t("ai_schedule_hour"))}</label>
+                <input id="ai-sched-hour" class="form-control" type="number" min="0" max="23" value="${sched.hour ?? 6}" style="margin-top:4px">
+            </div>
+            <div id="ai-weekday-row" style="${sched.interval === "weekly" ? "" : "display:none"}">
+                <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
+                <select id="ai-sched-weekday" class="form-control" style="margin-top:4px">${weekdayOpts}</select>
+            </div>
+            <div>
+                <label>${escapeHtml(t("ai_report_language"))}</label>
+                <select id="ai-report-lang" class="form-control" style="margin-top:4px">
+                    <option value="en" ${config.report_language === "en" ? "selected" : ""}>English</option>
+                    <option value="de" ${config.report_language === "de" ? "selected" : ""}>Deutsch</option>
+                </select>
+            </div>
+            <div style="grid-column:1/-1">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="ai-notify-report" ${config.notify_on_report ? "checked" : ""}>
+                    ${escapeHtml(t("ai_notify_on_report"))}
+                </label>
+            </div>
+        </div>
+
+        <div style="margin-top:16px">
+            <button class="btn btn-primary" id="ai-generate-btn">${escapeHtml(t("ai_generate_now"))}</button>
+            <span id="ai-generate-status" style="font-size:13px;margin-left:10px"></span>
+        </div>
+    `;
+    schedCard.appendChild(schedBody);
+    container.appendChild(schedCard);
+
+    // ---- Card 3: Reports & Chat ----
+    // Filter reports by current host
+    const hostReports = reports.filter(r => {
+        if (!r.host_addresses) return true; // old reports without host info
+        return r.host_addresses.includes(currentHost);
+    });
+
+    const reportCard = h("div", { className: "card", style: "margin-top:16px" });
+    reportCard.appendChild(h("div", { className: "card-header" }, t("ai_report_viewer")));
+    const reportBody = h("div", { className: "card-body" });
+
+    if (hostReports.length === 0) {
+        reportBody.innerHTML = `<p style="color:var(--text-secondary)">${escapeHtml(t("ai_no_reports"))}</p>`;
+    } else {
+        let reportOpts = hostReports.map((r, i) =>
+            `<option value="${i}">${escapeHtml(r.timestamp)} — ${escapeHtml(r.provider)} (${escapeHtml(r.model)})</option>`
+        ).join("");
+
+        const firstReport = hostReports[0];
+        const metaText = t("ai_report_meta", firstReport.timestamp, firstReport.provider, firstReport.model, firstReport.host_count || "?");
+
+        reportBody.innerHTML = `
+            <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+                <select id="ai-report-select" class="form-control" style="flex:1">
+                    ${reportOpts}
+                </select>
+                <button class="btn btn-sm" id="ai-pdf-btn" title="${escapeAttr(t("ai_download_pdf"))}">${escapeHtml(t("ai_download_pdf"))}</button>
+            </div>
+            <div id="ai-report-meta" style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">${escapeHtml(metaText)}</div>
+            <div id="ai-report-content" style="line-height:1.7;font-size:14px">${renderMarkdown(firstReport.content)}</div>
+
+            <hr style="border-color:var(--border);margin:24px 0 16px">
+
+            <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("ai_chat_title"))}</h4>
+            <div style="display:flex;gap:8px">
+                <input id="ai-chat-input" class="form-control" style="flex:1" placeholder="${escapeAttr(t("ai_chat_placeholder"))}">
+                <button class="btn btn-primary" id="ai-chat-btn">${escapeHtml(t("ai_chat_send"))}</button>
+            </div>
+            <div id="ai-chat-response" style="margin-top:12px;font-size:14px;line-height:1.7"></div>
+        `;
+    }
+    reportCard.appendChild(reportBody);
+    container.appendChild(reportCard);
+
+    setContent(container);
+
+    // ---- Wire up event listeners ----
+
+    // Provider toggle
+    document.getElementById("ai-provider").addEventListener("change", (e) => {
+        document.querySelectorAll(".ai-provider-fields").forEach(el => el.style.display = "none");
+        const target = document.getElementById(`ai-fields-${e.target.value}`);
+        if (target) target.style.display = "block";
+    });
+
+    // Weekly/daily toggle
+    document.getElementById("ai-sched-interval").addEventListener("change", (e) => {
+        document.getElementById("ai-weekday-row").style.display = e.target.value === "weekly" ? "" : "none";
+    });
+
+    // Test connection
+    document.getElementById("ai-test-btn").addEventListener("click", async () => {
+        const resultEl = document.getElementById("ai-test-result");
+        resultEl.textContent = t("ai_testing");
+        resultEl.style.color = "var(--text-secondary)";
+
+        // Save config first so test uses current values
+        await _saveAIConfig();
+
+        const r = await API.post("/api/ai/test", {});
+        if (r.success) {
+            resultEl.textContent = t("ai_test_success", r.message || "OK");
+            resultEl.style.color = "var(--success)";
+        } else {
+            resultEl.textContent = t("ai_test_failed", r.message || r.error || "Unknown");
+            resultEl.style.color = "var(--danger)";
+        }
+    });
+
+    // Save config
+    document.getElementById("ai-save-btn").addEventListener("click", async () => {
+        await _saveAIConfig();
+        toast(t("ai_config_saved"), "success");
+    });
+
+    // Reset system prompt to default
+    document.getElementById("ai-prompt-reset").addEventListener("click", () => {
+        const promptEl = document.getElementById("ai-system-prompt");
+        promptEl.value = config.default_system_prompt || "";
+    });
+
+    // Generate report
+    document.getElementById("ai-generate-btn").addEventListener("click", async () => {
+        const btn = document.getElementById("ai-generate-btn");
+        const statusEl = document.getElementById("ai-generate-status");
+        btn.disabled = true;
+        statusEl.textContent = t("ai_generating");
+        statusEl.style.color = "var(--text-secondary)";
+
+        // Save config first so language/provider changes are applied
+        await _saveAIConfig();
+
+        const lang = document.getElementById("ai-report-lang").value;
+        const r = await API.post("/api/ai/report", { host: currentHost, lang });
+        btn.disabled = false;
+        if (r.success) {
+            toast(t("ai_report_generated"), "success");
+            viewAI(); // Refresh to show new report
+        } else {
+            statusEl.textContent = t("ai_report_failed", r.error || "Unknown");
+            statusEl.style.color = "var(--danger)";
+        }
+    });
+
+    // Report selector + PDF
+    if (hostReports.length > 0) {
+        document.getElementById("ai-report-select").addEventListener("change", (e) => {
+            const idx = parseInt(e.target.value);
+            const rep = hostReports[idx];
+            if (rep) {
+                document.getElementById("ai-report-content").innerHTML = renderMarkdown(rep.content);
+                document.getElementById("ai-report-meta").textContent =
+                    t("ai_report_meta", rep.timestamp, rep.provider, rep.model, rep.host_count || "?");
+            }
+        });
+
+        // PDF download
+        document.getElementById("ai-pdf-btn").addEventListener("click", () => {
+            const idx = parseInt(document.getElementById("ai-report-select").value);
+            const rep = hostReports[idx];
+            if (rep && rep.id) {
+                window.open(`/api/ai/report/pdf/${rep.id}`, "_blank");
+            }
+        });
+
+        // Chat
+        const chatBtn = document.getElementById("ai-chat-btn");
+        const chatInput = document.getElementById("ai-chat-input");
+        if (chatBtn) {
+            const sendChat = async () => {
+                const question = chatInput.value.trim();
+                if (!question) { toast(t("ai_chat_empty"), "error"); return; }
+                const responseEl = document.getElementById("ai-chat-response");
+                responseEl.innerHTML = `<span style="color:var(--text-secondary)">${escapeHtml(t("ai_chat_thinking"))}</span>`;
+                chatBtn.disabled = true;
+
+                const lang = document.getElementById("ai-report-lang").value;
+                const r = await API.post("/api/ai/chat", { question, host: currentHost, lang });
+                chatBtn.disabled = false;
+                if (r.success) {
+                    responseEl.innerHTML = renderMarkdown(r.answer);
+                } else {
+                    responseEl.innerHTML = `<span style="color:var(--danger)">${escapeHtml(t("ai_chat_failed", r.error || "Unknown"))}</span>`;
+                }
+            };
+            chatBtn.addEventListener("click", sendChat);
+            chatInput.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") sendChat();
+            });
+        }
+    }
+}
+
+async function _saveAIConfig() {
+    const provider = document.getElementById("ai-provider").value;
+    const newConfig = {
+        provider,
+        openai: {
+            api_key: document.getElementById("ai-oai-key").value.trim(),
+            model: document.getElementById("ai-oai-model").value.trim(),
+            base_url: document.getElementById("ai-oai-url").value.trim(),
+        },
+        anthropic: {
+            api_key: document.getElementById("ai-ant-key").value.trim(),
+            model: document.getElementById("ai-ant-model").value.trim(),
+        },
+        ollama: {
+            base_url: document.getElementById("ai-oll-url").value.trim(),
+            model: document.getElementById("ai-oll-model").value.trim(),
+        },
+        custom: {
+            base_url: document.getElementById("ai-cust-url").value.trim(),
+            api_key: document.getElementById("ai-cust-key").value.trim(),
+            model: document.getElementById("ai-cust-model").value.trim(),
+        },
+        schedule: {
+            enabled: document.getElementById("ai-sched-enabled").checked,
+            interval: document.getElementById("ai-sched-interval").value,
+            hour: parseInt(document.getElementById("ai-sched-hour").value) || 6,
+            weekday: parseInt(document.getElementById("ai-sched-weekday").value) || 0,
+        },
+        report_language: document.getElementById("ai-report-lang").value,
+        notify_on_report: document.getElementById("ai-notify-report").checked,
+        system_prompt: document.getElementById("ai-system-prompt").value.trim(),
+    };
+    await API.post("/api/ai/config", newConfig);
 }
 
 function escapeAttr(s) {
