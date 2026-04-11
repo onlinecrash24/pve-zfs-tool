@@ -62,6 +62,7 @@
 
 ### AI Reports & Analysis
 - **Multi-Provider Support** -- OpenAI (GPT), Anthropic (Claude), Ollama (local), or any OpenAI-compatible API
+- **Ollama Model Discovery** -- Automatically query and select available models from your Ollama instance
 - **Daily/Weekly Reports** -- Automated ZFS infrastructure analysis on schedule
 - **Comprehensive Analysis** -- Pool health, storage capacity, scrub status, snapshot coverage, SMART health, anomalies
 - **Actionable Recommendations** -- Prioritized suggestions for scrubs, cleanup, capacity planning
@@ -70,6 +71,14 @@
 - **Bilingual Reports** -- Reports follow the global UI language (English/German)
 - **Customizable System Prompt** -- Edit the AI prompt to reduce false positives for your environment
 - **PDF Export** -- Download reports as PDF
+
+### Security
+- **CSRF Protection** -- Token-based protection for all state-changing requests
+- **Input Validation** -- Whitelist-based validation on all parameters before shell execution
+- **Rate Limiting** -- Login brute-force protection (5 attempts, 5-minute lockout)
+- **Secure Sessions** -- HttpOnly cookies, SameSite=Lax, configurable Secure flag, 8-hour timeout
+- **Path Traversal Prevention** -- Realpath validation with symlink attack protection
+- **SSH Host Key Persistence** -- Known hosts saved and verified on subsequent connections
 
 ### Authentication & i18n
 - **Login** -- Session-based authentication, credentials configurable via environment variables
@@ -100,9 +109,10 @@ services:
       - ssh-keys:/root/.ssh
       - zfs-data:/app/data
     environment:
-      - SECRET_KEY=change-me-in-production
-      - ADMIN_USER=admin
-      - ADMIN_PASSWORD=password
+      - SECRET_KEY=your-secret-key-here       # CHANGE THIS!
+      - ADMIN_USER=admin                      # CHANGE THIS!
+      - ADMIN_PASSWORD=your-strong-password    # CHANGE THIS!
+      # - FORCE_HTTPS=true                    # Enable when behind HTTPS reverse proxy
 
 volumes:
   ssh-keys:
@@ -123,12 +133,14 @@ docker compose up -d --build
 
 ---
 
-Open the web UI at `http://DOCKER-HOST-IP:5000` -- Default login: `admin` / `password`
+Open the web UI at `http://DOCKER-HOST-IP:5000`
+
+> **Important:** Change `SECRET_KEY`, `ADMIN_USER`, and `ADMIN_PASSWORD` before deploying to production. The application will log warnings at startup if default values are detected.
 
 ## Setup
 
 1. **Start the container** -- The SSH key pair is generated automatically on first start.
-2. **Login** -- Open the web UI and log in with the default credentials (`admin` / `password`). Change them in `docker-compose.yml`.
+2. **Login** -- Open the web UI and log in with the credentials configured in `docker-compose.yml`.
 3. **Copy the public key** -- The public key is displayed on the home page. Copy it.
 4. **Add to Proxmox hosts** -- Paste the key into `~/.ssh/authorized_keys` on each Proxmox host:
    ```bash
@@ -137,6 +149,38 @@ Open the web UI at `http://DOCKER-HOST-IP:5000` -- Default login: `admin` / `pas
 5. **Add hosts in the UI** -- Go to "Hosts", add name, IP, port, and user.
 6. **Test connection** -- Click "Test" to verify SSH connectivity.
 7. **Manage ZFS** -- Select a host from the dropdown and explore pools, snapshots, etc.
+
+## HTTPS with Reverse Proxy (recommended)
+
+For production deployments, place the container behind an HTTPS reverse proxy:
+
+### Caddy (automatic TLS)
+
+```
+zfs.example.com {
+    reverse_proxy localhost:5000
+}
+```
+
+### nginx
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name zfs.example.com;
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://localhost:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Then set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies.
 
 ## Notifications Setup
 
@@ -162,40 +206,43 @@ Open the web UI at `http://DOCKER-HOST-IP:5000` -- Default login: `admin` / `pas
 
 ## Configuration
 
-Environment variables in `docker-compose.yml`:
+### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SECRET_KEY` | `change-me-in-production` | Flask session secret key |
-| `ADMIN_USER` | `admin` | Login username |
-| `ADMIN_PASSWORD` | `password` | Login password |
+| `SECRET_KEY` | `dev-key-change-me` | Flask session secret key -- **must be changed!** |
+| `ADMIN_USER` | `admin` | Login username -- **should be changed** |
+| `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
+| `FORCE_HTTPS` | *(empty)* | Set to `true` to enable secure session cookies (behind HTTPS proxy) |
 
-Persistent volumes:
+### Persistent Volumes
 
 | Volume | Path | Description |
 |--------|------|-------------|
 | `ssh-keys` | `/root/.ssh` | SSH key pair (persisted across restarts) |
-| `zfs-data` | `/app/data` | Host config, notification settings |
+| `zfs-data` | `/app/data` | Host config, notification settings, AI reports, SSH known hosts |
 
 ## Tech Stack
 
-- **Backend** -- Python 3.12, Flask, Paramiko (SSH), Gunicorn
+- **Backend** -- Python 3.12, Flask, Paramiko (SSH), Gunicorn, fpdf2
 - **Frontend** -- Vanilla JavaScript SPA, CSS dark theme
-- **Deployment** -- Docker, Docker Compose
+- **Deployment** -- Docker, Docker Compose, GitHub Container Registry
 
 ## Project Structure
 
 ```
-zfs-tool/
+pve-zfs-tool/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── entrypoint.sh
 ├── requirements.txt
 └── app/
-    ├── main.py              # Flask API routes
+    ├── main.py              # Flask API routes & authentication
     ├── ssh_manager.py       # SSH connection & host management
     ├── zfs_commands.py      # ZFS command wrappers via SSH
+    ├── validators.py        # Input validation (whitelist-based)
     ├── ai_reports.py        # AI-powered ZFS analysis & reports
+    ├── ai_pdf.py            # PDF report generation
     ├── notifications.py     # Telegram, Gotify & Matrix notifications
     ├── templates/
     │   ├── index.html       # Single-page application
