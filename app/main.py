@@ -33,6 +33,7 @@ from app.ai_reports import (
     load_reports as load_ai_reports,
     chat as ai_chat,
     start_scheduler as start_ai_scheduler,
+    list_ollama_models,
 )
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -659,6 +660,13 @@ def api_save_ai_config_route():
 @app.route("/api/ai/test", methods=["POST"])
 def api_ai_test():
     result = test_ai_connection()
+    return jsonify(result)
+
+
+@app.route("/api/ai/ollama-models", methods=["POST"])
+def api_ai_ollama_models():
+    data = request.json or {}
+    result = list_ollama_models(data.get("base_url"))
     return jsonify(result)
 
 

@@ -1893,7 +1893,12 @@ async function viewAI() {
                     </div>
                     <div>
                         <label>${escapeHtml(t("ai_model"))}</label>
-                        <input id="ai-oll-model" class="form-control" value="${escapeAttr(oll.model || "llama3")}" style="margin-top:4px">
+                        <div style="display:flex;gap:6px;margin-top:4px">
+                            <select id="ai-oll-model" class="form-control" style="flex:1">
+                                <option value="${escapeAttr(oll.model || "llama3")}" selected>${escapeHtml(oll.model || "llama3")}</option>
+                            </select>
+                            <button class="btn btn-sm" id="ai-oll-refresh" title="${escapeAttr(t("ai_ollama_refresh"))}" style="white-space:nowrap">${escapeHtml(t("ai_ollama_refresh"))}</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2044,6 +2049,27 @@ async function viewAI() {
     // Weekly/daily toggle
     document.getElementById("ai-sched-interval").addEventListener("change", (e) => {
         document.getElementById("ai-weekday-row").style.display = e.target.value === "weekly" ? "" : "none";
+    });
+
+    // Ollama model refresh
+    document.getElementById("ai-oll-refresh").addEventListener("click", async () => {
+        const btn = document.getElementById("ai-oll-refresh");
+        const select = document.getElementById("ai-oll-model");
+        const currentModel = select.value;
+        btn.disabled = true;
+        btn.textContent = "...";
+        const baseUrl = document.getElementById("ai-oll-url").value.trim();
+        const r = await API.post("/api/ai/ollama-models", { base_url: baseUrl });
+        btn.disabled = false;
+        btn.textContent = t("ai_ollama_refresh");
+        if (r.success && r.models && r.models.length > 0) {
+            select.innerHTML = r.models.map(m =>
+                `<option value="${escapeAttr(m)}" ${m === currentModel ? "selected" : ""}>${escapeHtml(m)}</option>`
+            ).join("");
+            toast(t("ai_ollama_models_found", r.models.length), "success");
+        } else {
+            toast(t("ai_ollama_models_failed", r.error || "No models"), "error");
+        }
     });
 
     // Test connection
