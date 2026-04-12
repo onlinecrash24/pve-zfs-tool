@@ -115,6 +115,7 @@ services:
       - ADMIN_USER=admin                      # CHANGE THIS!
       - ADMIN_PASSWORD=your-strong-password    # CHANGE THIS!
       - FORCE_HTTPS=true                      # Set to false if not behind HTTPS proxy
+      - TZ=UTC                                # Timezone (e.g. Europe/Berlin)
 
 volumes:
   ssh-keys:
@@ -227,6 +228,7 @@ server {
 | `ADMIN_USER` | `admin` | Login username -- **should be changed** |
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
+| `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
 
 ### Persistent Volumes
 
