@@ -73,10 +73,11 @@ IMPORTANT — Proxmox-specific rules you MUST follow:
 - **zfs-auto-snapshot on Proxmox**: On Proxmox VE, zfs-auto-snapshot is managed via CRON JOBS (found in /etc/cron.{frequent,hourly,daily,weekly,monthly}/zfs-auto-snapshot), NOT via systemd. There is no systemd service for zfs-auto-snapshot. NEVER recommend "systemctl status zfs-auto-snapshot" or similar systemd commands. If snapshot scheduling needs to be checked, recommend: "ls /etc/cron.*/zfs-auto-snapshot" or "cat /etc/cron.daily/zfs-auto-snapshot".
 - **Snapshot levels**: zfs-auto-snapshot typically creates 5 levels: frequent (every 15 min), hourly, daily, weekly, monthly. Each level has its own retention policy.
 - **0B used snapshots**: Snapshots on parent datasets (e.g. rpool@zfs-auto-snap_daily-...) often show 0B used. This is completely normal and does NOT indicate a problem — the actual snapshot data is in the child datasets.
-- **Retention policy verification**: The data includes two key fields you MUST cross-reference:
-  1. "retention_policy" in auto_snapshot: the CONFIGURED --keep=N values per label from cron (e.g. {"frequent": 12, "hourly": 96, "daily": 10, "weekly": 6, "monthly": 3})
-  2. "auto_snapshot_labels" in snapshot_summary: the ACTUAL snapshot counts per label per dataset (e.g. {"frequent": {"total_snapshots": 372, "per_dataset": 12}})
-  Compare "per_dataset" (actual) against "retention_policy" (configured). They should match. If actual > configured, retention cleanup may be delayed. If actual < configured, snapshots may be failing. ONLY use these numbers — do NOT guess or invent retention values.
+- **Retention analysis**: The data includes a pre-computed "retention_analysis" section per host with:
+  - "per_label": For each label (frequent/hourly/daily/weekly/monthly): total_snapshots, dataset_count, configured_keep (from cron --keep=N), per_dataset_avg, newest_age_human, count_mismatches (datasets where actual != configured), stale_datasets (datasets where newest snapshot exceeds max age threshold).
+  - "missing_labels": Datasets that SHOULD have a label (because it's configured in cron) but DON'T have any snapshots for it.
+  Use this data directly — do NOT guess or invent retention values. Report count_mismatches and stale_datasets as findings. If stale_datasets is empty for a label, that label is healthy.
+  Age thresholds: frequent > 30min, hourly > 2h, daily > 48h, weekly > 14d, monthly > 62d.
 - **Snapshot integrity**: ZFS scrub already validates ALL data including snapshots via checksums. A successful scrub with 0 errors confirms snapshot chain integrity. Do NOT recommend separate checksum verification — scrub covers this.
 
 Use emoji indicators: ✅ OK, ⚠️ Warning, ❌ Critical
@@ -100,10 +101,11 @@ WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
 - **zfs-auto-snapshot auf Proxmox**: Auf Proxmox VE wird zfs-auto-snapshot über CRON-JOBS verwaltet (in /etc/cron.{frequent,hourly,daily,weekly,monthly}/zfs-auto-snapshot), NICHT über systemd. Es gibt keinen systemd-Service für zfs-auto-snapshot. Empfehle NIEMALS "systemctl status zfs-auto-snapshot" oder ähnliche systemd-Befehle. Zum Prüfen der Snapshot-Planung empfehle: "ls /etc/cron.*/zfs-auto-snapshot" oder "cat /etc/cron.daily/zfs-auto-snapshot".
 - **Snapshot-Ebenen**: zfs-auto-snapshot erstellt typischerweise 5 Ebenen: frequent (alle 15 Min), hourly, daily, weekly, monthly. Jede Ebene hat ihre eigene Aufbewahrungsrichtlinie.
 - **0B-Snapshots**: Snapshots auf Parent-Datasets (z.B. rpool@zfs-auto-snap_daily-...) zeigen oft 0B used. Das ist völlig normal und weist NICHT auf ein Problem hin — die tatsächlichen Snapshot-Daten befinden sich in den Child-Datasets.
-- **Aufbewahrungsrichtlinie (Retention) prüfen**: Die Daten enthalten zwei Schlüsselfelder, die du GEGENPRÜFEN musst:
-  1. "retention_policy" in auto_snapshot: die KONFIGURIERTEN --keep=N Werte pro Label aus Cron (z.B. {"frequent": 12, "hourly": 96, "daily": 10, "weekly": 6, "monthly": 3})
-  2. "auto_snapshot_labels" in snapshot_summary: die TATSÄCHLICHE Snapshot-Anzahl pro Label pro Dataset (z.B. {"frequent": {"total_snapshots": 372, "per_dataset": 12}})
-  Vergleiche "per_dataset" (IST) mit "retention_policy" (SOLL). Sie sollten übereinstimmen. Bei IST > SOLL verzögert sich evtl. die Bereinigung. Bei IST < SOLL könnten Snapshots fehlschlagen. Verwende NUR diese Zahlen — erfinde oder rate KEINE Retention-Werte.
+- **Aufbewahrungsanalyse (Retention)**: Die Daten enthalten eine vorberechnete "retention_analysis" pro Host mit:
+  - "per_label": Für jedes Label (frequent/hourly/daily/weekly/monthly): total_snapshots, dataset_count, configured_keep (aus Cron --keep=N), per_dataset_avg, newest_age_human, count_mismatches (Datasets wo IST != SOLL), stale_datasets (Datasets wo neuester Snapshot das Max-Alter überschreitet).
+  - "missing_labels": Datasets die ein Label haben SOLLTEN (weil in Cron konfiguriert) aber KEINE Snapshots dafür haben.
+  Verwende diese Daten direkt — erfinde oder rate KEINE Retention-Werte. Melde count_mismatches und stale_datasets als Befunde. Wenn stale_datasets für ein Label leer ist, ist dieses Label gesund.
+  Alters-Schwellwerte: frequent > 30min, hourly > 2h, daily > 48h, weekly > 14d, monthly > 62d.
 - **Snapshot-Integrität**: ZFS Scrub validiert bereits ALLE Daten inklusive Snapshots per Checksumme. Ein erfolgreicher Scrub mit 0 Fehlern bestätigt die Integrität der Snapshot-Kette. Empfehle KEINE separate Checksummen-Prüfung — Scrub deckt dies ab.
 
 Verwende Emoji-Indikatoren: ✅ OK, ⚠️ Warnung, ❌ Kritisch
@@ -221,6 +223,24 @@ def _add_report(report):
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _format_age(seconds):
+    """Format seconds into a human-readable age string."""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m"
+    elif seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    else:
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        return f"{days}d {hours}h"
+
+
+# ---------------------------------------------------------------------------
 # Data collection
 # ---------------------------------------------------------------------------
 
@@ -232,7 +252,7 @@ def collect_host_data(host_address=None):
     from app.zfs_commands import (
         get_pools, get_pool_status, get_datasets, get_snapshots,
         get_arc_stats, get_zfs_events, get_smart_status,
-        get_auto_snapshot_status,
+        get_auto_snapshot_status, get_snapshot_ages,
     )
 
     all_hosts = load_hosts()
@@ -300,22 +320,17 @@ def collect_host_data(host_address=None):
         except Exception as e:
             host_data["errors"].append(f"Datasets: {e}")
 
-        # Snapshots (summarized – don't send every snapshot name)
-        # NOTE: get_snapshots() returns snapshots sorted by creation DESCENDING
-        # (newest first via "zfs list -S creation"), so we use list position
-        # instead of string comparison for dates (human-readable date strings
-        # like "Sun Apr 12 10:45 2026" don't sort lexicographically).
+        # Snapshots — two-pass analysis:
+        # Pass 1: get_snapshots() for basic counts (sorted newest-first)
+        # Pass 2: get_snapshot_ages() with epoch timestamps for precise age analysis
         try:
             snapshots = get_snapshots(host)
             snap_by_dataset = {}
             auto_count = 0
             manual_count = 0
-            newest = None  # First entry = newest (list is sorted newest-first)
-            oldest = None  # Last entry = oldest
+            newest = None
+            oldest = None
             total_count = len(snapshots)
-            # Count snapshots per auto-snapshot label (frequent/hourly/daily/weekly/monthly)
-            label_counts = {}
-            label_newest = {}  # Track newest snapshot per label (first seen = newest)
 
             for snap in snapshots:
                 ds = snap.get("dataset", "unknown")
@@ -323,12 +338,10 @@ def collect_host_data(host_address=None):
                 creation = snap.get("creation", "")
 
                 if ds not in snap_by_dataset:
-                    # First time seeing this dataset = newest snapshot for it
                     snap_by_dataset[ds] = {"count": 0, "auto": 0, "manual": 0,
                                            "oldest": creation, "newest": creation,
                                            "used_total": snap.get("used", "")}
                 snap_by_dataset[ds]["count"] += 1
-                # Always update oldest — last seen entry is the oldest (list sorted newest-first)
                 if creation:
                     snap_by_dataset[ds]["oldest"] = creation
 
@@ -336,33 +349,14 @@ def collect_host_data(host_address=None):
                 if is_auto:
                     auto_count += 1
                     snap_by_dataset[ds]["auto"] += 1
-                    # Extract label: zfs-auto-snap_frequent-2026-... -> frequent
-                    label_match = re.match(r'zfs-auto-snap[_-](\w+?)[-_]\d', sname)
-                    if label_match:
-                        label = label_match.group(1)
-                        label_counts[label] = label_counts.get(label, 0) + 1
-                        if label not in label_newest and creation:
-                            label_newest[label] = creation  # First seen = newest
                 else:
                     manual_count += 1
                     snap_by_dataset[ds]["manual"] += 1
 
-                # Track global newest/oldest using list position (not string comparison)
                 if creation:
                     if newest is None:
-                        newest = creation  # First entry = newest
-                    oldest = creation  # Keep updating — last entry = oldest
-
-            # Build retention verification: compare configured --keep vs actual count per dataset
-            # Actual count per label is total / number of datasets with snapshots
-            datasets_with_snaps = len(snap_by_dataset) or 1
-            retention_actual = {}
-            for label, total in label_counts.items():
-                retention_actual[label] = {
-                    "total_snapshots": total,
-                    "per_dataset": round(total / datasets_with_snaps),
-                    "newest": label_newest.get(label, ""),
-                }
+                        newest = creation
+                    oldest = creation
 
             host_data["snapshot_summary"] = {
                 "total": total_count,
@@ -371,10 +365,123 @@ def collect_host_data(host_address=None):
                 "oldest": oldest,
                 "newest": newest,
                 "per_dataset": snap_by_dataset,
-                "auto_snapshot_labels": retention_actual,
             }
         except Exception as e:
             host_data["errors"].append(f"Snapshots: {e}")
+
+        # Snapshot retention analysis with epoch timestamps
+        # (per dataset, per label — like check-snapshot-age.txt)
+        try:
+            import time as _time
+            now_epoch = int(_time.time())
+            snap_ages = get_snapshot_ages(host)
+            retention_cfg = {}
+            if host_data.get("auto_snapshot"):
+                retention_cfg = host_data["auto_snapshot"].get("retention_policy", {})
+
+            # Max allowed age per label (seconds) before warning
+            max_age = {
+                "frequent": 1800,    # 30 min
+                "hourly":   7200,    # 2 hours
+                "daily":    172800,  # 48 hours
+                "weekly":   1209600, # 14 days
+                "monthly":  5400000, # ~62 days
+            }
+
+            # Analyze per dataset per label
+            retention_warnings = []
+            label_global = {}  # Global per-label stats
+            datasets_without_labels = {}  # Datasets missing expected labels
+
+            all_expected_labels = set(retention_cfg.keys())
+
+            for ds, labels_data in snap_ages.items():
+                present_labels = set(labels_data.keys()) - {"other"}
+
+                # Check for missing labels on this dataset
+                missing = all_expected_labels - present_labels - {"other"}
+                if missing and ds in snap_by_dataset:  # Only for datasets that have any snapshots
+                    for ml in missing:
+                        if ml not in datasets_without_labels:
+                            datasets_without_labels[ml] = []
+                        datasets_without_labels[ml].append(ds)
+
+                for label, info in labels_data.items():
+                    if label == "other":
+                        continue
+                    count = info["count"]
+                    newest_epoch = info["newest"]
+                    age_sec = now_epoch - newest_epoch
+
+                    # Global label stats
+                    if label not in label_global:
+                        label_global[label] = {
+                            "total_snapshots": 0,
+                            "dataset_count": 0,
+                            "configured_keep": retention_cfg.get(label, "?"),
+                            "oldest_age_sec": 0,
+                            "newest_age_sec": age_sec,
+                            "count_mismatches": [],
+                            "stale_datasets": [],
+                        }
+                    lg = label_global[label]
+                    lg["total_snapshots"] += count
+                    lg["dataset_count"] += 1
+
+                    if age_sec < lg["newest_age_sec"]:
+                        lg["newest_age_sec"] = age_sec
+                    if age_sec > lg["oldest_age_sec"]:
+                        lg["oldest_age_sec"] = age_sec
+
+                    # Check: count vs configured --keep
+                    configured = retention_cfg.get(label)
+                    if configured and count != configured:
+                        lg["count_mismatches"].append({
+                            "dataset": ds,
+                            "actual": count,
+                            "configured": configured,
+                        })
+
+                    # Check: newest snapshot too old?
+                    threshold = max_age.get(label, 5400000)
+                    if age_sec > threshold:
+                        age_human = _format_age(age_sec)
+                        max_human = _format_age(threshold)
+                        lg["stale_datasets"].append({
+                            "dataset": ds,
+                            "age": age_human,
+                            "threshold": max_human,
+                        })
+
+            # Build compact summary for AI
+            for label, lg in label_global.items():
+                lg["per_dataset_avg"] = round(lg["total_snapshots"] / max(lg["dataset_count"], 1))
+                lg["newest_age_human"] = _format_age(lg["newest_age_sec"])
+                # Limit stale/mismatch lists to avoid token bloat
+                if len(lg["stale_datasets"]) > 5:
+                    total_stale = len(lg["stale_datasets"])
+                    lg["stale_datasets"] = lg["stale_datasets"][:5]
+                    lg["stale_datasets"].append({"note": f"... and {total_stale - 5} more"})
+                if len(lg["count_mismatches"]) > 5:
+                    total_mm = len(lg["count_mismatches"])
+                    lg["count_mismatches"] = lg["count_mismatches"][:5]
+                    lg["count_mismatches"].append({"note": f"... and {total_mm - 5} more"})
+
+            # Missing labels summary (truncated)
+            missing_labels_summary = {}
+            for label, ds_list in datasets_without_labels.items():
+                missing_labels_summary[label] = {
+                    "count": len(ds_list),
+                    "examples": ds_list[:5],
+                }
+
+            host_data["retention_analysis"] = {
+                "per_label": label_global,
+                "missing_labels": missing_labels_summary,
+                "datasets_analyzed": len(snap_ages),
+            }
+        except Exception as e:
+            host_data["errors"].append(f"Retention analysis: {e}")
 
         # ARC Stats
         try:
