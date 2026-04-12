@@ -53,6 +53,9 @@ class ReportPDF(FPDF):
             self._fn_mono = "Courier"
 
     def _f(self, style="", size=10):
+        # Only allow valid fpdf2 font styles (B/I/U/S and combinations)
+        if style and not all(c in "BIUS" for c in style.upper()):
+            style = ""
         self.set_font(self._fn, style, size)
 
     def header(self):
@@ -277,7 +280,10 @@ def _render_rich_text(pdf, text, size=9, line_height=5):
     # Check if the full text fits on one line; if not, fall back to multi_cell
     total_w = 0
     for seg_text, seg_style in segments:
-        pdf._f(seg_style, size)
+        if seg_style == "code":
+            pdf.set_font(pdf._fn_mono, "", size - 1)
+        else:
+            pdf._f(seg_style, size)
         total_w += pdf.get_string_width(pdf._s(seg_text))
 
     if total_w > page_w - (pdf.get_x() - pdf.l_margin):
