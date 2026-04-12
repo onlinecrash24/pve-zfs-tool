@@ -60,11 +60,14 @@ if os.environ.get("FORCE_HTTPS", "").lower() in ("1", "true", "yes"):
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "password")
 
-# Startup security warnings
+# Startup security checks
 if app.secret_key == "dev-key-change-me":
-    log.warning("⚠️  SECRET_KEY is using the default value! Set a strong SECRET_KEY environment variable.")
+    log.critical("SECRET_KEY is using the insecure default! Set a strong SECRET_KEY environment variable.")
+    # Auto-generate a random key so sessions are at least unpredictable
+    app.secret_key = secrets.token_hex(32)
+    log.warning("Auto-generated random SECRET_KEY for this session (will change on restart).")
 if ADMIN_USER == "admin" and ADMIN_PASSWORD == "password":
-    log.warning("⚠️  Using default credentials (admin/password)! Change ADMIN_USER and ADMIN_PASSWORD environment variables.")
+    log.warning("Using default credentials (admin/password)! Change ADMIN_USER and ADMIN_PASSWORD environment variables.")
 
 # Rate limiting for login attempts
 _login_attempts = {}  # IP -> {"count": int, "last": float}
@@ -86,6 +89,16 @@ def login_required(f):
             return redirect(url_for("login_page"))
         return f(*args, **kwargs)
     return wrapper
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    return response
 
 
 @app.before_request
@@ -137,6 +150,8 @@ def api_login():
     if user_ok and pass_ok:
         # Reset attempts on successful login
         _login_attempts.pop(client_ip, None)
+        # Rotate session ID to prevent session fixation attacks
+        session.clear()
         session["authenticated"] = True
         session["csrf_token"] = secrets.token_hex(32)
         session.permanent = True
@@ -807,4 +822,4 @@ except Exception:
     pass
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0")
+    app.run(debug=False, host="0.0.0.0")

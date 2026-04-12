@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SSH_DIR="/root/.ssh"
+SSH_DIR="/home/zfstool/.ssh"
 KEY_FILE="$SSH_DIR/id_ed25519"
 
 if [ ! -f "$KEY_FILE" ]; then
@@ -21,4 +21,4 @@ cat "$KEY_FILE.pub"
 echo ""
 
 echo "==> Starting ZFS Tool..."
-exec gunicorn --bind 0.0.0.0:5000 --workers 2 --worker-class sync --timeout 300 --preload --log-level info app.main:app
+exec gunicorn --bind 0.0.0.0:5000 --workers 1 --worker-class sync --timeout 300 --preload --log-level info app.main:app
