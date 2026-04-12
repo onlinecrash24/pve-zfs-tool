@@ -67,8 +67,14 @@ Structure your report with these sections:
 6. **Anomalies & Warnings** - Anything unusual or concerning
 7. **Recommendations** - Actionable items sorted by priority
 
+IMPORTANT — Proxmox-specific rules you MUST follow:
+- **Snapshot freshness**: The data includes per-dataset snapshot details (per_dataset). To determine the most recent snapshot, you MUST check the "newest" date across ALL child datasets (e.g. rpool/data/subvol-*, rpool/ROOT/pve-1, tank/data/vm-*), not just the root pool dataset. Parent dataset snapshots often show 0B used — this is normal because actual data lives in child datasets.
+- **zfs-auto-snapshot on Proxmox**: On Proxmox VE, zfs-auto-snapshot is managed via CRON JOBS (found in /etc/cron.d/zfs-auto-snapshot), NOT via systemd. There is no systemd service for zfs-auto-snapshot. NEVER recommend "systemctl status zfs-auto-snapshot" or similar systemd commands. If snapshot scheduling needs to be checked, recommend: "cat /etc/cron.d/zfs-auto-snapshot" or "crontab -l".
+- **Snapshot levels**: zfs-auto-snapshot typically creates 5 levels: frequent (every 15 min), hourly, daily, weekly, monthly. Each level has its own retention policy.
+- **0B used snapshots**: Snapshots on parent datasets (e.g. rpool@zfs-auto-snap_daily-...) often show 0B used. This is completely normal and does NOT indicate a problem — the actual snapshot data is in the child datasets.
+
 Use emoji indicators: ✅ OK, ⚠️ Warning, ❌ Critical
-Be concise but thorough. Focus on actionable insights.
+Be concise but thorough. Focus on actionable insights. Avoid false positives.
 Write the entire report in English."""
 
 DEFAULT_SYSTEM_PROMPT_DE = """Du bist ein ZFS-Speicherexperte und analysierst eine Proxmox VE Umgebung.
@@ -83,8 +89,14 @@ Strukturiere den Bericht mit diesen Abschnitten:
 6. **Anomalien & Warnungen** - Auffälligkeiten oder Bedenken
 7. **Empfehlungen** - Handlungsempfehlungen nach Priorität sortiert
 
+WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
+- **Snapshot-Aktualität**: Die Daten enthalten Snapshot-Details pro Dataset (per_dataset). Um den neuesten Snapshot zu bestimmen, MUSST du das "newest"-Datum über ALLE Child-Datasets prüfen (z.B. rpool/data/subvol-*, rpool/ROOT/pve-1, tank/data/vm-*), nicht nur das Root-Pool-Dataset. Snapshots auf Parent-Datasets zeigen oft 0B used — das ist normal, da die eigentlichen Daten in Child-Datasets liegen.
+- **zfs-auto-snapshot auf Proxmox**: Auf Proxmox VE wird zfs-auto-snapshot über CRON-JOBS verwaltet (in /etc/cron.d/zfs-auto-snapshot), NICHT über systemd. Es gibt keinen systemd-Service für zfs-auto-snapshot. Empfehle NIEMALS "systemctl status zfs-auto-snapshot" oder ähnliche systemd-Befehle. Zum Prüfen der Snapshot-Planung empfehle: "cat /etc/cron.d/zfs-auto-snapshot" oder "crontab -l".
+- **Snapshot-Ebenen**: zfs-auto-snapshot erstellt typischerweise 5 Ebenen: frequent (alle 15 Min), hourly, daily, weekly, monthly. Jede Ebene hat ihre eigene Aufbewahrungsrichtlinie.
+- **0B-Snapshots**: Snapshots auf Parent-Datasets (z.B. rpool@zfs-auto-snap_daily-...) zeigen oft 0B used. Das ist völlig normal und weist NICHT auf ein Problem hin — die tatsächlichen Snapshot-Daten befinden sich in den Child-Datasets.
+
 Verwende Emoji-Indikatoren: ✅ OK, ⚠️ Warnung, ❌ Kritisch
-Sei prägnant aber gründlich. Fokus auf umsetzbare Erkenntnisse.
+Sei prägnant aber gründlich. Fokus auf umsetzbare Erkenntnisse. Vermeide Fehlalarme.
 Schreibe den gesamten Bericht auf Deutsch."""
 
 
