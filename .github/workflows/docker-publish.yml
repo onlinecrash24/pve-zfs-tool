@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "v0.9.44"          # z.B. v1.0.0 → triggert Release-Build
+      - "v*"               # Jeder Tag mit v-Prefix triggert Release-Build (v0.9.5, v1.0.0, etc.)
   pull_request:
     branches:
       - main              # Bei PRs nur bauen, nicht pushen
