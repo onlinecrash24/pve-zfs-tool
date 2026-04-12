@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 DATA_DIR = "/app/data"
 HOSTS_FILE = os.path.join(DATA_DIR, "hosts.json")
-SSH_KEY = os.environ.get("SSH_KEY_PATH", "/home/zfstool/.ssh/id_ed25519")
+SSH_KEY = "/root/.ssh/id_ed25519"
 KNOWN_HOSTS = os.path.join(DATA_DIR, "known_hosts")
 
 _lock = threading.Lock()
