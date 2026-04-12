@@ -504,6 +504,55 @@ def diff_snapshot(host, snapshot1, snapshot2=None):
 
 
 # ---------------------------------------------------------------------------
+# ZDB deep analysis (triggered only on pool problems)
+# ---------------------------------------------------------------------------
+
+def get_zdb_analysis(host, pool_name):
+    """Run zdb diagnostics on a pool. Only call for degraded/errored pools.
+
+    Returns structured diagnostic data (truncated to avoid token bloat).
+    """
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError:
+        return {"error": "Invalid pool name"}
+
+    diagnostics = {}
+
+    # 1. Basic pool internals (config, vdev tree, state)
+    result = run_command(host, f"zdb {pool_name} 2>&1 | head -80")
+    if result["success"]:
+        diagnostics["pool_info"] = result["stdout"].strip()
+
+    # 2. Block statistics (space accounting — can detect silent corruption)
+    result = run_command(host, f"zdb -b {pool_name} 2>&1 | tail -20", timeout=60)
+    if result["success"]:
+        diagnostics["block_stats"] = result["stdout"].strip()
+
+    # 3. Label info from vdevs (pool GUID, txg, disk state)
+    #    Get disk devices from pool status first
+    vdev_result = run_command(host,
+        f"zpool status {pool_name} | grep -E '^\t  ' | awk '{{print $1}}' | head -10")
+    if vdev_result["success"]:
+        vdev_names = [v.strip() for v in vdev_result["stdout"].strip().splitlines() if v.strip()]
+        label_info = []
+        for vdev in vdev_names[:6]:  # Max 6 disks
+            # Try /dev/disk/by-id path or direct /dev/ path
+            for dev_path in [f"/dev/{vdev}", f"/dev/disk/by-id/{vdev}"]:
+                lbl = run_command(host, f"zdb -l {dev_path} 2>&1 | head -30")
+                if lbl["success"] and lbl["stdout"].strip():
+                    label_info.append({
+                        "device": dev_path,
+                        "label": lbl["stdout"].strip(),
+                    })
+                    break
+        if label_info:
+            diagnostics["disk_labels"] = label_info
+
+    return diagnostics
+
+
+# ---------------------------------------------------------------------------
 # ZFS-auto-snapshot
 # ---------------------------------------------------------------------------
 

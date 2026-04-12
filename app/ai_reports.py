@@ -79,6 +79,7 @@ IMPORTANT — Proxmox-specific rules you MUST follow:
   Use this data directly — do NOT guess or invent retention values. Report count_mismatches and stale_datasets as findings. If stale_datasets is empty for a label, that label is healthy.
   Age thresholds: frequent > 30min, hourly > 2h, daily > 48h, weekly > 14d, monthly > 62d.
 - **Snapshot integrity**: ZFS scrub already validates ALL data including snapshots via checksums. A successful scrub with 0 errors confirms snapshot chain integrity. Do NOT recommend separate checksum verification — scrub covers this.
+- **ZDB deep diagnostics**: If a pool is DEGRADED, FAULTED, or has data errors, the data may include a "zdb_diagnostics" section with low-level pool internals (block stats, vdev tree, disk labels). Use this data to provide detailed root-cause analysis: which vdev failed, txg state, block allocation issues. If zdb_diagnostics is absent, the pools are healthy — do NOT recommend running zdb manually.
 
 Use emoji indicators: ✅ OK, ⚠️ Warning, ❌ Critical
 Be concise but thorough. Focus on actionable insights. Avoid false positives.
@@ -107,6 +108,7 @@ WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
   Verwende diese Daten direkt — erfinde oder rate KEINE Retention-Werte. Melde count_mismatches und stale_datasets als Befunde. Wenn stale_datasets für ein Label leer ist, ist dieses Label gesund.
   Alters-Schwellwerte: frequent > 30min, hourly > 2h, daily > 48h, weekly > 14d, monthly > 62d.
 - **Snapshot-Integrität**: ZFS Scrub validiert bereits ALLE Daten inklusive Snapshots per Checksumme. Ein erfolgreicher Scrub mit 0 Fehlern bestätigt die Integrität der Snapshot-Kette. Empfehle KEINE separate Checksummen-Prüfung — Scrub deckt dies ab.
+- **ZDB-Tiefendiagnose**: Falls ein Pool DEGRADED, FAULTED oder Datenfehler hat, können die Daten eine "zdb_diagnostics"-Sektion enthalten mit Low-Level Pool-Internals (Block-Statistiken, vdev-Baum, Disk-Labels). Nutze diese Daten für eine detaillierte Ursachenanalyse: welches vdev ausgefallen ist, txg-Status, Block-Allokationsprobleme. Falls zdb_diagnostics fehlt, sind die Pools gesund — empfehle NICHT, zdb manuell auszuführen.
 
 Verwende Emoji-Indikatoren: ✅ OK, ⚠️ Warnung, ❌ Kritisch
 Sei prägnant aber gründlich. Fokus auf umsetzbare Erkenntnisse. Vermeide Fehlalarme.
@@ -252,7 +254,7 @@ def collect_host_data(host_address=None):
     from app.zfs_commands import (
         get_pools, get_pool_status, get_datasets, get_snapshots,
         get_arc_stats, get_zfs_events, get_smart_status,
-        get_auto_snapshot_status, get_snapshot_ages,
+        get_auto_snapshot_status, get_snapshot_ages, get_zdb_analysis,
     )
 
     all_hosts = load_hosts()
@@ -289,7 +291,8 @@ def collect_host_data(host_address=None):
         try:
             pools = get_pools(host)
             host_data["pools"] = pools
-            # Get scrub info from pool status
+            # Get scrub info from pool status + detect problems for zdb trigger
+            degraded_pools = []
             for pool in pools:
                 try:
                     status = get_pool_status(host, pool["name"])
@@ -300,8 +303,23 @@ def collect_host_data(host_address=None):
                             if line.startswith("scan:") or line.startswith("scrub"):
                                 pool["last_scan"] = line
                                 break
+                        # Detect pool problems: DEGRADED, FAULTED, errors
+                        health = pool.get("health", "").upper()
+                        has_errors = "errors:" in stdout and "No known data errors" not in stdout
+                        if health in ("DEGRADED", "FAULTED", "UNAVAIL", "SUSPENDED") or has_errors:
+                            degraded_pools.append(pool["name"])
                 except Exception:
                     pass
+
+            # ZDB deep analysis — only for pools with problems
+            if degraded_pools:
+                zdb_results = {}
+                for pool_name in degraded_pools:
+                    try:
+                        zdb_results[pool_name] = get_zdb_analysis(host, pool_name)
+                    except Exception as e:
+                        zdb_results[pool_name] = {"error": str(e)}
+                host_data["zdb_diagnostics"] = zdb_results
         except Exception as e:
             host_data["errors"].append(f"Pools: {e}")
 
