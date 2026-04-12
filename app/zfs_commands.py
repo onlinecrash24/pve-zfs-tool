@@ -511,13 +511,20 @@ def get_auto_snapshot_status(host):
     result = run_command(host, "which zfs-auto-snapshot 2>/dev/null && echo INSTALLED || echo NOT_INSTALLED")
     installed = "INSTALLED" in result.get("stdout", "")
 
-    cron_result = run_command(host, "cat /etc/cron.d/zfs-auto-snapshot 2>/dev/null; crontab -l 2>/dev/null | grep zfs-auto-snapshot")
-    timers_result = run_command(host, "systemctl list-timers --no-pager 2>/dev/null | grep zfs-auto-snapshot")
+    # Check all standard cron locations used by Proxmox (cron.d + cron.{frequent,hourly,daily,weekly,monthly})
+    cron_cmd = (
+        "cat /etc/cron.d/zfs-auto-snapshot 2>/dev/null; "
+        "for d in frequent hourly daily weekly monthly; do "
+        "  f=/etc/cron.$d/zfs-auto-snapshot; "
+        "  if [ -f \"$f\" ]; then echo \"=== $d ===\"; cat \"$f\"; fi; "
+        "done; "
+        "crontab -l 2>/dev/null | grep zfs-auto-snapshot"
+    )
+    cron_result = run_command(host, cron_cmd)
 
     return {
         "installed": installed,
         "cron_config": cron_result.get("stdout", ""),
-        "timers": timers_result.get("stdout", ""),
     }
 
 

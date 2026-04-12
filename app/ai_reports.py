@@ -290,13 +290,17 @@ def collect_host_data(host_address=None):
             host_data["errors"].append(f"Datasets: {e}")
 
         # Snapshots (summarized – don't send every snapshot name)
+        # NOTE: get_snapshots() returns snapshots sorted by creation DESCENDING
+        # (newest first via "zfs list -S creation"), so we use list position
+        # instead of string comparison for dates (human-readable date strings
+        # like "Sun Apr 12 10:45 2026" don't sort lexicographically).
         try:
             snapshots = get_snapshots(host)
             snap_by_dataset = {}
             auto_count = 0
             manual_count = 0
-            oldest = None
-            newest = None
+            newest = None  # First entry = newest (list is sorted newest-first)
+            oldest = None  # Last entry = oldest
             total_count = len(snapshots)
 
             for snap in snapshots:
@@ -305,10 +309,14 @@ def collect_host_data(host_address=None):
                 creation = snap.get("creation", "")
 
                 if ds not in snap_by_dataset:
+                    # First time seeing this dataset = newest snapshot for it
                     snap_by_dataset[ds] = {"count": 0, "auto": 0, "manual": 0,
                                            "oldest": creation, "newest": creation,
                                            "used_total": snap.get("used", "")}
                 snap_by_dataset[ds]["count"] += 1
+                # Always update oldest — last seen entry is the oldest (list sorted newest-first)
+                if creation:
+                    snap_by_dataset[ds]["oldest"] = creation
 
                 is_auto = sname.startswith("zfs-auto-snap") or sname.startswith("autosnap")
                 if is_auto:
@@ -318,15 +326,11 @@ def collect_host_data(host_address=None):
                     manual_count += 1
                     snap_by_dataset[ds]["manual"] += 1
 
+                # Track global newest/oldest using list position (not string comparison)
                 if creation:
-                    if not oldest or creation < oldest:
-                        oldest = creation
-                    if not newest or creation > newest:
-                        newest = creation
-                    if creation < snap_by_dataset[ds]["oldest"]:
-                        snap_by_dataset[ds]["oldest"] = creation
-                    if creation > snap_by_dataset[ds]["newest"]:
-                        snap_by_dataset[ds]["newest"] = creation
+                    if newest is None:
+                        newest = creation  # First entry = newest
+                    oldest = creation  # Keep updating — last entry = oldest
 
             host_data["snapshot_summary"] = {
                 "total": total_count,
