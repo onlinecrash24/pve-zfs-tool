@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SSH_DIR="/home/zfstool/.ssh"
+SSH_DIR="/root/.ssh"
 KEY_FILE="$SSH_DIR/id_ed25519"
 
 if [ ! -f "$KEY_FILE" ]; then

@@ -6,7 +6,7 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ssh-keys:/home/zfstool/.ssh
+      - ssh-keys:/root/.ssh
       - zfs-data:/app/data
     environment:
       - SECRET_KEY=change-me-in-production
