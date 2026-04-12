@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -69,9 +70,14 @@ Structure your report with these sections:
 
 IMPORTANT — Proxmox-specific rules you MUST follow:
 - **Snapshot freshness**: The data includes per-dataset snapshot details (per_dataset). To determine the most recent snapshot, you MUST check the "newest" date across ALL child datasets (e.g. rpool/data/subvol-*, rpool/ROOT/pve-1, tank/data/vm-*), not just the root pool dataset. Parent dataset snapshots often show 0B used — this is normal because actual data lives in child datasets.
-- **zfs-auto-snapshot on Proxmox**: On Proxmox VE, zfs-auto-snapshot is managed via CRON JOBS (found in /etc/cron.d/zfs-auto-snapshot), NOT via systemd. There is no systemd service for zfs-auto-snapshot. NEVER recommend "systemctl status zfs-auto-snapshot" or similar systemd commands. If snapshot scheduling needs to be checked, recommend: "cat /etc/cron.d/zfs-auto-snapshot" or "crontab -l".
+- **zfs-auto-snapshot on Proxmox**: On Proxmox VE, zfs-auto-snapshot is managed via CRON JOBS (found in /etc/cron.{frequent,hourly,daily,weekly,monthly}/zfs-auto-snapshot), NOT via systemd. There is no systemd service for zfs-auto-snapshot. NEVER recommend "systemctl status zfs-auto-snapshot" or similar systemd commands. If snapshot scheduling needs to be checked, recommend: "ls /etc/cron.*/zfs-auto-snapshot" or "cat /etc/cron.daily/zfs-auto-snapshot".
 - **Snapshot levels**: zfs-auto-snapshot typically creates 5 levels: frequent (every 15 min), hourly, daily, weekly, monthly. Each level has its own retention policy.
 - **0B used snapshots**: Snapshots on parent datasets (e.g. rpool@zfs-auto-snap_daily-...) often show 0B used. This is completely normal and does NOT indicate a problem — the actual snapshot data is in the child datasets.
+- **Retention policy verification**: The data includes two key fields you MUST cross-reference:
+  1. "retention_policy" in auto_snapshot: the CONFIGURED --keep=N values per label from cron (e.g. {"frequent": 12, "hourly": 96, "daily": 10, "weekly": 6, "monthly": 3})
+  2. "auto_snapshot_labels" in snapshot_summary: the ACTUAL snapshot counts per label per dataset (e.g. {"frequent": {"total_snapshots": 372, "per_dataset": 12}})
+  Compare "per_dataset" (actual) against "retention_policy" (configured). They should match. If actual > configured, retention cleanup may be delayed. If actual < configured, snapshots may be failing. ONLY use these numbers — do NOT guess or invent retention values.
+- **Snapshot integrity**: ZFS scrub already validates ALL data including snapshots via checksums. A successful scrub with 0 errors confirms snapshot chain integrity. Do NOT recommend separate checksum verification — scrub covers this.
 
 Use emoji indicators: ✅ OK, ⚠️ Warning, ❌ Critical
 Be concise but thorough. Focus on actionable insights. Avoid false positives.
@@ -91,9 +97,14 @@ Strukturiere den Bericht mit diesen Abschnitten:
 
 WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
 - **Snapshot-Aktualität**: Die Daten enthalten Snapshot-Details pro Dataset (per_dataset). Um den neuesten Snapshot zu bestimmen, MUSST du das "newest"-Datum über ALLE Child-Datasets prüfen (z.B. rpool/data/subvol-*, rpool/ROOT/pve-1, tank/data/vm-*), nicht nur das Root-Pool-Dataset. Snapshots auf Parent-Datasets zeigen oft 0B used — das ist normal, da die eigentlichen Daten in Child-Datasets liegen.
-- **zfs-auto-snapshot auf Proxmox**: Auf Proxmox VE wird zfs-auto-snapshot über CRON-JOBS verwaltet (in /etc/cron.d/zfs-auto-snapshot), NICHT über systemd. Es gibt keinen systemd-Service für zfs-auto-snapshot. Empfehle NIEMALS "systemctl status zfs-auto-snapshot" oder ähnliche systemd-Befehle. Zum Prüfen der Snapshot-Planung empfehle: "cat /etc/cron.d/zfs-auto-snapshot" oder "crontab -l".
+- **zfs-auto-snapshot auf Proxmox**: Auf Proxmox VE wird zfs-auto-snapshot über CRON-JOBS verwaltet (in /etc/cron.{frequent,hourly,daily,weekly,monthly}/zfs-auto-snapshot), NICHT über systemd. Es gibt keinen systemd-Service für zfs-auto-snapshot. Empfehle NIEMALS "systemctl status zfs-auto-snapshot" oder ähnliche systemd-Befehle. Zum Prüfen der Snapshot-Planung empfehle: "ls /etc/cron.*/zfs-auto-snapshot" oder "cat /etc/cron.daily/zfs-auto-snapshot".
 - **Snapshot-Ebenen**: zfs-auto-snapshot erstellt typischerweise 5 Ebenen: frequent (alle 15 Min), hourly, daily, weekly, monthly. Jede Ebene hat ihre eigene Aufbewahrungsrichtlinie.
 - **0B-Snapshots**: Snapshots auf Parent-Datasets (z.B. rpool@zfs-auto-snap_daily-...) zeigen oft 0B used. Das ist völlig normal und weist NICHT auf ein Problem hin — die tatsächlichen Snapshot-Daten befinden sich in den Child-Datasets.
+- **Aufbewahrungsrichtlinie (Retention) prüfen**: Die Daten enthalten zwei Schlüsselfelder, die du GEGENPRÜFEN musst:
+  1. "retention_policy" in auto_snapshot: die KONFIGURIERTEN --keep=N Werte pro Label aus Cron (z.B. {"frequent": 12, "hourly": 96, "daily": 10, "weekly": 6, "monthly": 3})
+  2. "auto_snapshot_labels" in snapshot_summary: die TATSÄCHLICHE Snapshot-Anzahl pro Label pro Dataset (z.B. {"frequent": {"total_snapshots": 372, "per_dataset": 12}})
+  Vergleiche "per_dataset" (IST) mit "retention_policy" (SOLL). Sie sollten übereinstimmen. Bei IST > SOLL verzögert sich evtl. die Bereinigung. Bei IST < SOLL könnten Snapshots fehlschlagen. Verwende NUR diese Zahlen — erfinde oder rate KEINE Retention-Werte.
+- **Snapshot-Integrität**: ZFS Scrub validiert bereits ALLE Daten inklusive Snapshots per Checksumme. Ein erfolgreicher Scrub mit 0 Fehlern bestätigt die Integrität der Snapshot-Kette. Empfehle KEINE separate Checksummen-Prüfung — Scrub deckt dies ab.
 
 Verwende Emoji-Indikatoren: ✅ OK, ⚠️ Warnung, ❌ Kritisch
 Sei prägnant aber gründlich. Fokus auf umsetzbare Erkenntnisse. Vermeide Fehlalarme.
@@ -302,6 +313,9 @@ def collect_host_data(host_address=None):
             newest = None  # First entry = newest (list is sorted newest-first)
             oldest = None  # Last entry = oldest
             total_count = len(snapshots)
+            # Count snapshots per auto-snapshot label (frequent/hourly/daily/weekly/monthly)
+            label_counts = {}
+            label_newest = {}  # Track newest snapshot per label (first seen = newest)
 
             for snap in snapshots:
                 ds = snap.get("dataset", "unknown")
@@ -322,6 +336,13 @@ def collect_host_data(host_address=None):
                 if is_auto:
                     auto_count += 1
                     snap_by_dataset[ds]["auto"] += 1
+                    # Extract label: zfs-auto-snap_frequent-2026-... -> frequent
+                    label_match = re.match(r'zfs-auto-snap[_-](\w+?)[-_]\d', sname)
+                    if label_match:
+                        label = label_match.group(1)
+                        label_counts[label] = label_counts.get(label, 0) + 1
+                        if label not in label_newest and creation:
+                            label_newest[label] = creation  # First seen = newest
                 else:
                     manual_count += 1
                     snap_by_dataset[ds]["manual"] += 1
@@ -332,6 +353,17 @@ def collect_host_data(host_address=None):
                         newest = creation  # First entry = newest
                     oldest = creation  # Keep updating — last entry = oldest
 
+            # Build retention verification: compare configured --keep vs actual count per dataset
+            # Actual count per label is total / number of datasets with snapshots
+            datasets_with_snaps = len(snap_by_dataset) or 1
+            retention_actual = {}
+            for label, total in label_counts.items():
+                retention_actual[label] = {
+                    "total_snapshots": total,
+                    "per_dataset": round(total / datasets_with_snaps),
+                    "newest": label_newest.get(label, ""),
+                }
+
             host_data["snapshot_summary"] = {
                 "total": total_count,
                 "auto": auto_count,
@@ -339,6 +371,7 @@ def collect_host_data(host_address=None):
                 "oldest": oldest,
                 "newest": newest,
                 "per_dataset": snap_by_dataset,
+                "auto_snapshot_labels": retention_actual,
             }
         except Exception as e:
             host_data["errors"].append(f"Snapshots: {e}")
