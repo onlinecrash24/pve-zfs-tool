@@ -9,7 +9,7 @@ import uuid
 import logging
 import urllib.request
 import urllib.error
-from datetime import datetime
+from app.timezone import now as tz_now
 
 DATA_DIR = "/app/data"
 AI_CONFIG_FILE = os.path.join(DATA_DIR, "ai_config.json")
@@ -246,7 +246,7 @@ def collect_host_data(host_address=None):
         hosts = all_hosts
 
     data = {
-        "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "collected_at": tz_now().strftime("%Y-%m-%d %H:%M:%S"),
         "host_count": len(hosts),
         "hosts": [],
     }
@@ -611,7 +611,7 @@ def generate_report(host_address=None, lang_override=None):
     host_addresses = [h.get("address", "") for h in data.get("hosts", [])]
     report = {
         "id": str(uuid.uuid4())[:8],
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": tz_now().strftime("%Y-%m-%d %H:%M:%S"),
         "provider": provider,
         "model": model,
         "content": result.get("content", ""),
@@ -711,7 +711,7 @@ def _scheduler_loop():
                 _scheduler_stop.wait(30)
                 continue
 
-            now = datetime.now()
+            now = tz_now()
             target_hour = schedule.get("hour", 6)
             interval = schedule.get("interval", "daily")
 
@@ -752,7 +752,7 @@ def start_scheduler():
         return
     # Set last_run_key to today so we don't immediately trigger on startup
     if _last_run_key is None:
-        _last_run_key = datetime.now().strftime("%Y-%m-%d")
+        _last_run_key = tz_now().strftime("%Y-%m-%d")
     _scheduler_stop.clear()
     _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
     _scheduler_thread.start()

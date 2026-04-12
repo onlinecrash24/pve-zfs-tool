@@ -13,6 +13,7 @@ services:
       - ADMIN_USER=admin
       - ADMIN_PASSWORD=password
       - FORCE_HTTPS=true  # HTTPS behind reverse proxy
+      - TZ=UTC            # Timezone (e.g. Europe/Berlin, America/New_York)
 
 volumes:
   ssh-keys:

@@ -6,7 +6,7 @@ import threading
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime
+from app.timezone import now_str as tz_now_str
 
 DATA_DIR = "/app/data"
 NOTIFY_CONFIG_FILE = os.path.join(DATA_DIR, "notifications.json")
@@ -161,7 +161,7 @@ def send_notification(event_type, title, message, priority=5):
         return {"skipped": True, "reason": f"Event '{event_type}' is disabled"}
 
     results = {}
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = tz_now_str()
     full_message = f"{message}\n\n{timestamp}"
 
     # Telegram
