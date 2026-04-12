@@ -485,7 +485,7 @@ def _calc_col_widths(pdf, rows, n_cols, page_w):
     max_widths = [0] * n_cols
     for row in rows:
         for j in range(min(len(row), n_cols)):
-            text = _strip_md(row[j])
+            text = pdf._s(_strip_md(row[j]))
             w = pdf.get_string_width(text) + 6  # padding
             max_widths[j] = max(max_widths[j], w)
 
