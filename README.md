@@ -77,8 +77,10 @@
 - **Input Validation** -- Whitelist-based validation on all parameters before shell execution
 - **Rate Limiting** -- Login brute-force protection (5 attempts, 5-minute lockout)
 - **Secure Sessions** -- HttpOnly cookies, SameSite=Lax, configurable Secure flag, 8-hour timeout
+- **Security Headers** -- CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - **Path Traversal Prevention** -- Realpath validation with symlink attack protection
-- **SSH Host Key Persistence** -- Known hosts saved and verified on subsequent connections
+- **SSH Host Key Verification** -- Trust On First Use (TOFU), known hosts saved and verified on subsequent connections
+- **Reverse Proxy Ready** -- ProxyFix middleware for correct HTTPS detection behind NPM, nginx, Caddy
 
 ### Authentication & i18n
 - **Login** -- Session-based authentication, credentials configurable via environment variables
@@ -112,7 +114,7 @@ services:
       - SECRET_KEY=your-secret-key-here       # CHANGE THIS!
       - ADMIN_USER=admin                      # CHANGE THIS!
       - ADMIN_PASSWORD=your-strong-password    # CHANGE THIS!
-      # - FORCE_HTTPS=true                    # Enable when behind HTTPS reverse proxy
+      - FORCE_HTTPS=true                      # Set to false if not behind HTTPS proxy
 
 volumes:
   ssh-keys:
@@ -152,7 +154,19 @@ Open the web UI at `http://DOCKER-HOST-IP:5000`
 
 ## HTTPS with Reverse Proxy (recommended)
 
-For production deployments, place the container behind an HTTPS reverse proxy:
+For production deployments, place the container behind an HTTPS reverse proxy. The application includes `ProxyFix` middleware and automatically trusts `X-Forwarded-*` headers from your proxy.
+
+Set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies.
+
+### Nginx Proxy Manager (NPM)
+
+1. Add a new Proxy Host in NPM
+2. Set the forward hostname to the Docker host IP (or container name if in the same Docker network)
+3. Set the forward port to `5000`
+4. Enable SSL via Let's Encrypt on the SSL tab
+5. Under **Advanced** tab, no extra config needed -- NPM sets all required headers automatically
+
+> **Tip:** If NPM and zfs-tool run on the same Docker host, add them to the same Docker network for reliable connectivity.
 
 ### Caddy (automatic TLS)
 
@@ -175,12 +189,11 @@ server {
         proxy_pass http://localhost:5000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
-
-Then set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies.
 
 ## Notifications Setup
 
@@ -213,7 +226,7 @@ Then set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure sessio
 | `SECRET_KEY` | `dev-key-change-me` | Flask session secret key -- **must be changed!** |
 | `ADMIN_USER` | `admin` | Login username -- **should be changed** |
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
-| `FORCE_HTTPS` | *(empty)* | Set to `true` to enable secure session cookies (behind HTTPS proxy) |
+| `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
 
 ### Persistent Volumes
 
