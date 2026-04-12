@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "v0.9.41"          # z.B. v1.0.0 → triggert Release-Build
+      - "v0.9.43"          # z.B. v1.0.0 → triggert Release-Build
   pull_request:
     branches:
       - main              # Bei PRs nur bauen, nicht pushen
