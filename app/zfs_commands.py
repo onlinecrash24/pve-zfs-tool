@@ -521,10 +521,24 @@ def get_auto_snapshot_status(host):
         "crontab -l 2>/dev/null | grep zfs-auto-snapshot"
     )
     cron_result = run_command(host, cron_cmd)
+    cron_raw = cron_result.get("stdout", "")
+
+    # Parse --keep=N and --label=X from cron config for structured retention data
+    retention_policy = {}
+    for line in cron_raw.splitlines():
+        if "zfs-auto-snapshot" not in line or line.strip().startswith("#"):
+            continue
+        label_match = re.search(r'--label[=\s]+(\S+)', line)
+        keep_match = re.search(r'--keep[=\s]+(\d+)', line)
+        if label_match and keep_match:
+            label = label_match.group(1)
+            keep = int(keep_match.group(1))
+            retention_policy[label] = keep
 
     return {
         "installed": installed,
-        "cron_config": cron_result.get("stdout", ""),
+        "cron_config": cron_raw,
+        "retention_policy": retention_policy,
     }
 
 
