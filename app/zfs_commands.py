@@ -542,6 +542,46 @@ def get_auto_snapshot_status(host):
     }
 
 
+def get_snapshot_ages(host):
+    """Get snapshot data with epoch timestamps for per-dataset-per-label age analysis.
+
+    Returns dict: {dataset: {label: {"count": N, "oldest": epoch, "newest": epoch}}}
+    """
+    result = run_command(host, "zfs list -t snapshot -Hpo name,creation")
+    if not result["success"]:
+        return {}
+
+    labels = ("frequent", "hourly", "daily", "weekly", "monthly", "yearly")
+    label_re = re.compile("|".join(labels))
+
+    datasets = {}
+    for line in result["stdout"].strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or "@" not in parts[0]:
+            continue
+        ds, snap = parts[0].rsplit("@", 1)
+        try:
+            creation = int(parts[1])
+        except (ValueError, IndexError):
+            continue
+
+        label_match = label_re.search(snap)
+        label = label_match.group(0) if label_match else "other"
+
+        if ds not in datasets:
+            datasets[ds] = {}
+        if label not in datasets[ds]:
+            datasets[ds][label] = {"count": 0, "oldest": creation, "newest": creation}
+
+        datasets[ds][label]["count"] += 1
+        if creation < datasets[ds][label]["oldest"]:
+            datasets[ds][label]["oldest"] = creation
+        if creation > datasets[ds][label]["newest"]:
+            datasets[ds][label]["newest"] = creation
+
+    return datasets
+
+
 def get_auto_snapshot_property(host, dataset):
     try:
         dataset = validate_dataset_name(dataset)
