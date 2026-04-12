@@ -12,7 +12,7 @@ services:
       - SECRET_KEY=change-me-in-production
       - ADMIN_USER=admin
       - ADMIN_PASSWORD=password
-      # - FORCE_HTTPS=true  # Enable when behind HTTPS reverse proxy
+      - FORCE_HTTPS=true  # HTTPS behind reverse proxy
 
 volumes:
   ssh-keys:
