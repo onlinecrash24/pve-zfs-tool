@@ -592,18 +592,24 @@ def get_auto_snapshot_status(host):
 
 
 def get_snapshot_ages(host):
-    """Get snapshot data with epoch timestamps for per-dataset-per-label age analysis.
+    """Get snapshot data with epoch timestamps for per-dataset-per-label analysis.
 
-    Returns dict: {dataset: {label: {"count": N, "oldest": epoch, "newest": epoch}}}
+    Returns dict with two keys:
+      "datasets": {dataset: {label: {"count": N, "oldest": epoch, "newest": epoch, "timestamps": [epoch, ...]}}}
+      "manual": {dataset: [{"name": str, "creation": epoch}, ...]}
+    Timestamps are sorted ascending (oldest first) for gap detection.
     """
     result = run_command(host, "zfs list -t snapshot -Hpo name,creation")
     if not result["success"]:
-        return {}
+        return {"datasets": {}, "manual": {}}
 
-    labels = ("frequent", "hourly", "daily", "weekly", "monthly", "yearly")
-    label_re = re.compile("|".join(labels))
+    LABELS = ("frequent", "hourly", "daily", "weekly", "monthly", "yearly",
+              "backup-zfs", "bashclub-zfs")
+    label_re = re.compile("|".join(LABELS))
 
     datasets = {}
+    manual = {}
+
     for line in result["stdout"].strip().splitlines():
         parts = line.split("\t")
         if len(parts) < 2 or "@" not in parts[0]:
@@ -615,20 +621,35 @@ def get_snapshot_ages(host):
             continue
 
         label_match = label_re.search(snap)
-        label = label_match.group(0) if label_match else "other"
+        if not label_match:
+            # Manual / irregular snapshot
+            if ds not in manual:
+                manual[ds] = []
+            manual[ds].append({"name": snap, "creation": creation})
+            continue
+
+        label = label_match.group(0)
 
         if ds not in datasets:
             datasets[ds] = {}
         if label not in datasets[ds]:
-            datasets[ds][label] = {"count": 0, "oldest": creation, "newest": creation}
+            datasets[ds][label] = {"count": 0, "oldest": creation, "newest": creation,
+                                   "timestamps": []}
 
-        datasets[ds][label]["count"] += 1
-        if creation < datasets[ds][label]["oldest"]:
-            datasets[ds][label]["oldest"] = creation
-        if creation > datasets[ds][label]["newest"]:
-            datasets[ds][label]["newest"] = creation
+        info = datasets[ds][label]
+        info["count"] += 1
+        info["timestamps"].append(creation)
+        if creation < info["oldest"]:
+            info["oldest"] = creation
+        if creation > info["newest"]:
+            info["newest"] = creation
 
-    return datasets
+    # Sort timestamps ascending for gap detection
+    for ds_labels in datasets.values():
+        for info in ds_labels.values():
+            info["timestamps"].sort()
+
+    return {"datasets": datasets, "manual": manual}
 
 
 def get_auto_snapshot_property(host, dataset):
