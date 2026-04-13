@@ -74,10 +74,11 @@ IMPORTANT — Proxmox-specific rules you MUST follow:
 - **Snapshot levels**: zfs-auto-snapshot typically creates 5 levels: frequent (every 15 min), hourly, daily, weekly, monthly. Each level has its own retention policy.
 - **0B used snapshots**: Snapshots on parent datasets (e.g. rpool@zfs-auto-snap_daily-...) often show 0B used. This is completely normal and does NOT indicate a problem — the actual snapshot data is in the child datasets.
 - **Retention analysis**: The data includes a pre-computed "retention_analysis" section per host with:
-  - "per_label": For each label (frequent/hourly/daily/weekly/monthly): total_snapshots, dataset_count, configured_keep (from cron --keep=N), per_dataset_avg, newest_age_human, count_mismatches (datasets where actual != configured), stale_datasets (datasets where newest snapshot exceeds max age threshold).
+  - "per_label": For each label (frequent/hourly/daily/weekly/monthly/backup-zfs/bashclub-zfs): total_snapshots, dataset_count, configured_keep (from cron --keep=N), per_dataset_avg, newest_age_human, count_mismatches (datasets where actual != configured), stale_datasets (datasets where newest snapshot exceeds max age), gaps (holes in the snapshot chain where time between consecutive snapshots exceeds 1.5x the expected interval).
   - "missing_labels": Datasets that SHOULD have a label (because it's configured in cron) but DON'T have any snapshots for it.
-  Use this data directly — do NOT guess or invent retention values. Report count_mismatches and stale_datasets as findings. If stale_datasets is empty for a label, that label is healthy.
-  Age thresholds: frequent > 30min, hourly > 2h, daily > 48h, weekly > 14d, monthly > 62d.
+  - "manual_snapshots": Non-auto snapshots (irregular/manual) with name, dataset, and age. These may indicate forgotten test snapshots that waste space.
+  Use this data directly — do NOT guess or invent retention values. Report count_mismatches, stale_datasets, and gaps as findings. Gaps are especially critical: they represent time periods where no rollback is possible.
+  Age thresholds: frequent > 1h, hourly > 2h, daily > 25h, weekly > 8d, monthly > 32d.
 - **Snapshot integrity**: ZFS scrub already validates ALL data including snapshots via checksums. A successful scrub with 0 errors confirms snapshot chain integrity. Do NOT recommend separate checksum verification — scrub covers this.
 - **ZDB deep diagnostics**: If a pool is DEGRADED, FAULTED, or has data errors, the data may include a "zdb_diagnostics" section with low-level pool internals (block stats, vdev tree, disk labels). Use this data to provide detailed root-cause analysis: which vdev failed, txg state, block allocation issues. If zdb_diagnostics is absent, the pools are healthy — do NOT recommend running zdb manually.
 
@@ -103,10 +104,11 @@ WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
 - **Snapshot-Ebenen**: zfs-auto-snapshot erstellt typischerweise 5 Ebenen: frequent (alle 15 Min), hourly, daily, weekly, monthly. Jede Ebene hat ihre eigene Aufbewahrungsrichtlinie.
 - **0B-Snapshots**: Snapshots auf Parent-Datasets (z.B. rpool@zfs-auto-snap_daily-...) zeigen oft 0B used. Das ist völlig normal und weist NICHT auf ein Problem hin — die tatsächlichen Snapshot-Daten befinden sich in den Child-Datasets.
 - **Aufbewahrungsanalyse (Retention)**: Die Daten enthalten eine vorberechnete "retention_analysis" pro Host mit:
-  - "per_label": Für jedes Label (frequent/hourly/daily/weekly/monthly): total_snapshots, dataset_count, configured_keep (aus Cron --keep=N), per_dataset_avg, newest_age_human, count_mismatches (Datasets wo IST != SOLL), stale_datasets (Datasets wo neuester Snapshot das Max-Alter überschreitet).
+  - "per_label": Für jedes Label (frequent/hourly/daily/weekly/monthly/backup-zfs/bashclub-zfs): total_snapshots, dataset_count, configured_keep (aus Cron --keep=N), per_dataset_avg, newest_age_human, count_mismatches (Datasets wo IST != SOLL), stale_datasets (Datasets wo neuester Snapshot das Max-Alter überschreitet), gaps (Lücken in der Snapshot-Kette wo der Abstand zwischen aufeinanderfolgenden Snapshots 1.5x das erwartete Intervall überschreitet).
   - "missing_labels": Datasets die ein Label haben SOLLTEN (weil in Cron konfiguriert) aber KEINE Snapshots dafür haben.
-  Verwende diese Daten direkt — erfinde oder rate KEINE Retention-Werte. Melde count_mismatches und stale_datasets als Befunde. Wenn stale_datasets für ein Label leer ist, ist dieses Label gesund.
-  Alters-Schwellwerte: frequent > 30min, hourly > 2h, daily > 48h, weekly > 14d, monthly > 62d.
+  - "manual_snapshots": Nicht-automatische Snapshots (manuell/irregulär) mit Name, Dataset und Alter. Diese können vergessene Test-Snapshots sein die Speicher verschwenden.
+  Verwende diese Daten direkt — erfinde oder rate KEINE Retention-Werte. Melde count_mismatches, stale_datasets und gaps als Befunde. Gaps sind besonders kritisch: sie stellen Zeiträume dar in denen kein Rollback möglich ist.
+  Alters-Schwellwerte: frequent > 1h, hourly > 2h, daily > 25h, weekly > 8d, monthly > 32d.
 - **Snapshot-Integrität**: ZFS Scrub validiert bereits ALLE Daten inklusive Snapshots per Checksumme. Ein erfolgreicher Scrub mit 0 Fehlern bestätigt die Integrität der Snapshot-Kette. Empfehle KEINE separate Checksummen-Prüfung — Scrub deckt dies ab.
 - **ZDB-Tiefendiagnose**: Falls ein Pool DEGRADED, FAULTED oder Datenfehler hat, können die Daten eine "zdb_diagnostics"-Sektion enthalten mit Low-Level Pool-Internals (Block-Statistiken, vdev-Baum, Disk-Labels). Nutze diese Daten für eine detaillierte Ursachenanalyse: welches vdev ausgefallen ist, txg-Status, Block-Allokationsprobleme. Falls zdb_diagnostics fehlt, sind die Pools gesund — empfehle NICHT, zdb manuell auszuführen.
 
@@ -388,48 +390,50 @@ def collect_host_data(host_address=None):
             host_data["errors"].append(f"Snapshots: {e}")
 
         # Snapshot retention analysis with epoch timestamps
-        # (per dataset, per label — like check-snapshot-age.txt)
+        # (per dataset, per label — inspired by check-snapshot-age.txt)
         try:
             import time as _time
             now_epoch = int(_time.time())
-            snap_ages = get_snapshot_ages(host)
+            snap_age_data = get_snapshot_ages(host)
+            snap_ages = snap_age_data.get("datasets", {})
+            manual_snaps = snap_age_data.get("manual", {})
             retention_cfg = {}
             if host_data.get("auto_snapshot"):
                 retention_cfg = host_data["auto_snapshot"].get("retention_policy", {})
 
             # Max allowed age per label (seconds) before warning
             max_age = {
-                "frequent": 1800,    # 30 min
-                "hourly":   7200,    # 2 hours
-                "daily":    172800,  # 48 hours
-                "weekly":   1209600, # 14 days
-                "monthly":  5400000, # ~62 days
+                "frequent": 3600,     # 1 hour
+                "hourly":   7200,     # 2 hours
+                "daily":    90000,    # 25 hours
+                "weekly":   691200,   # 8 days
+                "monthly":  2764800,  # 32 days
             }
 
-            # Analyze per dataset per label
-            retention_warnings = []
-            label_global = {}  # Global per-label stats
-            datasets_without_labels = {}  # Datasets missing expected labels
+            # Gap detection: factor above threshold = suspicious gap
+            GAP_FACTOR = 1.5
 
+            # Analyze per dataset per label
+            label_global = {}
+            datasets_without_labels = {}
             all_expected_labels = set(retention_cfg.keys())
 
             for ds, labels_data in snap_ages.items():
-                present_labels = set(labels_data.keys()) - {"other"}
+                present_labels = set(labels_data.keys())
 
-                # Check for missing labels on this dataset
-                missing = all_expected_labels - present_labels - {"other"}
-                if missing and ds in snap_by_dataset:  # Only for datasets that have any snapshots
+                # Check for missing labels
+                missing = all_expected_labels - present_labels
+                if missing and ds in snap_by_dataset:
                     for ml in missing:
                         if ml not in datasets_without_labels:
                             datasets_without_labels[ml] = []
                         datasets_without_labels[ml].append(ds)
 
                 for label, info in labels_data.items():
-                    if label == "other":
-                        continue
                     count = info["count"]
                     newest_epoch = info["newest"]
                     age_sec = now_epoch - newest_epoch
+                    timestamps = info.get("timestamps", [])
 
                     # Global label stats
                     if label not in label_global:
@@ -441,6 +445,7 @@ def collect_host_data(host_address=None):
                             "newest_age_sec": age_sec,
                             "count_mismatches": [],
                             "stale_datasets": [],
+                            "gaps": [],
                         }
                     lg = label_global[label]
                     lg["total_snapshots"] += count
@@ -461,31 +466,41 @@ def collect_host_data(host_address=None):
                         })
 
                     # Check: newest snapshot too old?
-                    threshold = max_age.get(label, 5400000)
+                    threshold = max_age.get(label, 2764800)
                     if age_sec > threshold:
-                        age_human = _format_age(age_sec)
-                        max_human = _format_age(threshold)
                         lg["stale_datasets"].append({
                             "dataset": ds,
-                            "age": age_human,
-                            "threshold": max_human,
+                            "age": _format_age(age_sec),
+                            "threshold": _format_age(threshold),
                         })
+
+                    # Gap detection: find holes in the snapshot chain
+                    if label in max_age and len(timestamps) >= 2:
+                        gap_threshold = max_age[label] * GAP_FACTOR
+                        for idx in range(len(timestamps) - 1):
+                            delta = timestamps[idx + 1] - timestamps[idx]
+                            if delta > gap_threshold:
+                                lg["gaps"].append({
+                                    "dataset": ds,
+                                    "gap_hours": round(delta / 3600, 1),
+                                    "from": _format_age(now_epoch - timestamps[idx]),
+                                    "to": _format_age(now_epoch - timestamps[idx + 1]),
+                                    "threshold_hours": round(max_age[label] / 3600, 1),
+                                })
 
             # Build compact summary for AI
             for label, lg in label_global.items():
                 lg["per_dataset_avg"] = round(lg["total_snapshots"] / max(lg["dataset_count"], 1))
                 lg["newest_age_human"] = _format_age(lg["newest_age_sec"])
-                # Limit stale/mismatch lists to avoid token bloat
-                if len(lg["stale_datasets"]) > 5:
-                    total_stale = len(lg["stale_datasets"])
-                    lg["stale_datasets"] = lg["stale_datasets"][:5]
-                    lg["stale_datasets"].append({"note": f"... and {total_stale - 5} more"})
-                if len(lg["count_mismatches"]) > 5:
-                    total_mm = len(lg["count_mismatches"])
-                    lg["count_mismatches"] = lg["count_mismatches"][:5]
-                    lg["count_mismatches"].append({"note": f"... and {total_mm - 5} more"})
+                # Limit lists to avoid token bloat (keep first 5 + count)
+                for key in ("stale_datasets", "count_mismatches", "gaps"):
+                    items = lg[key]
+                    if len(items) > 5:
+                        total = len(items)
+                        lg[key] = items[:5]
+                        lg[key].append({"note": f"... and {total - 5} more"})
 
-            # Missing labels summary (truncated)
+            # Missing labels summary
             missing_labels_summary = {}
             for label, ds_list in datasets_without_labels.items():
                 missing_labels_summary[label] = {
@@ -493,9 +508,29 @@ def collect_host_data(host_address=None):
                     "examples": ds_list[:5],
                 }
 
+            # Manual / irregular snapshots summary
+            manual_summary = {}
+            if manual_snaps:
+                total_manual = sum(len(v) for v in manual_snaps.values())
+                manual_details = []
+                for ds, snaps in list(manual_snaps.items())[:10]:
+                    for s in snaps[:3]:
+                        age_s = now_epoch - s["creation"]
+                        manual_details.append({
+                            "dataset": ds,
+                            "name": s["name"],
+                            "age": _format_age(age_s),
+                        })
+                manual_summary = {
+                    "total_count": total_manual,
+                    "dataset_count": len(manual_snaps),
+                    "examples": manual_details[:15],
+                }
+
             host_data["retention_analysis"] = {
                 "per_label": label_global,
                 "missing_labels": missing_labels_summary,
+                "manual_snapshots": manual_summary,
                 "datasets_analyzed": len(snap_ages),
             }
         except Exception as e:
