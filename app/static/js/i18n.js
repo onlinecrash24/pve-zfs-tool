@@ -19,6 +19,8 @@ const TRANSLATIONS = {
         nav_health: "Health",
         nav_notifications: "Notifications",
         active_host: "Active Host",
+        snapshot_check_title: "Snapshot Check",
+        retention_policy: "Retention Policy (Cron)",
         select_host: "-- Select Host --",
         language: "Language",
 
@@ -381,6 +383,8 @@ const TRANSLATIONS = {
         nav_health: "Zustand",
         nav_notifications: "Benachrichtigungen",
         active_host: "Aktiver Host",
+        snapshot_check_title: "Snapshot-Prüfung",
+        retention_policy: "Aufbewahrungsrichtlinie (Cron)",
         select_host: "-- Host w\u00e4hlen --",
         language: "Sprache",
 
