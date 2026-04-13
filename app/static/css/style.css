@@ -352,6 +352,7 @@ pre.output {
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
 .grid-4 { grid-template-columns: repeat(4, 1fr); }
+.grid-5 { grid-template-columns: repeat(5, 1fr); }
 
 /* Snapshot Timeline */
 .snapshot-timeline {
@@ -646,6 +647,6 @@ pre.output {
     .sidebar-header h1 { justify-content: center; }
     .sidebar-logo { max-width: 40px; }
     .main-content { margin-left: 60px; padding: 16px; }
-    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .grid-2, .grid-3, .grid-4, .grid-5 { grid-template-columns: 1fr; }
     .form-row { flex-direction: column; }
 }
