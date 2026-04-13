@@ -226,22 +226,8 @@ def _add_report(report):
     _save_reports(reports)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _format_age(seconds):
-    """Format seconds into a human-readable age string."""
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        return f"{seconds // 60}m"
-    elif seconds < 86400:
-        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
-    else:
-        days = seconds // 86400
-        hours = (seconds % 86400) // 3600
-        return f"{days}d {hours}h"
+# format_age is now in snapshot_analysis.py but keep alias for backwards compat
+from app.snapshot_analysis import format_age as _format_age, analyze_snapshots, truncate_for_ai
 
 
 # ---------------------------------------------------------------------------
@@ -392,147 +378,13 @@ def collect_host_data(host_address=None):
         # Snapshot retention analysis with epoch timestamps
         # (per dataset, per label — inspired by check-snapshot-age.txt)
         try:
-            import time as _time
-            now_epoch = int(_time.time())
             snap_age_data = get_snapshot_ages(host)
-            snap_ages = snap_age_data.get("datasets", {})
-            manual_snaps = snap_age_data.get("manual", {})
             retention_cfg = {}
             if host_data.get("auto_snapshot"):
                 retention_cfg = host_data["auto_snapshot"].get("retention_policy", {})
 
-            # Max allowed age per label (seconds) before warning
-            max_age = {
-                "frequent": 3600,     # 1 hour
-                "hourly":   7200,     # 2 hours
-                "daily":    90000,    # 25 hours
-                "weekly":   691200,   # 8 days
-                "monthly":  2764800,  # 32 days
-            }
-
-            # Gap detection: factor above threshold = suspicious gap
-            GAP_FACTOR = 1.5
-
-            # Analyze per dataset per label
-            label_global = {}
-            datasets_without_labels = {}
-            all_expected_labels = set(retention_cfg.keys())
-
-            for ds, labels_data in snap_ages.items():
-                present_labels = set(labels_data.keys())
-
-                # Check for missing labels
-                missing = all_expected_labels - present_labels
-                if missing and ds in snap_by_dataset:
-                    for ml in missing:
-                        if ml not in datasets_without_labels:
-                            datasets_without_labels[ml] = []
-                        datasets_without_labels[ml].append(ds)
-
-                for label, info in labels_data.items():
-                    count = info["count"]
-                    newest_epoch = info["newest"]
-                    age_sec = now_epoch - newest_epoch
-                    timestamps = info.get("timestamps", [])
-
-                    # Global label stats
-                    if label not in label_global:
-                        label_global[label] = {
-                            "total_snapshots": 0,
-                            "dataset_count": 0,
-                            "configured_keep": retention_cfg.get(label, "?"),
-                            "oldest_age_sec": 0,
-                            "newest_age_sec": age_sec,
-                            "count_mismatches": [],
-                            "stale_datasets": [],
-                            "gaps": [],
-                        }
-                    lg = label_global[label]
-                    lg["total_snapshots"] += count
-                    lg["dataset_count"] += 1
-
-                    if age_sec < lg["newest_age_sec"]:
-                        lg["newest_age_sec"] = age_sec
-                    if age_sec > lg["oldest_age_sec"]:
-                        lg["oldest_age_sec"] = age_sec
-
-                    # Check: count vs configured --keep
-                    configured = retention_cfg.get(label)
-                    if configured and count != configured:
-                        lg["count_mismatches"].append({
-                            "dataset": ds,
-                            "actual": count,
-                            "configured": configured,
-                        })
-
-                    # Check: newest snapshot too old?
-                    threshold = max_age.get(label, 2764800)
-                    if age_sec > threshold:
-                        lg["stale_datasets"].append({
-                            "dataset": ds,
-                            "age": _format_age(age_sec),
-                            "threshold": _format_age(threshold),
-                        })
-
-                    # Gap detection: find holes in the snapshot chain
-                    if label in max_age and len(timestamps) >= 2:
-                        gap_threshold = max_age[label] * GAP_FACTOR
-                        for idx in range(len(timestamps) - 1):
-                            delta = timestamps[idx + 1] - timestamps[idx]
-                            if delta > gap_threshold:
-                                lg["gaps"].append({
-                                    "dataset": ds,
-                                    "gap_hours": round(delta / 3600, 1),
-                                    "from": _format_age(now_epoch - timestamps[idx]),
-                                    "to": _format_age(now_epoch - timestamps[idx + 1]),
-                                    "threshold_hours": round(max_age[label] / 3600, 1),
-                                })
-
-            # Build compact summary for AI
-            for label, lg in label_global.items():
-                lg["per_dataset_avg"] = round(lg["total_snapshots"] / max(lg["dataset_count"], 1))
-                lg["newest_age_human"] = _format_age(lg["newest_age_sec"])
-                # Limit lists to avoid token bloat (keep first 5 + count)
-                for key in ("stale_datasets", "count_mismatches", "gaps"):
-                    items = lg[key]
-                    if len(items) > 5:
-                        total = len(items)
-                        lg[key] = items[:5]
-                        lg[key].append({"note": f"... and {total - 5} more"})
-
-            # Missing labels summary
-            missing_labels_summary = {}
-            for label, ds_list in datasets_without_labels.items():
-                missing_labels_summary[label] = {
-                    "count": len(ds_list),
-                    "examples": ds_list[:5],
-                }
-
-            # Manual / irregular snapshots summary
-            manual_summary = {}
-            if manual_snaps:
-                total_manual = sum(len(v) for v in manual_snaps.values())
-                manual_details = []
-                for ds, snaps in list(manual_snaps.items())[:10]:
-                    for s in snaps[:3]:
-                        age_s = now_epoch - s["creation"]
-                        manual_details.append({
-                            "dataset": ds,
-                            "name": s["name"],
-                            "age": _format_age(age_s),
-                        })
-                manual_summary = {
-                    "total_count": total_manual,
-                    "dataset_count": len(manual_snaps),
-                    "examples": manual_details[:15],
-                }
-
-            host_data["retention_analysis"] = {
-                "per_label": label_global,
-                "missing_labels": missing_labels_summary,
-                "manual_snapshots": manual_summary,
-                "datasets_analyzed": len(snap_ages),
-            }
+            analysis = analyze_snapshots(snap_age_data, retention_cfg)
+            host_data["retention_analysis"] = truncate_for_ai(analysis)
         except Exception as e:
             host_data["errors"].append(f"Retention analysis: {e}")
 

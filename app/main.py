@@ -24,6 +24,7 @@ from app.zfs_commands import (
     snapshot_read_file, snapshot_restore_file, snapshot_restore_dir,
     estimate_send_size, estimate_incremental_size,
     get_arc_stats, get_zfs_events, get_smart_status,
+    get_snapshot_ages,
 )
 from app.notifications import (
     load_config as load_notify_config,
@@ -669,6 +670,21 @@ def api_smart():
         return err, code
     pool = request.args.get("pool", "") or None
     return jsonify(get_smart_status(host, pool))
+
+
+@app.route("/api/health/snapshot-check")
+@login_required
+def api_snapshot_check():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    from app.snapshot_analysis import analyze_snapshots
+    snap_age_data = get_snapshot_ages(host)
+    auto_snap = get_auto_snapshot_status(host)
+    retention_cfg = auto_snap.get("retention_policy", {})
+    analysis = analyze_snapshots(snap_age_data, retention_cfg)
+    analysis["retention_policy"] = retention_cfg
+    return jsonify(analysis)
 
 
 # ---------------------------------------------------------------------------
