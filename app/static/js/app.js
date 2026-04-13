@@ -142,6 +142,7 @@ async function renderView() {
         pools: viewPools,
         datasets: viewDatasets,
         snapshots: viewSnapshots,
+        "snapshot-check": viewSnapshotCheck,
         guests: viewGuests,
         health: viewHealth,
         notifications: viewNotifications,
@@ -1001,6 +1002,155 @@ async function destroySnap(snap) {
     const r = await API.post("/api/snapshots/destroy", { host: currentHost, snapshot: snap.full_name });
     toast(r.success ? t("snapshot_deleted") : (r.stderr || t("delete_failed")), r.success ? "success" : "error");
     viewSnapshots();
+}
+
+// -- Snapshot Check -------------------------------------------------------
+async function viewSnapshotCheck() {
+    if (!requireHost()) return;
+    setContent(loading());
+
+    const data = await API.get(`/api/health/snapshot-check?host=${currentHost}`);
+    const container = h("div");
+
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("snapshot_check_title") || "Snapshot Check"),
+        h("p", {}, `${currentHost} — ${data.datasets_analyzed || 0} Datasets`),
+    ]));
+
+    // Retention Policy Overview
+    const policyCard = h("div", { className: "card" });
+    policyCard.appendChild(h("div", { className: "card-header" }, t("retention_policy") || "Retention Policy (Cron)"));
+    const policyBody = h("div", { className: "card-body" });
+    const rp = data.retention_policy || {};
+    if (Object.keys(rp).length > 0) {
+        const policyGrid = h("div", { className: "grid grid-5" });
+        for (const [label, keep] of Object.entries(rp)) {
+            policyGrid.appendChild(makeStatCard(label, `${keep}`, "keep"));
+        }
+        policyBody.appendChild(policyGrid);
+    } else {
+        policyBody.appendChild(h("p", { style: "color:var(--text-secondary)" }, "No retention policy found in cron"));
+    }
+    policyCard.appendChild(policyBody);
+    container.appendChild(policyCard);
+
+    // Per-Label Status
+    const labels = data.per_label || {};
+    for (const [label, info] of Object.entries(labels)) {
+        const hasIssues = (info.stale_datasets || []).length > 0
+            || (info.gaps || []).length > 0
+            || (info.count_mismatches || []).length > 0;
+        const statusIcon = hasIssues ? "⚠️" : "✅";
+
+        const card = h("div", { className: "card" });
+        const header = h("div", { className: "card-header" },
+            `${statusIcon} ${label} — ${info.total_snapshots} Snapshots / ${info.dataset_count} Datasets`
+        );
+        card.appendChild(header);
+        const body = h("div", { className: "card-body" });
+
+        // Stats row
+        const statsGrid = h("div", { className: "grid grid-4" });
+        statsGrid.appendChild(makeStatCard(t("per_dataset") || "Per Dataset", `${info.per_dataset_avg}`, info.configured_keep ? `keep=${info.configured_keep}` : ""));
+        statsGrid.appendChild(makeStatCard(t("newest") || "Newest", info.newest_age_human || "?", ""));
+        statsGrid.appendChild(makeStatCard(t("gaps_label") || "Gaps", `${(info.gaps || []).length}`, ""));
+        statsGrid.appendChild(makeStatCard(t("stale_label") || "Stale", `${(info.stale_datasets || []).length}`, ""));
+        body.appendChild(statsGrid);
+
+        // Stale datasets
+        if ((info.stale_datasets || []).length > 0) {
+            body.appendChild(h("div", { style: "margin-top:12px;font-weight:600;color:var(--warning)" },
+                `⚠️ ${t("stale_snapshots") || "Stale Snapshots"} (${info.stale_datasets.length})`));
+            const tbl = _buildTable(
+                [t("dataset") || "Dataset", t("age") || "Age", t("threshold") || "Threshold"],
+                info.stale_datasets.filter(s => !s.note).map(s => [s.dataset, s.age, s.threshold])
+            );
+            body.appendChild(tbl);
+        }
+
+        // Gaps
+        if ((info.gaps || []).length > 0) {
+            body.appendChild(h("div", { style: "margin-top:12px;font-weight:600;color:var(--danger)" },
+                `❌ ${t("gaps_found") || "Gaps Found"} (${info.gaps.length})`));
+            const tbl = _buildTable(
+                [t("dataset") || "Dataset", t("gap") || "Gap", t("threshold") || "Threshold"],
+                info.gaps.filter(g => !g.note).map(g => [g.dataset, `${g.gap_hours}h`, `${g.threshold_hours}h`])
+            );
+            body.appendChild(tbl);
+        }
+
+        // Count mismatches
+        if ((info.count_mismatches || []).length > 0) {
+            body.appendChild(h("div", { style: "margin-top:12px;font-weight:600;color:var(--text-secondary)" },
+                `ℹ️ ${t("count_mismatch") || "Count Mismatch"} (${info.count_mismatches.length})`));
+            const tbl = _buildTable(
+                [t("dataset") || "Dataset", t("actual") || "Actual", t("configured") || "Configured"],
+                info.count_mismatches.filter(m => !m.note).map(m => [m.dataset, `${m.actual}`, `${m.configured}`])
+            );
+            body.appendChild(tbl);
+        }
+
+        if (!hasIssues) {
+            body.appendChild(h("p", { style: "color:var(--success);margin-top:8px" }, "✅ " + (t("all_ok") || "All snapshots healthy")));
+        }
+
+        card.appendChild(body);
+        container.appendChild(card);
+    }
+
+    // Missing Labels
+    const missing = data.missing_labels || {};
+    if (Object.keys(missing).length > 0) {
+        const mCard = h("div", { className: "card" });
+        mCard.appendChild(h("div", { className: "card-header" }, `⚠️ ${t("missing_labels") || "Missing Labels"}`));
+        const mBody = h("div", { className: "card-body" });
+        for (const [label, info] of Object.entries(missing)) {
+            mBody.appendChild(h("div", { style: "margin-bottom:8px" }, [
+                h("strong", {}, `${label}: `),
+                h("span", {}, `${info.count} Datasets — `),
+                h("code", { style: "font-size:12px" }, (info.examples || []).slice(0, 3).join(", ")),
+            ]));
+        }
+        mCard.appendChild(mBody);
+        container.appendChild(mCard);
+    }
+
+    // Manual Snapshots
+    const manual = data.manual_snapshots || {};
+    if (manual.total_count > 0) {
+        const msCard = h("div", { className: "card" });
+        msCard.appendChild(h("div", { className: "card-header" },
+            `📋 ${t("manual_snapshots") || "Manual Snapshots"} (${manual.total_count} in ${manual.dataset_count} Datasets)`));
+        const msBody = h("div", { className: "card-body" });
+        const tbl = _buildTable(
+            [t("dataset") || "Dataset", t("name") || "Name", t("age") || "Age"],
+            (manual.examples || []).map(s => [s.dataset, s.name, s.age])
+        );
+        msBody.appendChild(tbl);
+        msCard.appendChild(msBody);
+        container.appendChild(msCard);
+    }
+
+    setContent(container);
+}
+
+function _buildTable(headers, rows) {
+    const tbl = h("table");
+    const thead = h("thead");
+    const thr = h("tr");
+    for (const hdr of headers) thr.appendChild(h("th", {}, hdr));
+    thead.appendChild(thr);
+    tbl.appendChild(thead);
+    const tbody = h("tbody");
+    for (const row of rows) {
+        const tr = h("tr");
+        for (const cell of row) {
+            tr.appendChild(h("td", {}, cell || ""));
+        }
+        tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    return tbl;
 }
 
 // -- Guests (VMs/CTs) -----------------------------------------------------
