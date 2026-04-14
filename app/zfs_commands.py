@@ -787,6 +787,166 @@ def get_vm_snapshots(host, pool, vmid, vm_type="qemu"):
 # ---------------------------------------------------------------------------
 
 RESTORE_MOUNT_BASE = "/tmp/zfs-tool-restore"
+ZVOL_MOUNT_BASE = "/tmp/zfs-tool-zvol-restore"
+
+
+# ---------------------------------------------------------------------------
+# Zvol Restore (VM volumes — kpartx-based)
+# ---------------------------------------------------------------------------
+
+def zvol_snapshot_mount(host, snapshot):
+    """Expose partitions of a zvol snapshot via kpartx and list them."""
+    try:
+        snapshot = validate_zfs_name(snapshot, "Snapshot")
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    ds_name = snapshot.rsplit("@", 1)[0] if "@" in snapshot else ""
+
+    # Verify it's a volume
+    type_check = run_command(host, f"zfs get -H -o value type {ds_name}")
+    if type_check["success"] and type_check["stdout"].strip() != "volume":
+        return {"success": False, "error": "Zvol restore only works on volume datasets."}
+
+    # Build zvol device path: rpool/data/vm-100-disk-0@snap → /dev/zvol/rpool/data/vm-100-disk-0@snap
+    zvol_dev = f"/dev/zvol/{snapshot}"
+
+    # Check if device exists
+    check = run_command(host, f"test -e {shlex.quote(zvol_dev)} && echo OK")
+    if not check["success"] or "OK" not in check["stdout"]:
+        return {"success": False, "error": f"Zvol device not found: {zvol_dev}"}
+
+    # Expose partitions with kpartx (read-only)
+    kpartx_result = run_command(host, f"kpartx -ars {shlex.quote(zvol_dev)}")
+    if not kpartx_result["success"]:
+        return {"success": False, "error": f"kpartx failed: {kpartx_result.get('stderr', '')}"}
+
+    # List partition devices using lsblk
+    # kpartx maps to /dev/mapper/<name>pN — find the mapper name
+    lsblk = run_command(host, f"lsblk -Jb -o NAME,SIZE,FSTYPE,LABEL,PARTLABEL {shlex.quote(zvol_dev)}")
+    partitions = []
+    if lsblk["success"] and lsblk["stdout"].strip():
+        import json as _json
+        try:
+            blk_data = _json.loads(lsblk["stdout"])
+            for dev in blk_data.get("blockdevices", []):
+                for child in dev.get("children", []):
+                    fstype = child.get("fstype") or ""
+                    # Skip partitions without a mountable filesystem
+                    if not fstype or fstype in ("swap", "linux_raid_member", "LVM2_member"):
+                        continue
+                    size_bytes = child.get("size", 0)
+                    size_human = _format_size(int(size_bytes)) if size_bytes else "?"
+                    partitions.append({
+                        "device": f"/dev/mapper/{child['name']}",
+                        "name": child.get("name", ""),
+                        "size": size_human,
+                        "fstype": fstype,
+                        "label": child.get("label") or child.get("partlabel") or "",
+                    })
+        except (ValueError, KeyError) as e:
+            log.warning("Failed to parse lsblk JSON: %s", e)
+
+    # If lsblk JSON didn't work, fall back to kpartx -l
+    if not partitions:
+        kp_list = run_command(host, f"kpartx -l {shlex.quote(zvol_dev)}")
+        if kp_list["success"] and kp_list["stdout"].strip():
+            for line in kp_list["stdout"].strip().splitlines():
+                parts = line.split()
+                if parts:
+                    dev_name = parts[0]
+                    dev_path = f"/dev/mapper/{dev_name}"
+                    # Detect filesystem with blkid
+                    blkid = run_command(host, f"blkid -o value -s TYPE {dev_path} 2>/dev/null")
+                    fstype = blkid["stdout"].strip() if blkid["success"] else ""
+                    blkid_label = run_command(host, f"blkid -o value -s LABEL {dev_path} 2>/dev/null")
+                    label = blkid_label["stdout"].strip() if blkid_label["success"] else ""
+                    if fstype and fstype not in ("swap", "linux_raid_member", "LVM2_member"):
+                        partitions.append({
+                            "device": dev_path,
+                            "name": dev_name,
+                            "size": "?",
+                            "fstype": fstype,
+                            "label": label,
+                        })
+
+    return {
+        "success": True,
+        "zvol_dev": zvol_dev,
+        "snapshot": snapshot,
+        "partitions": partitions,
+    }
+
+
+def _format_size(size_bytes):
+    """Format bytes into human-readable size."""
+    for unit in ("B", "K", "M", "G", "T"):
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f}{unit}" if unit != "B" else f"{size_bytes}{unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f}P"
+
+
+def zvol_partition_mount(host, device, fstype=""):
+    """Mount a specific partition from a kpartx-exposed zvol snapshot."""
+    # Validate device path: must be /dev/mapper/...
+    if not device.startswith("/dev/mapper/"):
+        return {"success": False, "error": "Invalid device path — must be /dev/mapper/*"}
+
+    # Sanitize device name for mount directory
+    dev_name = device.replace("/dev/mapper/", "")
+    mount_path = f"{ZVOL_MOUNT_BASE}/{dev_name}"
+
+    # Create mount directory
+    mkdir = run_command(host, f"mkdir -p {shlex.quote(mount_path)}")
+    if not mkdir["success"]:
+        return {"success": False, "error": f"Failed to create mount dir: {mkdir.get('stderr', '')}"}
+
+    # Mount read-only; use ntfs-3g for NTFS
+    if fstype in ("ntfs", "ntfs3"):
+        mount_cmd = f"mount -t ntfs-3g -o ro {shlex.quote(device)} {shlex.quote(mount_path)}"
+    else:
+        mount_cmd = f"mount -o ro {shlex.quote(device)} {shlex.quote(mount_path)}"
+
+    mount_result = run_command(host, mount_cmd)
+    if not mount_result["success"]:
+        run_command(host, f"rmdir {shlex.quote(mount_path)} 2>/dev/null")
+        return {"success": False, "error": f"Mount failed: {mount_result.get('stderr', '')}"}
+
+    return {
+        "success": True,
+        "mount_path": mount_path,
+        "device": device,
+        "fstype": fstype,
+    }
+
+
+def zvol_unmount(host, mount_path, zvol_dev=""):
+    """Unmount a zvol partition and optionally remove kpartx mappings."""
+    errors = []
+
+    # Validate mount path
+    if not mount_path.startswith(ZVOL_MOUNT_BASE):
+        return {"success": False, "error": "Invalid mount path — must be under zvol restore base"}
+
+    # Unmount
+    umount = run_command(host, f"umount {shlex.quote(mount_path)}")
+    if not umount["success"]:
+        errors.append(f"umount: {umount.get('stderr', '')}")
+
+    # Remove directory
+    run_command(host, f"rmdir {shlex.quote(mount_path)} 2>/dev/null")
+
+    # Remove kpartx mappings if zvol_dev provided
+    if zvol_dev:
+        kp_rm = run_command(host, f"kpartx -d {shlex.quote(zvol_dev)}")
+        if not kp_rm["success"]:
+            errors.append(f"kpartx -d: {kp_rm.get('stderr', '')}")
+
+    return {
+        "success": len(errors) == 0,
+        "errors": errors,
+    }
 
 
 def snapshot_mount(host, snapshot):

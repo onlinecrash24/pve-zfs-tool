@@ -22,6 +22,7 @@ from app.zfs_commands import (
     get_pve_vms, get_pve_cts, get_vm_snapshots,
     snapshot_mount, snapshot_unmount, snapshot_browse,
     snapshot_read_file, snapshot_restore_file, snapshot_restore_dir,
+    zvol_snapshot_mount, zvol_partition_mount, zvol_unmount,
     estimate_send_size, estimate_incremental_size,
     get_arc_stats, get_zfs_events, get_smart_status,
     get_snapshot_ages,
@@ -640,6 +641,43 @@ def api_restore_dir():
         send_notification("rollback", "Directory Restored",
                           f"Dir: {data.get('dir_path')}\nTo: {data.get('dest_path')}\nHost: {host['name']}",
                           priority=5)
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# API: Zvol File-Level Restore (VM volumes)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/restore/zvol/mount", methods=["POST"])
+@login_required
+def api_zvol_mount():
+    data = request.json
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = zvol_snapshot_mount(host, data.get("snapshot", ""))
+    return jsonify(result)
+
+
+@app.route("/api/restore/zvol/partition", methods=["POST"])
+@login_required
+def api_zvol_partition_mount():
+    data = request.json
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = zvol_partition_mount(host, data.get("device", ""), data.get("fstype", ""))
+    return jsonify(result)
+
+
+@app.route("/api/restore/zvol/unmount", methods=["POST"])
+@login_required
+def api_zvol_unmount():
+    data = request.json
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = zvol_unmount(host, data.get("mount_path", ""), data.get("zvol_dev", ""))
     return jsonify(result)
 
 
