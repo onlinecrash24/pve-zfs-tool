@@ -41,7 +41,8 @@
   - Automatic `snapdev=visible` handling for zvol snapshot access
   - Partition detection via `kpartx` with filesystem identification
   - Supports ext4, xfs, btrfs (Linux), NTFS via ntfs-3g (Windows), vfat (EFI)
-  - BitLocker-encrypted partitions detected and shown as non-mountable
+  - BitLocker/LUKS-encrypted partitions detected and shown as non-mountable
+  - Automatic filtering of non-mountable types (swap, LVM, ZFS member, RAID, bcache, ceph, etc.)
   - File browser with preview and download functionality
   - Robust cleanup: kpartx mappings, dmsetup fallback, snapdev reset
   - Cleanup on modal close, tab close (sendBeacon), and via Health page
