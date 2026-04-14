@@ -2518,8 +2518,9 @@ async function viewAI() {
             </div>
         </div>
 
-        <div style="margin-top:16px">
+        <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
             <button class="btn btn-primary" id="ai-generate-btn">${escapeHtml(t("ai_generate_now"))}</button>
+            <button class="btn" id="ai-export-raw-btn">${escapeHtml(t("ai_export_raw") || "Export Raw Data")}</button>
             <span id="ai-generate-status" style="font-size:13px;margin-left:10px"></span>
         </div>
     `;
@@ -2639,6 +2640,11 @@ async function viewAI() {
     document.getElementById("ai-prompt-reset").addEventListener("click", () => {
         const promptEl = document.getElementById("ai-system-prompt");
         promptEl.value = (getLang() === "de" ? config.default_system_prompt_de : config.default_system_prompt_en) || "";
+    });
+
+    // Export raw data
+    document.getElementById("ai-export-raw-btn").addEventListener("click", () => {
+        window.open(`/api/ai/raw-data?host=${encodeURIComponent(currentHost)}`, "_blank");
     });
 
     // Generate report

@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import logging
 from datetime import timedelta
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, make_response
 
 from app.ssh_manager import (
     load_hosts, add_host, remove_host, test_connection, get_public_key,
@@ -38,6 +38,7 @@ from app.ai_reports import (
     save_config_unmasked as save_ai_config,
     test_connection as test_ai_connection,
     generate_report as generate_ai_report,
+    collect_host_data,
     load_reports as load_ai_reports,
     chat as ai_chat,
     start_scheduler as start_ai_scheduler,
@@ -840,6 +841,22 @@ def api_ai_generate_report():
 @app.route("/api/ai/reports", methods=["GET"])
 def api_ai_reports():
     return jsonify(load_ai_reports())
+
+
+@app.route("/api/ai/raw-data")
+@login_required
+def api_ai_raw_data():
+    """Export the raw data that would be sent to the AI as JSON."""
+    host_address = request.args.get("host", "")
+    data = collect_host_data(host_address if host_address else None)
+    if not data:
+        return jsonify({"error": "No data collected"}), 404
+    import json
+    json_str = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+    response = make_response(json_str)
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    response.headers["Content-Disposition"] = f"attachment; filename=zfs-raw-data-{data.get('collected_at', 'export').replace(' ', '_').replace(':', '-')}.json"
+    return response
 
 
 @app.route("/api/ai/report/pdf/<report_id>")
