@@ -581,6 +581,9 @@ async function viewDatasets() {
     setContent(loading());
     const datasets = await API.get(`/api/datasets?host=${currentHost}`);
 
+    const filesystems = datasets.filter(ds => ds.type === "filesystem");
+    const volumes = datasets.filter(ds => ds.type === "volume");
+
     const container = h("div");
     container.appendChild(h("div", { className: "page-header" }, [
         h("h2", {}, t("zfs_datasets")),
@@ -591,35 +594,75 @@ async function viewDatasets() {
     headerActions.appendChild(h("button", { className: "btn btn-primary", onClick: showCreateDatasetForm }, t("create_dataset")));
     container.appendChild(headerActions);
 
-    const tableCard = h("div", { className: "card" });
-    tableCard.appendChild(h("div", { className: "card-header" }, `${t("datasets")} (${datasets.length})`));
-    const table = h("table");
-    table.appendChild(h("thead", {}, h("tr", {}, [
-        h("th", {}, t("name")), h("th", {}, t("type")), h("th", {}, t("used")),
-        h("th", {}, t("avail")), h("th", {}, t("refer")), h("th", {}, t("compress")),
-        h("th", {}, t("ratio")), h("th", {}, t("actions")),
-    ])));
-    const tbody = h("tbody");
-    for (const ds of datasets) {
-        const tr = h("tr");
-        tr.appendChild(h("td", {}, h("strong", {}, ds.name)));
-        tr.appendChild(h("td", {}, ds.type));
-        tr.appendChild(h("td", {}, ds.used));
-        tr.appendChild(h("td", {}, ds.avail));
-        tr.appendChild(h("td", {}, ds.refer));
-        tr.appendChild(h("td", {}, ds.compression));
-        tr.appendChild(h("td", {}, ds.compressratio));
-        const actTd = h("td");
-        const bg = h("div", { className: "btn-group" });
-        bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
-        bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => createSnapshotForDs(ds.name) }, t("snapshot")));
-        actTd.appendChild(bg);
-        tr.appendChild(actTd);
-        tbody.appendChild(tr);
+    // --- Filesystems Section ---
+    const fsCard = h("div", { className: "card" });
+    fsCard.appendChild(h("div", { className: "card-header" }, `📁 ${t("filesystems") || "Filesystems"} (${filesystems.length})`));
+    if (filesystems.length > 0) {
+        const fsTable = h("table");
+        fsTable.appendChild(h("thead", {}, h("tr", {}, [
+            h("th", {}, t("name")), h("th", {}, t("used")),
+            h("th", {}, t("avail")), h("th", {}, t("refer")), h("th", {}, t("compress")),
+            h("th", {}, t("ratio")), h("th", {}, t("mountpoint") || "Mountpoint"), h("th", {}, t("actions")),
+        ])));
+        const fsTbody = h("tbody");
+        for (const ds of filesystems) {
+            const tr = h("tr");
+            tr.appendChild(h("td", {}, h("strong", {}, ds.name)));
+            tr.appendChild(h("td", {}, ds.used));
+            tr.appendChild(h("td", {}, ds.avail));
+            tr.appendChild(h("td", {}, ds.refer));
+            tr.appendChild(h("td", {}, ds.compression));
+            tr.appendChild(h("td", {}, ds.compressratio));
+            tr.appendChild(h("td", { style: "font-size:12px;color:var(--text-secondary)" }, ds.mountpoint || "-"));
+            const actTd = h("td");
+            const bg = h("div", { className: "btn-group" });
+            bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
+            bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => createSnapshotForDs(ds.name) }, t("snapshot")));
+            actTd.appendChild(bg);
+            tr.appendChild(actTd);
+            fsTbody.appendChild(tr);
+        }
+        fsTable.appendChild(fsTbody);
+        fsCard.appendChild(fsTable);
+    } else {
+        fsCard.appendChild(h("div", { className: "card-body", style: "color:var(--text-secondary)" }, t("no_filesystems") || "No filesystems found"));
     }
-    table.appendChild(tbody);
-    tableCard.appendChild(table);
-    container.appendChild(tableCard);
+    container.appendChild(fsCard);
+
+    // --- VM Volumes Section ---
+    const volCard = h("div", { className: "card", style: "margin-top:24px" });
+    volCard.appendChild(h("div", { className: "card-header" }, `💾 ${t("vm_volumes") || "VM Volumes"} (${volumes.length})`));
+    if (volumes.length > 0) {
+        const volTable = h("table");
+        volTable.appendChild(h("thead", {}, h("tr", {}, [
+            h("th", {}, t("name")), h("th", {}, t("used")),
+            h("th", {}, t("avail")), h("th", {}, t("refer")), h("th", {}, t("compress")),
+            h("th", {}, t("ratio")), h("th", {}, t("actions")),
+        ])));
+        const volTbody = h("tbody");
+        for (const ds of volumes) {
+            const tr = h("tr");
+            tr.appendChild(h("td", {}, h("strong", {}, ds.name)));
+            tr.appendChild(h("td", {}, ds.used));
+            tr.appendChild(h("td", {}, ds.avail));
+            tr.appendChild(h("td", {}, ds.refer));
+            tr.appendChild(h("td", {}, ds.compression));
+            tr.appendChild(h("td", {}, ds.compressratio));
+            const actTd = h("td");
+            const bg = h("div", { className: "btn-group" });
+            bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
+            bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => createSnapshotForDs(ds.name) }, t("snapshot")));
+            actTd.appendChild(bg);
+            tr.appendChild(actTd);
+            volTbody.appendChild(tr);
+        }
+        volTable.appendChild(volTbody);
+        volCard.appendChild(volTable);
+    } else {
+        volCard.appendChild(h("div", { className: "card-body", style: "color:var(--text-secondary)" }, t("no_volumes") || "No volumes found"));
+    }
+    container.appendChild(volCard);
+
     setContent(container);
 }
 
