@@ -994,6 +994,42 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
     }
 
 
+def zvol_list_active(host):
+    """List all active zvol restore mounts and kpartx mappings."""
+    active = {"mounts": [], "mappings": [], "snapdev_visible": []}
+
+    # Active mounts
+    mounts_check = run_command(host, f"mount | grep {shlex.quote(ZVOL_MOUNT_BASE)}")
+    if mounts_check["success"] and mounts_check["stdout"].strip():
+        for line in mounts_check["stdout"].strip().splitlines():
+            parts = line.split(" on ")
+            if len(parts) >= 2:
+                device = parts[0].strip()
+                rest = parts[1].split(" type ")
+                mp = rest[0].strip() if rest else ""
+                fstype = rest[1].split()[0] if len(rest) > 1 else ""
+                active["mounts"].append({"device": device, "mount_path": mp, "fstype": fstype})
+
+    # kpartx/dm mappings
+    dm_check = run_command(host, "ls /dev/mapper/ 2>/dev/null | grep -E '(vm-|zd[0-9])'")
+    if dm_check["success"] and dm_check["stdout"].strip():
+        for dm_name in dm_check["stdout"].strip().splitlines():
+            dm_name = dm_name.strip()
+            if dm_name:
+                active["mappings"].append(dm_name)
+
+    # Volumes with snapdev=visible
+    snapdev_check = run_command(host, "zfs get snapdev -t volume -s local -H -o name,value")
+    if snapdev_check["success"] and snapdev_check["stdout"].strip():
+        for line in snapdev_check["stdout"].strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[1].strip() == "visible":
+                active["snapdev_visible"].append(parts[0].strip())
+
+    active["total"] = len(active["mounts"]) + len(active["mappings"]) + len(active["snapdev_visible"])
+    return active
+
+
 def zvol_cleanup_all(host):
     """Clean up ALL leftover zvol restore mounts, kpartx mappings, and snapdev settings."""
     cleaned = {"mounts": [], "mappings": [], "snapdev": [], "errors": []}

@@ -1990,6 +1990,82 @@ async function viewHealth() {
     rcCard.appendChild(rcBody);
     container.appendChild(rcCard);
 
+    // Zvol Restore sessions (VM volumes)
+    const zvolActive = await API.get(`/api/restore/zvol/active?host=${currentHost}`);
+    const zCard = h("div", { className: "card" });
+    const zHeader = h("div", { className: "card-header", style: "display:flex;justify-content:space-between;align-items:center" });
+    const zTotal = zvolActive.total || 0;
+    zHeader.appendChild(h("span", {}, `${t("zvol_restore_sessions") || "VM Zvol Restore"} (${zTotal})`));
+    if (zTotal > 0) {
+        zHeader.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: async () => {
+            if (!confirm(t("zvol_cleanup_confirm") || "Clean up all zvol restore sessions? This will unmount all partitions and remove kpartx mappings.")) return;
+            const r = await API.post("/api/restore/zvol/cleanup", { host: currentHost });
+            if (r.success) {
+                toast(`${t("cleaned_up_zvol") || "Cleaned up"}: ${r.total_cleaned} items`, "success");
+            }
+            viewHealth();
+        }}, t("cleanup_all") || "Clean up all"));
+    }
+    zCard.appendChild(zHeader);
+    const zBody = h("div", { className: "card-body" });
+
+    if (zTotal === 0) {
+        zBody.appendChild(h("div", { className: "empty-state" }, t("no_zvol_sessions") || "No active zvol restore sessions"));
+    } else {
+        // Mounted partitions
+        if (zvolActive.mounts && zvolActive.mounts.length > 0) {
+            zBody.appendChild(h("div", { style: "font-weight:600;margin-bottom:8px" }, `${t("mounted_partitions") || "Mounted Partitions"} (${zvolActive.mounts.length})`));
+            const mTbl = h("table");
+            const mThead = h("thead", {}, h("tr", {}, [
+                h("th", {}, t("device") || "Device"),
+                h("th", {}, t("mountpoint") || "Mountpoint"),
+                h("th", {}, t("type") || "Type"),
+                h("th", {}, t("actions") || "Actions"),
+            ]));
+            mTbl.appendChild(mThead);
+            const mTbody = h("tbody");
+            for (const m of zvolActive.mounts) {
+                const tr = h("tr");
+                tr.appendChild(h("td", { style: "font-family:monospace;font-size:12px" }, m.device));
+                tr.appendChild(h("td", { style: "font-family:monospace;font-size:12px" }, m.mount_path));
+                tr.appendChild(h("td", {}, m.fstype || "?"));
+                const actTd = h("td");
+                actTd.appendChild(h("button", { className: "btn btn-sm btn-warning", onClick: async () => {
+                    await API.post("/api/restore/zvol/unmount", { host: currentHost, mount_path: m.mount_path, zvol_dev: "" });
+                    toast(t("unmounted") || "Unmounted", "success");
+                    viewHealth();
+                }}, t("unmount") || "Unmount"));
+                tr.appendChild(actTd);
+                mTbody.appendChild(tr);
+            }
+            mTbl.appendChild(mTbody);
+            zBody.appendChild(mTbl);
+        }
+
+        // Device mapper entries
+        if (zvolActive.mappings && zvolActive.mappings.length > 0) {
+            zBody.appendChild(h("div", { style: "font-weight:600;margin-bottom:8px;margin-top:16px" }, `${t("kpartx_mappings") || "kpartx Mappings"} (${zvolActive.mappings.length})`));
+            const dmList = h("div", { style: "font-family:monospace;font-size:12px;color:var(--text-secondary)" });
+            for (const dm of zvolActive.mappings) {
+                dmList.appendChild(h("div", { style: "padding:2px 0" }, `/dev/mapper/${dm}`));
+            }
+            zBody.appendChild(dmList);
+        }
+
+        // snapdev=visible volumes
+        if (zvolActive.snapdev_visible && zvolActive.snapdev_visible.length > 0) {
+            zBody.appendChild(h("div", { style: "font-weight:600;margin-bottom:8px;margin-top:16px;color:var(--warning)" }, `${t("snapdev_visible") || "snapdev=visible"} (${zvolActive.snapdev_visible.length})`));
+            const sdList = h("div", { style: "font-family:monospace;font-size:12px" });
+            for (const ds of zvolActive.snapdev_visible) {
+                sdList.appendChild(h("div", { style: "padding:2px 0;color:var(--warning)" }, ds));
+            }
+            zBody.appendChild(sdList);
+        }
+    }
+
+    zCard.appendChild(zBody);
+    container.appendChild(zCard);
+
     setContent(container);
 }
 

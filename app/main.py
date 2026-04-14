@@ -22,7 +22,8 @@ from app.zfs_commands import (
     get_pve_vms, get_pve_cts, get_vm_snapshots,
     snapshot_mount, snapshot_unmount, snapshot_browse,
     snapshot_read_file, snapshot_restore_file, snapshot_restore_dir,
-    zvol_snapshot_mount, zvol_partition_mount, zvol_unmount, zvol_cleanup_all,
+    zvol_snapshot_mount, zvol_partition_mount, zvol_unmount,
+    zvol_list_active, zvol_cleanup_all,
     estimate_send_size, estimate_incremental_size,
     get_arc_stats, get_zfs_events, get_smart_status,
     get_snapshot_ages,
@@ -679,6 +680,15 @@ def api_zvol_unmount():
         return jsonify({"error": "Host not found"}), 404
     result = zvol_unmount(host, data.get("mount_path", ""), data.get("zvol_dev", ""))
     return jsonify(result)
+
+
+@app.route("/api/restore/zvol/active")
+@login_required
+def api_zvol_active():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(zvol_list_active(host))
 
 
 @app.route("/api/restore/zvol/cleanup", methods=["POST"])
