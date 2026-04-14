@@ -1939,14 +1939,6 @@ async function viewHealth() {
     smartCard.appendChild(smartBody);
     container.appendChild(smartCard);
 
-    // Events
-    const evCard = h("div", { className: "card" });
-    evCard.appendChild(h("div", { className: "card-header" }, t("recent_events")));
-    evCard.appendChild(h("div", { className: "card-body" }, [
-        h("pre", { className: "output" }, events.stdout || events.stderr || t("no_events")),
-    ]));
-    container.appendChild(evCard);
-
     // Restore clones cleanup
     const restoreClones = await API.get(`/api/restore/clones?host=${currentHost}`);
     const rcCard = h("div", { className: "card" });
@@ -2065,6 +2057,14 @@ async function viewHealth() {
 
     zCard.appendChild(zBody);
     container.appendChild(zCard);
+
+    // Events (am Ende)
+    const evCard = h("div", { className: "card" });
+    evCard.appendChild(h("div", { className: "card-header" }, t("recent_events")));
+    evCard.appendChild(h("div", { className: "card-body" }, [
+        h("pre", { className: "output" }, events.stdout || events.stderr || t("no_events")),
+    ]));
+    container.appendChild(evCard);
 
     setContent(container);
 }
