@@ -832,7 +832,11 @@ def zvol_snapshot_mount(host, snapshot):
         return {"success": False, "error": f"kpartx failed: {kpartx_result.get('stderr', '')}"}
 
     # Non-mountable filesystem types
-    SKIP_FS = {"swap", "linux_raid_member", "LVM2_member", "zfs_member"}
+    SKIP_FS = {
+        "swap", "linux_raid_member", "LVM2_member", "zfs_member",
+        "linux_dmraid_member", "iso9660", "squashfs", "bcache",
+        "drbd", "mdraid", "ceph_bluestore",
+    }
     ENCRYPTED_FS = {"BitLocker", "bitlocker", "crypto_LUKS"}
 
     # List partitions using kpartx -l (most reliable for zvol snapshots)
