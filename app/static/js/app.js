@@ -1277,6 +1277,7 @@ async function showGuestSnapshots(guest, pools) {
                     <div class="btn-group">
                         <button class="btn btn-sm btn-warning" onclick="rollbackGuestSnap('${escapeHtml(s.full_name)}')">${escapeHtml(t("rollback"))}</button>
                         ${isLxc ? `<button class="btn btn-sm btn-success" onclick="openFileRestore('${escapeHtml(s.full_name)}')">${escapeHtml(t("restore_files"))}</button>` : ''}
+                        ${!isLxc ? `<button class="btn btn-sm btn-success" onclick="openVmFileRestore('${escapeHtml(s.full_name)}')">${escapeHtml(t("restore_files"))}</button>` : ''}
                     </div>
                 </td>
             </tr>`;
@@ -1501,6 +1502,259 @@ window.restoreDir = async function(dirPath) {
 };
 
 window.closeFileRestore = function() {
+    closeModal();
+};
+
+// ---------------------------------------------------------------------------
+// File-Level Restore (VM — Zvol via kpartx)
+// ---------------------------------------------------------------------------
+let _zvolRestoreSession = null;
+
+window.openVmFileRestore = async function(snapshotFullName) {
+    closeModal();
+    toast(t("mounting_snapshot") || "Mounting snapshot...", "info");
+
+    const r = await API.post("/api/restore/zvol/mount", { host: currentHost, snapshot: snapshotFullName });
+    if (!r.success) {
+        toast(r.error || t("mount_failed"), "error");
+        return;
+    }
+
+    _zvolRestoreSession = {
+        snapshot: snapshotFullName,
+        zvol_dev: r.zvol_dev,
+        partitions: r.partitions || [],
+        mount_path: null,
+    };
+
+    // Show partition selection
+    showPartitionSelect();
+};
+
+function showPartitionSelect() {
+    const sess = _zvolRestoreSession;
+    if (!sess) return;
+
+    const snapLabel = sess.snapshot.includes("@") ? sess.snapshot.split("@")[1] : sess.snapshot;
+    const dsName = sess.snapshot.includes("@") ? sess.snapshot.split("@")[0] : "";
+
+    let html = `
+        <div style="margin-bottom:16px">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">${escapeHtml(t("snapshot") || "Snapshot")}: <strong>${escapeHtml(snapLabel)}</strong></div>
+            <div style="font-size:11px;color:var(--text-secondary)">${escapeHtml(dsName)}</div>
+        </div>
+    `;
+
+    if (sess.partitions.length === 0) {
+        html += `<div style="color:var(--warning);padding:16px">${escapeHtml(t("no_partitions") || "No mountable partitions found. The volume may use LVM or an unsupported filesystem.")}</div>`;
+    } else {
+        html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">`;
+        for (const p of sess.partitions) {
+            const fsIcon = p.fstype === "ntfs" ? "🪟" : (p.fstype === "vfat" ? "💽" : "🐧");
+            const labelText = p.label ? ` — ${p.label}` : "";
+            html += `
+                <div class="card" style="cursor:pointer;transition:border-color 0.2s" onclick="mountZvolPartition('${escapeAttr(p.device)}','${escapeAttr(p.fstype)}')"
+                     onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+                    <div class="card-body" style="padding:16px;text-align:center">
+                        <div style="font-size:28px;margin-bottom:8px">${fsIcon}</div>
+                        <div style="font-weight:700">${escapeHtml(p.name)}</div>
+                        <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">
+                            ${escapeHtml(p.fstype.toUpperCase())} · ${escapeHtml(p.size)}${escapeHtml(labelText)}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        html += `</div>`;
+    }
+
+    html += `
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("select_partition_hint") || "Select a partition to browse files")}</span>
+            <button class="btn btn-sm btn-danger" onclick="closeVmRestore()">${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
+        </div>
+    `;
+
+    openModal(t("vm_file_restore") || "VM File Restore", html);
+}
+
+window.mountZvolPartition = async function(device, fstype) {
+    toast(t("mounting_partition") || "Mounting partition...", "info");
+
+    const r = await API.post("/api/restore/zvol/partition", { host: currentHost, device, fstype });
+    if (!r.success) {
+        toast(r.error || t("mount_failed"), "error");
+        return;
+    }
+
+    _zvolRestoreSession.mount_path = r.mount_path;
+    _zvolRestoreSession.mounted_device = device;
+
+    // Reuse the existing LXC file browser with the zvol mount path
+    _restoreSession = {
+        clone_ds: null,
+        mount_path: r.mount_path,
+        snapshot: _zvolRestoreSession.snapshot,
+        _isZvol: true,
+        _zvol_dev: _zvolRestoreSession.zvol_dev,
+    };
+
+    toast(t("partition_mounted") || "Partition mounted", "success");
+    browseZvolPath("");
+};
+
+async function browseZvolPath(subpath) {
+    const sess = _zvolRestoreSession;
+    if (!sess || !sess.mount_path) return;
+
+    const snapLabel = sess.snapshot.includes("@") ? sess.snapshot.split("@")[1] : sess.snapshot;
+    const pathParts = subpath ? subpath.split("/").filter(Boolean) : [];
+    let breadcrumb = `<span class="restore-crumb" onclick="browseZvolPath('')">/</span>`;
+    let cumulative = "";
+    for (const part of pathParts) {
+        cumulative += (cumulative ? "/" : "") + part;
+        const p = cumulative;
+        breadcrumb += ` / <span class="restore-crumb" onclick="browseZvolPath('${escapeAttr(p)}')">${escapeHtml(part)}</span>`;
+    }
+
+    const modalHtml = `
+        <div style="margin-bottom:12px">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">${escapeHtml(t("snapshot") || "Snapshot")}: <strong>${escapeHtml(snapLabel)}</strong></div>
+            <div style="font-size:13px;padding:6px 10px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;font-family:monospace">
+                ${breadcrumb}
+            </div>
+        </div>
+        <div id="zvol-file-list">
+            <div class="loading-placeholder"><span class="spinner"></span> ${t("loading") || "Loading..."}</div>
+        </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+            <div>
+                <button class="btn btn-sm" onclick="showPartitionSelect()" style="margin-right:8px">${escapeHtml(t("back_to_partitions") || "← Partitions")}</button>
+                <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("vm_restore_hint") || "Browse and download files from the VM snapshot")}</span>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="closeVmRestore()">${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
+        </div>
+    `;
+
+    openModal(t("vm_file_restore") || "VM File Restore", modalHtml);
+
+    const r = await API.get(`/api/restore/browse?host=${currentHost}&mount_path=${encodeURIComponent(sess.mount_path)}&path=${encodeURIComponent(subpath)}`);
+    const listEl = document.getElementById("zvol-file-list");
+    if (!listEl) return;
+
+    if (!r.success) {
+        listEl.innerHTML = `<div style="color:var(--danger)">${escapeHtml(r.stderr || t("failed"))}</div>`;
+        return;
+    }
+
+    if (r.entries.length === 0) {
+        listEl.innerHTML = `<div style="color:var(--text-secondary)">${escapeHtml(t("empty_directory") || "Empty directory")}</div>`;
+        return;
+    }
+
+    const sorted = r.entries.sort((a, b) => {
+        if (a.type === "dir" && b.type !== "dir") return -1;
+        if (a.type !== "dir" && b.type === "dir") return 1;
+        return a.name.localeCompare(b.name);
+    });
+
+    let tableHtml = `<table><thead><tr><th style="width:24px"></th><th>${escapeHtml(t("name"))}</th><th>${escapeHtml(t("size"))}</th><th>${escapeHtml(t("created") || "Date")}</th><th>${escapeHtml(t("actions"))}</th></tr></thead><tbody>`;
+    if (subpath) {
+        const parentPath = pathParts.slice(0, -1).join("/");
+        tableHtml += `<tr style="cursor:pointer" onclick="browseZvolPath('${escapeAttr(parentPath)}')">
+            <td style="font-size:16px">&#x1F519;</td><td colspan="3" style="color:var(--accent)">..</td><td></td></tr>`;
+    }
+
+    for (const entry of sorted) {
+        const entryPath = subpath ? `${subpath}/${entry.name}` : entry.name;
+        const icon = entry.type === "dir" ? "&#x1F4C1;" : (entry.type === "link" ? "&#x1F517;" : "&#x1F4C4;");
+        const nameStyle = entry.type === "dir" ? "color:var(--accent);cursor:pointer" : "";
+        const nameClick = entry.type === "dir" ? `onclick="browseZvolPath('${escapeAttr(entryPath)}')"` : "";
+        const sizeDisplay = entry.type === "dir" ? "-" : entry.size;
+
+        let actions = "";
+        if (entry.type === "file") {
+            actions += `<button class="btn btn-sm" onclick="previewZvolFile('${escapeAttr(entryPath)}')">${escapeHtml(t("preview"))}</button> `;
+            actions += `<button class="btn btn-sm btn-success" onclick="downloadZvolFile('${escapeAttr(entryPath)}')">${escapeHtml(t("download") || "Download")}</button>`;
+        } else if (entry.type === "dir") {
+            actions += `<button class="btn btn-sm" onclick="browseZvolPath('${escapeAttr(entryPath)}')">${escapeHtml(t("open") || "Open")}</button>`;
+        }
+
+        tableHtml += `<tr>
+            <td style="font-size:14px">${icon}</td>
+            <td style="${nameStyle}" ${nameClick}>${escapeHtml(entry.name)}</td>
+            <td style="font-size:12px;color:var(--text-secondary)">${sizeDisplay}</td>
+            <td style="font-size:11px;color:var(--text-secondary)">${escapeHtml(entry.date)}</td>
+            <td><div class="btn-group">${actions}</div></td>
+        </tr>`;
+    }
+    tableHtml += '</tbody></table>';
+    listEl.innerHTML = tableHtml;
+}
+
+window.previewZvolFile = async function(filePath) {
+    const sess = _zvolRestoreSession;
+    if (!sess || !sess.mount_path) return;
+    const r = await API.get(`/api/restore/preview?host=${currentHost}&mount_path=${encodeURIComponent(sess.mount_path)}&file=${encodeURIComponent(filePath)}`);
+    const fileName = filePath.split("/").pop();
+    const listEl = document.getElementById("zvol-file-list");
+    if (!listEl) return;
+    const prevContent = listEl.innerHTML;
+    listEl.innerHTML = `
+        <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+            <strong>${escapeHtml(fileName)}</strong>
+            <button class="btn btn-sm" onclick="this.parentElement.parentElement.innerHTML = window._prevZvolContent">${escapeHtml(t("back"))}</button>
+        </div>
+        <pre class="output" style="max-height:400px">${escapeHtml(r.success ? r.stdout : (r.stderr || t("cannot_preview") || "Cannot preview"))}</pre>
+    `;
+    window._prevZvolContent = prevContent;
+};
+
+window.downloadZvolFile = async function(filePath) {
+    const sess = _zvolRestoreSession;
+    if (!sess || !sess.mount_path) return;
+    const r = await API.get(`/api/restore/preview?host=${currentHost}&mount_path=${encodeURIComponent(sess.mount_path)}&file=${encodeURIComponent(filePath)}`);
+    if (!r.success) {
+        toast(r.stderr || t("failed"), "error");
+        return;
+    }
+    // Trigger browser download
+    const fileName = filePath.split("/").pop();
+    const blob = new Blob([r.stdout || ""], { type: "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(`${fileName} ${t("downloaded") || "downloaded"}`, "success");
+};
+
+window.closeVmRestore = async function() {
+    const sess = _zvolRestoreSession;
+    if (sess) {
+        toast(t("unmounting") || "Unmounting...", "info");
+        // Unmount partition if mounted
+        if (sess.mount_path) {
+            await API.post("/api/restore/zvol/unmount", {
+                host: currentHost,
+                mount_path: sess.mount_path,
+                zvol_dev: sess.zvol_dev,
+            });
+        } else if (sess.zvol_dev) {
+            // Only remove kpartx mappings
+            await API.post("/api/restore/zvol/unmount", {
+                host: currentHost,
+                mount_path: "",
+                zvol_dev: sess.zvol_dev,
+            });
+        }
+        _zvolRestoreSession = null;
+        _restoreSession = null;
+        toast(t("unmounted") || "Unmounted & cleaned up", "success");
+    }
     closeModal();
 };
 

@@ -246,6 +246,16 @@ const TRANSLATIONS = {
         cannot_preview: "Cannot preview this file",
         back: "Back",
         unmounting: "Unmounting snapshot...",
+        vm_file_restore: "VM File Restore",
+        no_partitions: "No mountable partitions found. The volume may use LVM or an unsupported filesystem.",
+        select_partition_hint: "Select a partition to browse files",
+        mounting_partition: "Mounting partition...",
+        partition_mounted: "Partition mounted",
+        back_to_partitions: "← Partitions",
+        vm_restore_hint: "Browse and download files from the VM snapshot",
+        download: "Download",
+        downloaded: "downloaded",
+        unmounted: "Unmounted & cleaned up",
         restore_unmounted: "Restore snapshot unmounted",
 
         // Health
@@ -615,6 +625,16 @@ const TRANSLATIONS = {
         cannot_preview: "Diese Datei kann nicht als Vorschau angezeigt werden",
         back: "Zur\u00fcck",
         unmounting: "Snapshot wird unmountet...",
+        vm_file_restore: "VM-Dateiwiederherstellung",
+        no_partitions: "Keine mountbaren Partitionen gefunden. Das Volume nutzt möglicherweise LVM oder ein nicht unterstütztes Dateisystem.",
+        select_partition_hint: "Partition auswählen um Dateien zu durchsuchen",
+        mounting_partition: "Partition wird gemountet...",
+        partition_mounted: "Partition gemountet",
+        back_to_partitions: "← Partitionen",
+        vm_restore_hint: "Dateien aus dem VM-Snapshot durchsuchen und herunterladen",
+        download: "Download",
+        downloaded: "heruntergeladen",
+        unmounted: "Unmountet & aufgeräumt",
         restore_unmounted: "Restore-Snapshot unmountet",
 
         // Health
