@@ -808,6 +808,11 @@ def zvol_snapshot_mount(host, snapshot):
     if type_check["success"] and type_check["stdout"].strip() != "volume":
         return {"success": False, "error": "Zvol restore only works on volume datasets."}
 
+    # Check if kpartx is installed on the Proxmox host
+    kpartx_check = run_command(host, "which kpartx")
+    if not kpartx_check["success"] or not kpartx_check["stdout"].strip():
+        return {"success": False, "error": "kpartx is not installed on the Proxmox host. Install it with: apt install kpartx"}
+
     # Enable snapshot device visibility (default is hidden on ZFS Linux)
     run_command(host, f"zfs set snapdev=visible {ds_name}")
     # Give udev a moment to create the device node
@@ -909,6 +914,10 @@ def zvol_partition_mount(host, device, fstype=""):
 
     # Mount read-only; use ntfs-3g for NTFS
     if fstype in ("ntfs", "ntfs3"):
+        ntfs_check = run_command(host, "which ntfs-3g")
+        if not ntfs_check["success"] or not ntfs_check["stdout"].strip():
+            run_command(host, f"rmdir {shlex.quote(mount_path)} 2>/dev/null")
+            return {"success": False, "error": "ntfs-3g is not installed on the Proxmox host. Install it with: apt install ntfs-3g"}
         mount_cmd = f"mount -t ntfs-3g -o ro {shlex.quote(device)} {shlex.quote(mount_path)}"
     else:
         mount_cmd = f"mount -o ro {shlex.quote(device)} {shlex.quote(mount_path)}"
