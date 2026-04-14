@@ -808,13 +808,18 @@ def zvol_snapshot_mount(host, snapshot):
     if type_check["success"] and type_check["stdout"].strip() != "volume":
         return {"success": False, "error": "Zvol restore only works on volume datasets."}
 
+    # Enable snapshot device visibility (default is hidden on ZFS Linux)
+    run_command(host, f"zfs set snapdev=visible {ds_name}")
+    # Give udev a moment to create the device node
+    run_command(host, "udevadm settle --timeout=5 2>/dev/null; sleep 1")
+
     # Build zvol device path: rpool/data/vm-100-disk-0@snap → /dev/zvol/rpool/data/vm-100-disk-0@snap
     zvol_dev = f"/dev/zvol/{snapshot}"
 
     # Check if device exists
     check = run_command(host, f"test -e {shlex.quote(zvol_dev)} && echo OK")
     if not check["success"] or "OK" not in check["stdout"]:
-        return {"success": False, "error": f"Zvol device not found: {zvol_dev}"}
+        return {"success": False, "error": f"Zvol device not found: {zvol_dev}. Try: zfs set snapdev=visible {ds_name}"}
 
     # Expose partitions with kpartx (read-only)
     kpartx_result = run_command(host, f"kpartx -ars {shlex.quote(zvol_dev)}")
@@ -926,22 +931,29 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
     errors = []
 
     # Validate mount path
-    if not mount_path.startswith(ZVOL_MOUNT_BASE):
+    if mount_path and not mount_path.startswith(ZVOL_MOUNT_BASE):
         return {"success": False, "error": "Invalid mount path — must be under zvol restore base"}
 
     # Unmount
-    umount = run_command(host, f"umount {shlex.quote(mount_path)}")
-    if not umount["success"]:
-        errors.append(f"umount: {umount.get('stderr', '')}")
-
-    # Remove directory
-    run_command(host, f"rmdir {shlex.quote(mount_path)} 2>/dev/null")
+    if mount_path:
+        umount = run_command(host, f"umount {shlex.quote(mount_path)}")
+        if not umount["success"]:
+            errors.append(f"umount: {umount.get('stderr', '')}")
+        # Remove directory
+        run_command(host, f"rmdir {shlex.quote(mount_path)} 2>/dev/null")
 
     # Remove kpartx mappings if zvol_dev provided
     if zvol_dev:
         kp_rm = run_command(host, f"kpartx -d {shlex.quote(zvol_dev)}")
         if not kp_rm["success"]:
             errors.append(f"kpartx -d: {kp_rm.get('stderr', '')}")
+
+        # Restore snapdev=hidden on the parent dataset
+        # zvol_dev format: /dev/zvol/rpool/data/vm-100-disk-0@snap
+        zvol_path = zvol_dev.replace("/dev/zvol/", "")
+        ds_name = zvol_path.rsplit("@", 1)[0] if "@" in zvol_path else ""
+        if ds_name:
+            run_command(host, f"zfs set snapdev=hidden {ds_name}")
 
     return {
         "success": len(errors) == 0,
