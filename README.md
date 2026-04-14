@@ -13,7 +13,7 @@
 - **Pool History** -- View recent pool activity
 
 ### Dataset Management
-- **List & Filter** -- View all datasets with type, compression, used/available space
+- **Separated Views** -- Filesystems (LXC, data) and VM Volumes shown in distinct sections with type-specific actions
 - **Create Datasets** -- Create new datasets with optional compression settings
 - **Properties** -- View and modify all ZFS dataset properties
 
@@ -31,18 +31,37 @@
 - **Guest Overview** -- List all VMs and LXC containers with status
 - **Per-Guest Snapshots** -- View ZFS snapshots specific to a VM or container
 - **Smart Rollback** -- Automatically stops VM/LXC before rollback and restarts afterwards
-- **File-Level Restore** -- Browse and restore individual files from LXC container snapshots:
+- **LXC File-Level Restore** -- Browse and restore individual files from LXC container snapshots:
   - Mounts snapshot as readonly clone
   - Navigate files via breadcrumb file browser
   - Preview text files directly in the UI
   - Restore individual files or entire directories back to the live container
-  - Automatic cleanup: restore clone is unmounted when closing the browser (via X, backdrop click, or close button)
+  - Automatic cleanup: restore clone is unmounted when closing the browser
+- **VM File-Level Restore** -- Browse and download files from VM disk snapshots (Linux & Windows):
+  - Automatic `snapdev=visible` handling for zvol snapshot access
+  - Partition detection via `kpartx` with filesystem identification
+  - Supports ext4, xfs, btrfs (Linux), NTFS via ntfs-3g (Windows), vfat (EFI)
+  - BitLocker-encrypted partitions detected and shown as non-mountable
+  - File browser with preview and download functionality
+  - Robust cleanup: kpartx mappings, dmsetup fallback, snapdev reset
+  - Cleanup on modal close, tab close (sendBeacon), and via Health page
+
+### Snapshot Check
+- **Retention Policy Overview** -- Displays configured `--keep=N` values per label from cron
+- **Per-Label Analysis** -- Total snapshots, dataset count, per-dataset average, newest age
+- **Gap Detection** -- Identifies gaps in snapshot chains exceeding `MAX_AGE * 1.5`
+- **Stale Datasets** -- Warns when snapshots exceed age thresholds (frequent >1h, hourly >2h, daily >25h, weekly >8d, monthly >32d)
+- **Count Mismatches** -- Compares actual snapshot count vs. configured retention (SOLL/IST)
+- **Missing Labels** -- Detects labels configured in cron but absent from datasets
+- **Manual Snapshots** -- Lists non-standard snapshots (not matching known auto-snapshot labels)
 
 ### Health & Monitoring
 - **ARC Statistics** -- Adaptive Replacement Cache hit/miss rates and memory usage
 - **ZFS Events** -- Recent ZFS kernel events
 - **SMART Status** -- Disk health for all drives in each pool (resolved via `/dev/disk/by-id/`)
-- **Restore Clone Cleanup** -- View and destroy leftover restore-mount datasets with one-click cleanup
+- **LXC Restore Clone Cleanup** -- View and destroy leftover restore-mount datasets with one-click cleanup
+- **VM Zvol Restore Sessions** -- Overview of active mounts, kpartx mappings, and snapdev status with per-item unmount and bulk cleanup
+- **ZDB Deep Diagnostics** -- Automatic `zdb` analysis for DEGRADED/FAULTED pools (block stats, disk labels)
 
 ### Notifications
 - **Telegram** -- Receive notifications via Telegram bot
@@ -65,6 +84,8 @@
 - **Ollama Model Discovery** -- Automatically query and select available models from your Ollama instance
 - **Daily/Weekly Reports** -- Automated ZFS infrastructure analysis on schedule
 - **Comprehensive Analysis** -- Pool health, storage capacity, scrub status, snapshot coverage, SMART health, anomalies
+- **Snapshot Retention Analysis** -- Per-dataset per-label retention check, gap detection, stale snapshot warnings
+- **ZDB Diagnostics** -- Automatic deep analysis triggered for degraded/faulted pools
 - **Actionable Recommendations** -- Prioritized suggestions for scrubs, cleanup, capacity planning
 - **Interactive Chat** -- Ask follow-up questions about your ZFS data
 - **Notification Integration** -- Optionally send reports via Telegram, Gotify, or Matrix
@@ -152,6 +173,17 @@ Open the web UI at `http://DOCKER-HOST-IP:5000`
 5. **Add hosts in the UI** -- Go to "Hosts", add name, IP, port, and user.
 6. **Test connection** -- Click "Test" to verify SSH connectivity.
 7. **Manage ZFS** -- Select a host from the dropdown and explore pools, snapshots, etc.
+
+## Prerequisites on Proxmox Host (optional)
+
+For **VM file-level restore**, the following packages must be installed on the Proxmox host(s):
+
+```bash
+apt install kpartx          # Required — partition detection for zvol snapshots
+apt install ntfs-3g         # Optional — only needed for Windows VM NTFS partitions
+```
+
+> `kpartx` may already be installed as part of `multipath-tools`. Check with `which kpartx`.
 
 ## HTTPS with Reverse Proxy (recommended)
 
@@ -258,6 +290,8 @@ pve-zfs-tool/
     ├── validators.py        # Input validation (whitelist-based)
     ├── ai_reports.py        # AI-powered ZFS analysis & reports
     ├── ai_pdf.py            # PDF report generation
+    ├── snapshot_analysis.py # Shared snapshot health analysis (UI + AI)
+    ├── timezone.py          # Timezone helper (TZ environment variable)
     ├── notifications.py     # Telegram, Gotify & Matrix notifications
     ├── templates/
     │   ├── index.html       # Single-page application
