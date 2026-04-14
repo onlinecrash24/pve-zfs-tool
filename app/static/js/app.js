@@ -1751,29 +1751,8 @@ window.downloadZvolFile = async function(filePath) {
     toast(`${fileName} ${t("downloaded") || "downloaded"}`, "success");
 };
 
-window.closeVmRestore = async function() {
-    const sess = _zvolRestoreSession;
-    if (sess) {
-        toast(t("unmounting") || "Unmounting...", "info");
-        // Unmount partition if mounted
-        if (sess.mount_path) {
-            await API.post("/api/restore/zvol/unmount", {
-                host: currentHost,
-                mount_path: sess.mount_path,
-                zvol_dev: sess.zvol_dev,
-            });
-        } else if (sess.zvol_dev) {
-            // Only remove kpartx mappings
-            await API.post("/api/restore/zvol/unmount", {
-                host: currentHost,
-                mount_path: "",
-                zvol_dev: sess.zvol_dev,
-            });
-        }
-        _zvolRestoreSession = null;
-        _restoreSession = null;
-        toast(t("unmounted") || "Unmounted & cleaned up", "success");
-    }
+window.closeVmRestore = function() {
+    // closeModal() handles the actual cleanup of _zvolRestoreSession
     closeModal();
 };
 
@@ -2714,12 +2693,22 @@ function openModal(title, bodyHtml, onConfirm) {
 
 function closeModal() {
     document.getElementById("modal-overlay").classList.remove("active");
-    // Always unmount restore session when modal closes
-    if (_restoreSession) {
+    // Always unmount LXC restore session when modal closes
+    if (_restoreSession && !_restoreSession._isZvol) {
         const session = _restoreSession;
         _restoreSession = null;
         API.post("/api/restore/unmount", { host: currentHost, clone_ds: session.clone_ds })
             .then(() => toast(t("restore_unmounted"), "success"))
+            .catch(() => {});
+    }
+    // Always unmount Zvol restore session when modal closes
+    if (_zvolRestoreSession) {
+        const sess = _zvolRestoreSession;
+        _zvolRestoreSession = null;
+        _restoreSession = null;
+        const payload = { host: currentHost, mount_path: sess.mount_path || "", zvol_dev: sess.zvol_dev || "" };
+        API.post("/api/restore/zvol/unmount", payload)
+            .then(() => toast(t("unmounted") || "Unmounted & cleaned up", "success"))
             .catch(() => {});
     }
 }
@@ -2749,6 +2738,18 @@ async function loadHostSelector() {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+// Cleanup zvol sessions on tab close / refresh (best-effort, sendBeacon)
+window.addEventListener("beforeunload", () => {
+    if (_zvolRestoreSession) {
+        const payload = JSON.stringify({
+            host: currentHost,
+            mount_path: _zvolRestoreSession.mount_path || "",
+            zvol_dev: _zvolRestoreSession.zvol_dev || "",
+        });
+        navigator.sendBeacon("/api/restore/zvol/unmount", new Blob([payload], { type: "application/json" }));
+    }
+});
+
 document.addEventListener("DOMContentLoaded", async () => {
     // Fetch CSRF token if not in sessionStorage (e.g. after page refresh)
     if (!_csrfToken) {

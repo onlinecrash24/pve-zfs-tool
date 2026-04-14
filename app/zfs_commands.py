@@ -967,14 +967,24 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
 
     # Remove kpartx mappings if zvol_dev provided
     if zvol_dev:
-        kp_rm = run_command(host, f"kpartx -d {shlex.quote(zvol_dev)}")
-        if not kp_rm["success"]:
-            errors.append(f"kpartx -d: {kp_rm.get('stderr', '')}")
+        # First try kpartx -d (needs the device to still exist)
+        kp_rm = run_command(host, f"kpartx -d {shlex.quote(zvol_dev)} 2>/dev/null")
 
-        # Restore snapdev=hidden on the parent dataset
-        # zvol_dev format: /dev/zvol/rpool/data/vm-100-disk-0@snap
+        # Fallback: remove any leftover dm mappings via dmsetup
+        # Extract the base name from zvol_dev for matching mapper entries
         zvol_path = zvol_dev.replace("/dev/zvol/", "")
         ds_name = zvol_path.rsplit("@", 1)[0] if "@" in zvol_path else ""
+        snap_part = zvol_path.split("/")[-1] if "/" in zvol_path else zvol_path  # e.g. vm-100-disk-0@snap
+
+        if snap_part:
+            dm_list = run_command(host, f"ls /dev/mapper/ 2>/dev/null | grep {shlex.quote(snap_part)}")
+            if dm_list["success"] and dm_list["stdout"].strip():
+                for dm_name in dm_list["stdout"].strip().splitlines():
+                    dm_name = dm_name.strip()
+                    if dm_name:
+                        run_command(host, f"dmsetup remove {shlex.quote(dm_name)} 2>/dev/null")
+
+        # Restore snapdev=hidden AFTER kpartx/dmsetup cleanup
         if ds_name:
             run_command(host, f"zfs set snapdev=hidden {ds_name}")
 
@@ -982,6 +992,55 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
         "success": len(errors) == 0,
         "errors": errors,
     }
+
+
+def zvol_cleanup_all(host):
+    """Clean up ALL leftover zvol restore mounts, kpartx mappings, and snapdev settings."""
+    cleaned = {"mounts": [], "mappings": [], "snapdev": [], "errors": []}
+
+    # 1. Unmount all zvol restore mounts
+    mounts_check = run_command(host, f"mount | grep {shlex.quote(ZVOL_MOUNT_BASE)}")
+    if mounts_check["success"] and mounts_check["stdout"].strip():
+        for line in mounts_check["stdout"].strip().splitlines():
+            # Format: /dev/mapper/xxx on /tmp/zfs-tool-zvol-restore/xxx type ...
+            parts = line.split(" on ")
+            if len(parts) >= 2:
+                mp = parts[1].split(" type ")[0].strip()
+                r = run_command(host, f"umount {shlex.quote(mp)}")
+                if r["success"]:
+                    cleaned["mounts"].append(mp)
+                else:
+                    cleaned["errors"].append(f"umount {mp}: {r.get('stderr', '')}")
+                run_command(host, f"rmdir {shlex.quote(mp)} 2>/dev/null")
+
+    # Clean up mount base directory
+    run_command(host, f"rmdir {ZVOL_MOUNT_BASE}/* 2>/dev/null")
+
+    # 2. Remove leftover kpartx/dm mappings (vm-* and zd* patterns in mapper)
+    dm_check = run_command(host, "ls /dev/mapper/ 2>/dev/null | grep -E '(vm-|zd[0-9])'")
+    if dm_check["success"] and dm_check["stdout"].strip():
+        for dm_name in dm_check["stdout"].strip().splitlines():
+            dm_name = dm_name.strip()
+            if dm_name:
+                r = run_command(host, f"dmsetup remove {shlex.quote(dm_name)} 2>/dev/null")
+                if r["success"]:
+                    cleaned["mappings"].append(dm_name)
+
+    # 3. Reset any snapdev=visible back to hidden
+    snapdev_check = run_command(host, "zfs get snapdev -t volume -s local -H -o name,value")
+    if snapdev_check["success"] and snapdev_check["stdout"].strip():
+        for line in snapdev_check["stdout"].strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[1].strip() == "visible":
+                ds = parts[0].strip()
+                r = run_command(host, f"zfs set snapdev=hidden {ds}")
+                if r["success"]:
+                    cleaned["snapdev"].append(ds)
+
+    total = len(cleaned["mounts"]) + len(cleaned["mappings"]) + len(cleaned["snapdev"])
+    cleaned["success"] = True
+    cleaned["total_cleaned"] = total
+    return cleaned
 
 
 def snapshot_mount(host, snapshot):
