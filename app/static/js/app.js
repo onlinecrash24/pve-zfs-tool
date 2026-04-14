@@ -1550,20 +1550,39 @@ function showPartitionSelect() {
     } else {
         html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">`;
         for (const p of sess.partitions) {
-            const fsIcon = p.fstype === "ntfs" ? "🪟" : (p.fstype === "vfat" ? "💽" : "🐧");
+            const isEncrypted = p.encrypted === true;
+            const isMountable = p.mountable !== false;
+            const fsUpper = (p.fstype || "").toUpperCase();
+            const fsIcon = isEncrypted ? "🔒" : (fsUpper === "NTFS" ? "🪟" : (fsUpper === "VFAT" ? "💽" : "🐧"));
             const labelText = p.label ? ` — ${p.label}` : "";
-            html += `
-                <div class="card" style="cursor:pointer;transition:border-color 0.2s" onclick="mountZvolPartition('${escapeAttr(p.device)}','${escapeAttr(p.fstype)}')"
-                     onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
-                    <div class="card-body" style="padding:16px;text-align:center">
-                        <div style="font-size:28px;margin-bottom:8px">${fsIcon}</div>
-                        <div style="font-weight:700">${escapeHtml(p.name)}</div>
-                        <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">
-                            ${escapeHtml(p.fstype.toUpperCase())} · ${escapeHtml(p.size)}${escapeHtml(labelText)}
+
+            if (isEncrypted) {
+                html += `
+                    <div class="card" style="opacity:0.5;cursor:not-allowed;border-color:var(--danger)">
+                        <div class="card-body" style="padding:16px;text-align:center">
+                            <div style="font-size:28px;margin-bottom:8px">${fsIcon}</div>
+                            <div style="font-weight:700">${escapeHtml(p.name)}</div>
+                            <div style="font-size:13px;color:var(--danger);margin-top:4px">
+                                ${escapeHtml(fsUpper)} · ${escapeHtml(p.size)}${escapeHtml(labelText)}
+                            </div>
+                            <div style="font-size:11px;color:var(--danger);margin-top:6px">${escapeHtml(t("encrypted_partition") || "Encrypted — cannot mount")}</div>
                         </div>
                     </div>
-                </div>
-            `;
+                `;
+            } else if (isMountable) {
+                html += `
+                    <div class="card" style="cursor:pointer;transition:border-color 0.2s" onclick="mountZvolPartition('${escapeAttr(p.device)}','${escapeAttr(p.fstype)}')"
+                         onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+                        <div class="card-body" style="padding:16px;text-align:center">
+                            <div style="font-size:28px;margin-bottom:8px">${fsIcon}</div>
+                            <div style="font-weight:700">${escapeHtml(p.name)}</div>
+                            <div style="font-size:13px;color:var(--text-secondary);margin-top:4px">
+                                ${escapeHtml(fsUpper)} · ${escapeHtml(p.size)}${escapeHtml(labelText)}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
         }
         html += `</div>`;
     }

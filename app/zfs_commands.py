@@ -831,54 +831,68 @@ def zvol_snapshot_mount(host, snapshot):
     if not kpartx_result["success"]:
         return {"success": False, "error": f"kpartx failed: {kpartx_result.get('stderr', '')}"}
 
-    # List partition devices using lsblk
-    # kpartx maps to /dev/mapper/<name>pN — find the mapper name
-    lsblk = run_command(host, f"lsblk -Jb -o NAME,SIZE,FSTYPE,LABEL,PARTLABEL {shlex.quote(zvol_dev)}")
-    partitions = []
-    if lsblk["success"] and lsblk["stdout"].strip():
-        import json as _json
-        try:
-            blk_data = _json.loads(lsblk["stdout"])
-            for dev in blk_data.get("blockdevices", []):
-                for child in dev.get("children", []):
-                    fstype = child.get("fstype") or ""
-                    # Skip partitions without a mountable filesystem
-                    if not fstype or fstype in ("swap", "linux_raid_member", "LVM2_member"):
-                        continue
-                    size_bytes = child.get("size", 0)
-                    size_human = _format_size(int(size_bytes)) if size_bytes else "?"
-                    partitions.append({
-                        "device": f"/dev/mapper/{child['name']}",
-                        "name": child.get("name", ""),
-                        "size": size_human,
-                        "fstype": fstype,
-                        "label": child.get("label") or child.get("partlabel") or "",
-                    })
-        except (ValueError, KeyError) as e:
-            log.warning("Failed to parse lsblk JSON: %s", e)
+    # Non-mountable filesystem types
+    SKIP_FS = {"swap", "linux_raid_member", "LVM2_member"}
+    ENCRYPTED_FS = {"BitLocker", "bitlocker", "crypto_LUKS"}
 
-    # If lsblk JSON didn't work, fall back to kpartx -l
-    if not partitions:
-        kp_list = run_command(host, f"kpartx -l {shlex.quote(zvol_dev)}")
-        if kp_list["success"] and kp_list["stdout"].strip():
-            for line in kp_list["stdout"].strip().splitlines():
-                parts = line.split()
-                if parts:
-                    dev_name = parts[0]
-                    dev_path = f"/dev/mapper/{dev_name}"
-                    # Detect filesystem with blkid
-                    blkid = run_command(host, f"blkid -o value -s TYPE {dev_path} 2>/dev/null")
-                    fstype = blkid["stdout"].strip() if blkid["success"] else ""
-                    blkid_label = run_command(host, f"blkid -o value -s LABEL {dev_path} 2>/dev/null")
-                    label = blkid_label["stdout"].strip() if blkid_label["success"] else ""
-                    if fstype and fstype not in ("swap", "linux_raid_member", "LVM2_member"):
-                        partitions.append({
-                            "device": dev_path,
-                            "name": dev_name,
-                            "size": "?",
-                            "fstype": fstype,
-                            "label": label,
-                        })
+    # List partitions using kpartx -l (most reliable for zvol snapshots)
+    partitions = []
+    seen_devices = set()
+
+    kp_list = run_command(host, f"kpartx -l {shlex.quote(zvol_dev)}")
+    if kp_list["success"] and kp_list["stdout"].strip():
+        for line in kp_list["stdout"].strip().splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            dev_name = parts[0]
+            dev_path = f"/dev/mapper/{dev_name}"
+
+            if dev_path in seen_devices:
+                continue
+            seen_devices.add(dev_path)
+
+            # Detect filesystem and label with blkid
+            blkid_all = run_command(host, f"blkid -o export {dev_path} 2>/dev/null")
+            fstype = ""
+            label = ""
+            part_size = "?"
+            if blkid_all["success"] and blkid_all["stdout"].strip():
+                for bline in blkid_all["stdout"].strip().splitlines():
+                    if bline.startswith("TYPE="):
+                        fstype = bline.split("=", 1)[1]
+                    elif bline.startswith("LABEL="):
+                        label = bline.split("=", 1)[1]
+                    elif bline.startswith("PART_ENTRY_SIZE="):
+                        try:
+                            sectors = int(bline.split("=", 1)[1])
+                            part_size = _format_size(sectors * 512)
+                        except ValueError:
+                            pass
+
+            # If blkid didn't return size, try blockdev
+            if part_size == "?":
+                bdev = run_command(host, f"blockdev --getsize64 {dev_path} 2>/dev/null")
+                if bdev["success"] and bdev["stdout"].strip():
+                    try:
+                        part_size = _format_size(int(bdev["stdout"].strip()))
+                    except ValueError:
+                        pass
+
+            # Skip swap etc. but show encrypted partitions as info
+            encrypted = fstype in ENCRYPTED_FS
+            mountable = bool(fstype) and fstype not in SKIP_FS and not encrypted
+
+            if fstype and fstype not in SKIP_FS:
+                partitions.append({
+                    "device": dev_path,
+                    "name": dev_name,
+                    "size": part_size,
+                    "fstype": fstype,
+                    "label": label,
+                    "mountable": mountable,
+                    "encrypted": encrypted,
+                })
 
     return {
         "success": True,

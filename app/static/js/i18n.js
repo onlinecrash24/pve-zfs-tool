@@ -256,6 +256,7 @@ const TRANSLATIONS = {
         download: "Download",
         downloaded: "downloaded",
         unmounted: "Unmounted & cleaned up",
+        encrypted_partition: "Encrypted — cannot mount",
         restore_unmounted: "Restore snapshot unmounted",
 
         // Health
@@ -635,6 +636,7 @@ const TRANSLATIONS = {
         download: "Download",
         downloaded: "heruntergeladen",
         unmounted: "Unmountet & aufgeräumt",
+        encrypted_partition: "Verschlüsselt — Mounten nicht möglich",
         restore_unmounted: "Restore-Snapshot unmountet",
 
         // Health
