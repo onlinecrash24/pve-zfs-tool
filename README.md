@@ -4,6 +4,10 @@
 
 <p align="center">A Docker-based web application for managing ZFS pools, datasets, snapshots, and auto-snapshots across one or more Proxmox VE hosts via SSH.</p>
 
+<p align="center">
+  <b>English</b> &middot; <a href="README_DE.md">Deutsch</a>
+</p>
+
 ## Features
 
 ### ZFS Pool Management
@@ -65,12 +69,37 @@
 - **Scheduled Tasks Overview** -- Shows active AI report schedules (per-host and combined) with next-run and last-run times
 - **ZDB Deep Diagnostics** -- Automatic `zdb` analysis for DEGRADED/FAULTED pools (block stats, disk labels)
 
+### Historical Metrics (Trends)
+- **Background Sampler** -- Captures pool capacity, fragmentation, allocation, health and dedup ratio every 15 minutes per host
+- **SQLite Storage** -- 90-day retention in `/app/data/pvezfs.db` (WAL journaling)
+- **Inline Trend Charts** -- Capacity%, fragmentation%, allocated GB per pool rendered as lightweight inline SVG (no external JS)
+- **Configurable Range** -- 6 h / 24 h / 7 d / 30 d / 90 d views
+- **Sample Now** -- Trigger an immediate sample after adding a new host
+
+### Audit Log
+- **Destructive Actions Logged** -- Login success/failure, host add/remove, pool scrub/upgrade, dataset create/destroy/set, snapshot create/destroy/rollback/clone, auto-snapshot toggle, file & zvol restores, cache invalidation, notifications/AI config saves
+- **Fields Recorded** -- Timestamp, user, IP, host, action code, target, JSON details, success flag
+- **Filterable UI** -- Filter by action, user, current host, or failures only
+- **SQLite Backed** -- Indexed for fast queries, persisted across restarts
+
+### Performance
+- **SSH Command Cache** -- TTL-based in-memory cache (15-300s) for read-only ZFS queries drastically reduces SSH round-trips on active views; writes automatically invalidate the cache for the affected host
+- **Cache Stats API** -- `/api/cache/stats` exposes hit rate and entry count for ops visibility
+
 ### Notifications
 - **Telegram** -- Receive notifications via Telegram bot, PDF reports delivered as documents
 - **Gotify** -- Receive notifications via self-hosted Gotify server (text only)
 - **Matrix** -- Receive notifications via Matrix room (Client-Server API v3), PDF reports as `m.file` attachments
 - **Email (SMTP)** -- Send notifications and PDF reports to one or more recipients; STARTTLS, SSL/TLS or plaintext
 - **Scrub Monitor** -- Background thread detects scrub completion and sends notification automatically
+- **Live Dashboard** -- Home page shows per-host status, pool health, capacity, free space, and a linear-regression forecast "full in X days" computed from 30 d of sample data
+- **Capacity Forecast** -- `/api/forecast?host=...&pool=...` returns projected days until the pool reaches 100 % allocated (least-squares on `alloc_bytes`)
+- **Prometheus Exporter** -- `/metrics` in Prometheus text exposition format (opt-in: set `PROMETHEUS_TOKEN` env var; access with `Authorization: Bearer <token>` or `?token=`). Exposes host reachability, pool size/alloc/free/capacity/fragmentation, pool health (one-hot), I/O error totals, capacity forecast, and scrape timestamp
+- **Proactive Monitoring** -- Every 15 min the sampler checks each host for state changes and fires notifications (no manual action required):
+  - `pool_error` -- pool health transitions ONLINE → DEGRADED/FAULTED/UNAVAIL and back
+  - `health_warning` -- capacity crosses 90 %, or read/write/checksum errors appear
+  - `host_offline` -- SSH probe fails where it previously succeeded (and recovery)
+  - `auto_snapshot` -- newest auto-snap per label (frequent/hourly/daily/weekly/monthly) older than expected (throttled to once per day per host/label)
 - **Test Notifications** -- Send test messages per channel to verify configuration
 - **Configurable Events** -- Enable/disable notifications per event type:
   - Scrub started/finished
@@ -106,6 +135,7 @@
 - **Security Headers** -- CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - **Path Traversal Prevention** -- Realpath validation with symlink attack protection
 - **SSH Host Key Verification** -- Trust On First Use (TOFU), known hosts saved and verified on subsequent connections
+- **SSH Key Rotation** -- One-click rotation from the Home page; generates a new Ed25519 keypair, deploys it to all hosts before removing the old key (never locks you out), with per-host deploy/verify/cleanup status
 - **Reverse Proxy Ready** -- ProxyFix middleware for correct HTTPS detection behind NPM, nginx, Caddy
 
 ### Authentication & i18n
@@ -255,6 +285,23 @@ server {
 4. Enter homeserver URL, access token, and room ID in the Notifications settings
 5. Click "Send Test" to verify
 
+## Prometheus Integration (optional)
+
+Set the `PROMETHEUS_TOKEN` environment variable to enable the `/metrics` endpoint (it stays `404` otherwise). Example Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: pvezfs
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: your-long-random-token
+    static_configs:
+      - targets: ['zfs-tool.example.com']
+```
+
+Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`, `pvezfs_pool_size_bytes`, `pvezfs_pool_alloc_bytes`, `pvezfs_pool_free_bytes`, `pvezfs_pool_fragmentation_percent`, `pvezfs_pool_health{state="…"}`, `pvezfs_pool_error_total_sum`, `pvezfs_pool_forecast_days_until_full`, and a scrape timestamp.
+
 ## Configuration
 
 ### Environment Variables
@@ -266,6 +313,7 @@ server {
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
+| `PROMETHEUS_TOKEN` | _(unset)_ | Opt-in bearer token for `/metrics` endpoint. If unset, the Prometheus exporter is disabled |
 
 ### Persistent Volumes
 
@@ -290,14 +338,20 @@ pve-zfs-tool/
 ├── requirements.txt
 └── app/
     ├── main.py              # Flask API routes & authentication
-    ├── ssh_manager.py       # SSH connection & host management
-    ├── zfs_commands.py      # ZFS command wrappers via SSH
+    ├── ssh_manager.py       # SSH connection, host management, key rotation
+    ├── zfs_commands.py      # ZFS command wrappers via SSH (cached reads)
     ├── validators.py        # Input validation (whitelist-based)
+    ├── cache.py             # TTL in-memory cache for SSH results
+    ├── database.py          # Shared SQLite (metrics / audit / monitor state)
+    ├── metrics.py           # Background sampler + pool timeseries queries
+    ├── monitor.py           # Proactive state-change notifications
+    ├── analytics.py         # Dashboard aggregation, forecast, Prometheus
+    ├── audit.py             # Audit-log writer and query API
     ├── ai_reports.py        # AI-powered ZFS analysis & reports
     ├── ai_pdf.py            # PDF report generation
     ├── snapshot_analysis.py # Shared snapshot health analysis (UI + AI)
     ├── timezone.py          # Timezone helper (TZ environment variable)
-    ├── notifications.py     # Telegram, Gotify & Matrix notifications
+    ├── notifications.py     # Telegram, Gotify, Matrix & Email notifications
     ├── templates/
     │   ├── index.html       # Single-page application
     │   └── login.html       # Login page

@@ -7,6 +7,7 @@ import time
 import logging
 
 from app.ssh_manager import run_command
+from app.cache import invalidate_host as _invalidate_cache
 from app.validators import (
     validate_pool_name, validate_zfs_name, validate_zfs_property,
     validate_zfs_value, validate_vmid, validate_vm_type,
@@ -15,6 +16,23 @@ from app.validators import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# Cache TTLs for read-only ZFS queries (seconds).
+# Reads during the TTL window are served from memory instead of SSH.
+# Writes call _invalidate_cache(host["address"]) to drop stale entries.
+_TTL_SHORT = 15    # pool list, dataset list, snapshots, events, arc
+_TTL_MED = 30      # snapshot ages, guest lists
+_TTL_LONG = 60     # auto-snapshot cron config
+_TTL_SMART = 300   # smartctl queries (slow + disk state changes rarely)
+
+
+def _invalidate(host):
+    """Drop cached read results for a host after a write."""
+    try:
+        _invalidate_cache(host["address"])
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Scrub monitor – background thread that polls zpool status after a scrub
@@ -96,7 +114,8 @@ def start_scrub_monitor(host, pool_name):
 # ---------------------------------------------------------------------------
 
 def get_pools(host):
-    result = run_command(host, "zpool list -H -o name,size,alloc,free,fragmentation,capacity,health,dedupratio")
+    result = run_command(host, "zpool list -H -o name,size,alloc,free,fragmentation,capacity,health,dedupratio",
+                         cache_ttl=_TTL_SHORT)
     if not result["success"]:
         return []
     pools = []
@@ -121,7 +140,7 @@ def get_pool_status(host, pool_name):
         pool_name = validate_pool_name(pool_name)
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    result = run_command(host, f"zpool status {pool_name}")
+    result = run_command(host, f"zpool status {pool_name}", cache_ttl=_TTL_SHORT)
     return result
 
 
@@ -139,7 +158,10 @@ def scrub_pool(host, pool_name):
         pool_name = validate_pool_name(pool_name)
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    return run_command(host, f"zpool scrub {pool_name}")
+    result = run_command(host, f"zpool scrub {pool_name}")
+    if result.get("success"):
+        _invalidate(host)
+    return result
 
 
 def check_pool_upgrade(host, pool_name):
@@ -173,7 +195,10 @@ def upgrade_pool(host, pool_name):
         pool_name = validate_pool_name(pool_name)
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    return run_command(host, f"zpool upgrade {pool_name}")
+    result = run_command(host, f"zpool upgrade {pool_name}")
+    if result.get("success"):
+        _invalidate(host)
+    return result
 
 
 def get_pool_history(host, pool_name, limit=50):
@@ -199,7 +224,7 @@ def get_datasets(host, pool_name=None):
     cmd = "zfs list -H -o name,used,avail,refer,mountpoint,type,compression,compressratio"
     if pool_name:
         cmd += f" -r {pool_name}"
-    result = run_command(host, cmd)
+    result = run_command(host, cmd, cache_ttl=_TTL_SHORT)
     if not result["success"]:
         return []
     datasets = []
@@ -235,7 +260,10 @@ def set_dataset_property(host, dataset, prop, value):
         value = validate_zfs_value(value)
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    return run_command(host, f"zfs set {prop}={value} {dataset}")
+    result = run_command(host, f"zfs set {prop}={value} {dataset}")
+    if result.get("success"):
+        _invalidate(host)
+    return result
 
 
 def create_dataset(host, name, options=None):
@@ -252,7 +280,10 @@ def create_dataset(host, name, options=None):
         for k, v in options.items():
             cmd += f" -o {k}={v}"
     cmd += f" {name}"
-    return run_command(host, cmd)
+    result = run_command(host, cmd)
+    if result.get("success"):
+        _invalidate(host)
+    return result
 
 
 def destroy_dataset(host, name, recursive=False):
@@ -264,7 +295,10 @@ def destroy_dataset(host, name, recursive=False):
     if recursive:
         cmd += " -r"
     cmd += f" {name}"
-    return run_command(host, cmd)
+    result = run_command(host, cmd)
+    if result.get("success"):
+        _invalidate(host)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -280,12 +314,12 @@ def get_snapshots(host, dataset=None):
     cmd = "zfs list -t snapshot -H -o name,used,refer,creation -S creation"
     if dataset:
         cmd += f" -r {dataset}"
-    result = run_command(host, cmd)
+    result = run_command(host, cmd, cache_ttl=_TTL_SHORT)
     if not result["success"]:
         return []
     # Fetch dataset types so we can tag each snapshot as filesystem or volume
     ds_types = {}
-    type_result = run_command(host, "zfs list -H -o name,type")
+    type_result = run_command(host, "zfs list -H -o name,type", cache_ttl=_TTL_SHORT)
     if type_result["success"]:
         for line in type_result["stdout"].strip().splitlines():
             p = line.split("\t")
@@ -319,7 +353,10 @@ def create_snapshot(host, dataset, snap_name, recursive=False):
     if recursive:
         cmd += " -r"
     cmd += f" {dataset}@{snap_name}"
-    return run_command(host, cmd)
+    result = run_command(host, cmd)
+    if result.get("success"):
+        _invalidate(host)
+    return result
 
 
 def destroy_snapshot(host, full_name, recursive=False):
@@ -335,6 +372,8 @@ def destroy_snapshot(host, full_name, recursive=False):
     # If snapshot has dependent clones (e.g. restore clones), retry with -R
     if not result["success"] and "dependent clones" in result.get("stderr", ""):
         result = run_command(host, f"zfs destroy -R {full_name}")
+    if result.get("success"):
+        _invalidate(host)
     return result
 
 
@@ -371,6 +410,8 @@ def rollback_snapshot(host, full_name, force=False, destroy_recent=False, stop_g
         results["start_output"] = start_result.get("stderr", "") or start_result.get("stdout", "")
 
     result["guest_actions"] = results
+    if result.get("success"):
+        _invalidate(host)
     return result
 
 
@@ -384,7 +425,10 @@ def clone_snapshot(host, full_name, clone_name):
     snap_pool = full_name.split("/")[0]
     clone_pool = clone_name.split("/")[0]
     if snap_pool == clone_pool:
-        return run_command(host, f"zfs clone {full_name} {clone_name}")
+        result = run_command(host, f"zfs clone {full_name} {clone_name}")
+        if result.get("success"):
+            _invalidate(host)
+        return result
     else:
         # Cross-pool: send | recv, then promote
         result = run_command(host, f"zfs send {full_name} | zfs recv {clone_name}")
@@ -393,6 +437,7 @@ def clone_snapshot(host, full_name, clone_name):
         # The received dataset is a dependent clone, promote it to be independent
         promote = run_command(host, f"zfs promote {clone_name} 2>/dev/null")
         result["promoted"] = promote.get("success", False)
+        _invalidate(host)
         return result
 
 
@@ -557,7 +602,8 @@ def get_zdb_analysis(host, pool_name):
 # ---------------------------------------------------------------------------
 
 def get_auto_snapshot_status(host):
-    result = run_command(host, "which zfs-auto-snapshot 2>/dev/null && echo INSTALLED || echo NOT_INSTALLED")
+    result = run_command(host, "which zfs-auto-snapshot 2>/dev/null && echo INSTALLED || echo NOT_INSTALLED",
+                         cache_ttl=_TTL_LONG)
     installed = "INSTALLED" in result.get("stdout", "")
 
     # Check all standard cron locations used by Proxmox (cron.d + cron.{frequent,hourly,daily,weekly,monthly})
@@ -569,7 +615,7 @@ def get_auto_snapshot_status(host):
         "done; "
         "crontab -l 2>/dev/null | grep zfs-auto-snapshot"
     )
-    cron_result = run_command(host, cron_cmd)
+    cron_result = run_command(host, cron_cmd, cache_ttl=_TTL_LONG)
     cron_raw = cron_result.get("stdout", "")
 
     # Parse --keep=N and --label=X from cron config for structured retention data
@@ -599,7 +645,7 @@ def get_snapshot_ages(host):
       "manual": {dataset: [{"name": str, "creation": epoch}, ...]}
     Timestamps are sorted ascending (oldest first) for gap detection.
     """
-    result = run_command(host, "zfs list -t snapshot -Hpo name,creation")
+    result = run_command(host, "zfs list -t snapshot -Hpo name,creation", cache_ttl=_TTL_MED)
     if not result["success"]:
         return {"datasets": {}, "manual": {}}
 
@@ -678,7 +724,10 @@ def set_auto_snapshot(host, dataset, enabled=True, label=None):
     if label:
         prop += f":{label}"
     value = "true" if enabled else "false"
-    return run_command(host, f"zfs set {prop}={value} {dataset}")
+    result = run_command(host, f"zfs set {prop}={value} {dataset}")
+    if result.get("success"):
+        _invalidate(host)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +735,7 @@ def set_auto_snapshot(host, dataset, enabled=True, label=None):
 # ---------------------------------------------------------------------------
 
 def get_pve_vms(host):
-    result = run_command(host, "qm list 2>/dev/null")
+    result = run_command(host, "qm list 2>/dev/null", cache_ttl=_TTL_MED)
     vms = []
     if result["success"]:
         for line in result["stdout"].strip().splitlines()[1:]:
@@ -702,7 +751,7 @@ def get_pve_vms(host):
 
 
 def get_pve_cts(host):
-    result = run_command(host, "pct list 2>/dev/null")
+    result = run_command(host, "pct list 2>/dev/null", cache_ttl=_TTL_MED)
     cts = []
     if result["success"]:
         for line in result["stdout"].strip().splitlines()[1:]:
@@ -732,7 +781,8 @@ def get_vm_snapshots(host, pool, vmid, vm_type="qemu"):
     # Alle Snapshots holen (einmalig, sauber)
     result = run_command(
         host,
-        f"zfs list -t snapshot -H -o name,used,refer,creation -s creation 2>/dev/null"
+        f"zfs list -t snapshot -H -o name,used,refer,creation -s creation 2>/dev/null",
+        cache_ttl=_TTL_MED,
     )
 
     if not result["success"] or not result["stdout"]:
@@ -898,6 +948,7 @@ def zvol_snapshot_mount(host, snapshot):
                     "encrypted": encrypted,
                 })
 
+    _invalidate(host)
     return {
         "success": True,
         "zvol_dev": zvol_dev,
@@ -992,6 +1043,7 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
         if ds_name:
             run_command(host, f"zfs set snapdev=hidden {ds_name}")
 
+    _invalidate(host)
     return {
         "success": len(errors) == 0,
         "errors": errors,
@@ -1080,6 +1132,7 @@ def zvol_cleanup_all(host):
     total = len(cleaned["mounts"]) + len(cleaned["mappings"]) + len(cleaned["snapdev"])
     cleaned["success"] = True
     cleaned["total_cleaned"] = total
+    _invalidate(host)
     return cleaned
 
 
@@ -1109,6 +1162,7 @@ def snapshot_mount(host, snapshot):
     if not clone_result["success"]:
         return {"success": False, "stderr": clone_result.get("stderr", "Clone failed")}
 
+    _invalidate(host)
     return {
         "success": True,
         "clone_ds": clone_ds,
@@ -1124,6 +1178,8 @@ def snapshot_unmount(host, clone_ds):
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
     result = run_command(host, f"zfs destroy -r {clone_ds}")
+    if result.get("success"):
+        _invalidate(host)
     return result
 
 
@@ -1160,6 +1216,8 @@ def cleanup_restore_clones(host):
             destroyed.append(clone["name"])
         else:
             errors.append(f"{clone['name']}: {r.get('stderr', 'unknown error')}")
+    if destroyed:
+        _invalidate(host)
     return {"destroyed": destroyed, "errors": errors, "success": len(errors) == 0}
 
 
@@ -1308,7 +1366,8 @@ def estimate_incremental_size(host, snap_from, snap_to):
 # ---------------------------------------------------------------------------
 
 def get_arc_stats(host):
-    result = run_command(host, "cat /proc/spl/kstat/zfs/arcstats 2>/dev/null | grep -E '^(size|hits|misses|c_max)' ")
+    result = run_command(host, "cat /proc/spl/kstat/zfs/arcstats 2>/dev/null | grep -E '^(size|hits|misses|c_max)' ",
+                         cache_ttl=_TTL_SHORT)
     return result
 
 
@@ -1317,7 +1376,8 @@ def get_zfs_events(host, limit=30):
         limit = validate_limit(limit, default=30, maximum=10000)
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    result = run_command(host, f"zpool events -v 2>/dev/null | tail -n {limit}")
+    result = run_command(host, f"zpool events -v 2>/dev/null | tail -n {limit}",
+                         cache_ttl=_TTL_SHORT)
     return result
 
 
@@ -1412,10 +1472,11 @@ def get_smart_status(host, pool_name=None):
 
             # Query SMART (cached per base disk)
             if base_disk not in seen_base_disks:
-                smart = run_command(host, f"smartctl -H {base_disk} 2>&1 | grep -iE 'overall-health|result|PASSED|FAILED'")
+                smart = run_command(host, f"smartctl -H {base_disk} 2>&1 | grep -iE 'overall-health|result|PASSED|FAILED'",
+                                    cache_ttl=_TTL_SMART)
                 health_line = smart.get("stdout", "").strip()
                 if not health_line:
-                    smart2 = run_command(host, f"smartctl -H {base_disk} 2>&1")
+                    smart2 = run_command(host, f"smartctl -H {base_disk} 2>&1", cache_ttl=_TTL_SMART)
                     out = smart2.get("stdout", "")
                     if "PASSED" in out:
                         health_line = "PASSED"

@@ -145,6 +145,8 @@ async function renderView() {
         "snapshot-check": viewSnapshotCheck,
         guests: viewGuests,
         health: viewHealth,
+        metrics: viewMetrics,
+        audit: viewAudit,
         notifications: viewNotifications,
         ai: viewAI,
     };
@@ -170,7 +172,10 @@ async function viewHome() {
     const keyCard = h("div", { className: "card" });
     keyCard.appendChild(h("div", { className: "card-header" }, [
         h("span", {}, t("ssh_public_key")),
-        h("button", { className: "btn btn-sm btn-primary", onClick: () => copyKey(key.key) }, t("copy")),
+        h("div", { style: "display:flex;gap:6px" }, [
+            h("button", { className: "btn btn-sm btn-warning", onClick: () => rotateSshKey() }, t("ssh_rotate_btn")),
+            h("button", { className: "btn btn-sm btn-primary", onClick: () => copyKey(key.key) }, t("copy")),
+        ]),
     ]));
     const keyBody = h("div", { className: "card-body" });
     if (key.key) {
@@ -185,21 +190,20 @@ async function viewHome() {
     keyCard.appendChild(keyBody);
     container.appendChild(keyCard);
 
-    // Quick stats
+    // Live dashboard (replaces the old hardcoded stat tiles)
     if (hosts.length > 0) {
-        const statsGrid = h("div", { className: "grid grid-3", style: "margin-top:16px" });
-        statsGrid.appendChild(makeStatCard(t("hosts"), hosts.length, ""));
-        statsGrid.appendChild(makeStatCard(t("status"), t("active"), ""));
-
-        let totalPools = 0;
-        for (const host of hosts) {
+        const dashMount = h("div", { style: "margin-top:16px" }, loading());
+        container.appendChild(dashMount);
+        // Async — don't block rest of page
+        (async () => {
             try {
-                const pools = await API.get(`/api/pools?host=${host.address}`);
-                totalPools += pools.length;
-            } catch (e) { /* skip */ }
-        }
-        statsGrid.appendChild(makeStatCard(t("total_pools"), totalPools, ""));
-        container.appendChild(statsGrid);
+                const d = await API.get("/api/dashboard");
+                dashMount.innerHTML = "";
+                dashMount.appendChild(_renderDashboard(d));
+            } catch (e) {
+                dashMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Dashboard load failed")}</p>`;
+            }
+        })();
     }
 
     // Feature overview
@@ -263,6 +267,15 @@ async function viewHome() {
                 </ul>
             </div>
             <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_monitor_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_monitor_1"))}</li>
+                    <li>${escapeHtml(t("feat_monitor_2"))}</li>
+                    <li>${escapeHtml(t("feat_monitor_3"))}</li>
+                    <li>${escapeHtml(t("feat_monitor_4"))}</li>
+                </ul>
+            </div>
+            <div>
                 <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_auth_title"))}</h4>
                 <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
                     <li>${escapeHtml(t("feat_auth_1"))}</li>
@@ -302,6 +315,132 @@ function makeStatCard(label, value, extra) {
     return card;
 }
 
+function _renderDashboard(d) {
+    const root = document.createElement("div");
+    const agg = d.aggregate || {};
+
+    // Aggregate tiles
+    const tiles = h("div", { className: "grid grid-4", style: "gap:12px;margin-bottom:16px" });
+    const tile = (label, value, sub, ok) => {
+        const card = h("div", { className: "stat-card" });
+        card.appendChild(h("div", { className: "stat-label" }, label));
+        card.appendChild(h("div", {
+            className: "stat-value",
+            style: ok === false ? "color:var(--error,#f44336)" : (ok === true ? "color:var(--success,#4caf50)" : ""),
+        }, String(value)));
+        if (sub) card.appendChild(h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:4px" }, sub));
+        return card;
+    };
+    tiles.appendChild(tile(t("dash_hosts"),
+        `${agg.hosts_online || 0} / ${(agg.hosts_online || 0) + (agg.hosts_offline || 0)}`,
+        t("dash_hosts_online"),
+        (agg.hosts_offline || 0) === 0 ? true : false));
+    tiles.appendChild(tile(t("dash_pools"),
+        `${agg.pools_ok || 0} / ${agg.pools_total || 0}`,
+        t("dash_pools_ok"),
+        (agg.pools_degraded || 0) === 0 ? true : false));
+    tiles.appendChild(tile(t("dash_capacity_warn"),
+        String(agg.pools_capacity_warn || 0),
+        t("dash_capacity_warn_sub"),
+        (agg.pools_capacity_warn || 0) === 0 ? true : ((agg.pools_capacity_warn || 0) > 0 ? false : undefined)));
+    tiles.appendChild(tile(t("dash_forecast_critical"),
+        String(agg.forecast_pools_critical || 0),
+        t("dash_forecast_critical_sub"),
+        (agg.forecast_pools_critical || 0) === 0 ? true : false));
+    root.appendChild(tiles);
+
+    const tiles2 = h("div", { className: "grid grid-3", style: "gap:12px;margin-bottom:16px" });
+    tiles2.appendChild(tile(t("dash_stale_labels"),
+        String(agg.stale_snap_labels || 0),
+        t("dash_stale_labels_sub"),
+        (agg.stale_snap_labels || 0) === 0 ? true : false));
+    tiles2.appendChild(tile(t("dash_audit_failures"),
+        String(agg.recent_audit_failures_24h || 0),
+        t("dash_audit_failures_sub"),
+        (agg.recent_audit_failures_24h || 0) === 0 ? true : false));
+    tiles2.appendChild(tile(t("dash_pools_degraded"),
+        String(agg.pools_degraded || 0),
+        "",
+        (agg.pools_degraded || 0) === 0 ? true : false));
+    root.appendChild(tiles2);
+
+    // Per-host breakdown
+    const hostsCard = h("div", { className: "card" });
+    hostsCard.appendChild(h("div", { className: "card-header" }, t("dash_per_host")));
+    const tbl = document.createElement("table");
+    tbl.innerHTML = `<thead><tr>
+        <th>${escapeHtml(t("name"))}</th>
+        <th>${escapeHtml(t("status"))}</th>
+        <th>${escapeHtml(t("dash_pool"))}</th>
+        <th>${escapeHtml(t("dash_health"))}</th>
+        <th>${escapeHtml(t("dash_cap"))}</th>
+        <th>${escapeHtml(t("dash_free"))}</th>
+        <th>${escapeHtml(t("dash_forecast"))}</th>
+    </tr></thead>`;
+    const tb = document.createElement("tbody");
+    for (const host of (d.hosts || [])) {
+        const pools = host.pools || [];
+        if (pools.length === 0) {
+            const tr = document.createElement("tr");
+            const statusBadge = host.reachable === true ? `<span class="badge badge-online">${escapeHtml(t("online"))}</span>`
+                : host.reachable === false ? `<span class="badge badge-offline">${escapeHtml(t("offline"))}</span>`
+                : `<span class="badge badge-stopped">${escapeHtml(t("unknown"))}</span>`;
+            tr.innerHTML = `<td>${escapeHtml(host.name)}</td>
+                <td>${statusBadge}</td>
+                <td colspan="5" class="muted">${escapeHtml(t("dash_no_samples"))}</td>`;
+            tb.appendChild(tr);
+            continue;
+        }
+        pools.forEach((p, idx) => {
+            const tr = document.createElement("tr");
+            let nameCell = "", statusCell = "";
+            if (idx === 0) {
+                const statusBadge = host.reachable === true ? `<span class="badge badge-online">${escapeHtml(t("online"))}</span>`
+                    : host.reachable === false ? `<span class="badge badge-offline">${escapeHtml(t("offline"))}</span>`
+                    : `<span class="badge badge-stopped">${escapeHtml(t("unknown"))}</span>`;
+                nameCell = `<td rowspan="${pools.length}">${escapeHtml(host.name)}</td>`;
+                statusCell = `<td rowspan="${pools.length}">${statusBadge}</td>`;
+            }
+            const healthCls = p.health === "ONLINE" ? "badge-online" :
+                (p.health ? "badge-offline" : "badge-stopped");
+            const capPct = p.cap_pct != null ? p.cap_pct.toFixed(0) + "%" : "—";
+            const capClass = (p.cap_pct != null && p.cap_pct >= 90) ? "color:var(--error,#f44336);font-weight:bold" :
+                             (p.cap_pct != null && p.cap_pct >= 80) ? "color:#e67e22" : "";
+            const free = p.free_bytes != null ? formatBytes(p.free_bytes) : "—";
+            let fc;
+            if (p.forecast_days_until_full == null) {
+                fc = `<span class="muted">—</span>`;
+            } else if (p.forecast_days_until_full < 30) {
+                fc = `<span style="color:var(--error,#f44336);font-weight:bold">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
+            } else if (p.forecast_days_until_full < 90) {
+                fc = `<span style="color:#e67e22">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
+            } else {
+                fc = `${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}`;
+            }
+            tr.innerHTML = `${nameCell}${statusCell}
+                <td style="font-family:monospace">${escapeHtml(p.pool)}</td>
+                <td><span class="badge ${healthCls}">${escapeHtml(p.health || "?")}</span></td>
+                <td style="${capClass}">${capPct}</td>
+                <td>${free}</td>
+                <td>${fc}</td>`;
+            tb.appendChild(tr);
+        });
+    }
+    tbl.appendChild(tb);
+    hostsCard.appendChild(tbl);
+    root.appendChild(hostsCard);
+
+    // Generated-at footer
+    if (d.generated_at) {
+        const foot = document.createElement("p");
+        foot.className = "muted";
+        foot.style.cssText = "font-size:11px;text-align:right;margin-top:6px";
+        foot.textContent = `${t("dash_generated_at")}: ${new Date(d.generated_at * 1000).toLocaleString()}`;
+        root.appendChild(foot);
+    }
+    return root;
+}
+
 function copyKey(key) {
     if (!key) return;
     if (navigator.clipboard && window.isSecureContext) {
@@ -328,6 +467,83 @@ function copyKey(key) {
             }
         }
         document.body.removeChild(ta);
+    }
+}
+
+async function rotateSshKey() {
+    if (!confirm(t("ssh_rotate_confirm"))) return;
+    if (!confirm(t("ssh_rotate_confirm2"))) return;
+    toast(t("ssh_rotate_running"), "info");
+    let r;
+    try {
+        r = await API.post("/api/ssh-key/rotate", {});
+    } catch (e) {
+        toast(t("ssh_rotate_failed") + ": " + (e.message || e), "error");
+        return;
+    }
+    // Build a results modal
+    const body = document.createElement("div");
+    if (r.success) {
+        const ok = document.createElement("div");
+        ok.style.cssText = "color:var(--success, #4caf50);font-weight:bold;margin-bottom:10px";
+        ok.textContent = "✅ " + t("ssh_rotate_success");
+        body.appendChild(ok);
+    } else {
+        const err = document.createElement("div");
+        err.style.cssText = "color:var(--error, #f44336);font-weight:bold;margin-bottom:10px";
+        err.textContent = "❌ " + (r.error || t("ssh_rotate_failed"));
+        body.appendChild(err);
+    }
+    if (r.warning) {
+        const w = document.createElement("div");
+        w.style.cssText = "background:rgba(255,165,0,0.1);border-left:3px solid orange;padding:8px;margin-bottom:10px;font-size:13px";
+        w.textContent = "⚠️ " + r.warning;
+        body.appendChild(w);
+    }
+    if (r.note) {
+        const n = document.createElement("div");
+        n.style.cssText = "font-size:13px;color:var(--text-secondary);margin-bottom:10px";
+        n.textContent = r.note;
+        body.appendChild(n);
+    }
+    if (Array.isArray(r.results) && r.results.length) {
+        const tbl = document.createElement("table");
+        tbl.style.cssText = "width:100%;font-size:13px;border-collapse:collapse";
+        tbl.innerHTML = `<thead><tr>
+            <th style="text-align:left;padding:4px 8px">${escapeHtml(t("host"))}</th>
+            <th style="text-align:center;padding:4px 8px">${escapeHtml(t("ssh_rotate_deploy"))}</th>
+            <th style="text-align:center;padding:4px 8px">${escapeHtml(t("ssh_rotate_verify"))}</th>
+            <th style="text-align:center;padding:4px 8px">${escapeHtml(t("ssh_rotate_cleanup"))}</th>
+        </tr></thead>`;
+        const tb = document.createElement("tbody");
+        for (const res of r.results) {
+            const tr = document.createElement("tr");
+            const mark = (v) => v === true ? "✅" : v === false ? "❌" : "—";
+            tr.innerHTML = `
+                <td style="padding:4px 8px">${escapeHtml(res.name || res.host)}</td>
+                <td style="text-align:center;padding:4px 8px" title="${escapeHtml(res.deploy_error || '')}">${mark(res.deploy)}</td>
+                <td style="text-align:center;padding:4px 8px">${mark(res.verify)}</td>
+                <td style="text-align:center;padding:4px 8px">${mark(res.cleanup)}</td>`;
+            tb.appendChild(tr);
+        }
+        tbl.appendChild(tb);
+        body.appendChild(tbl);
+    }
+    if (r.new_pubkey) {
+        const lbl = document.createElement("div");
+        lbl.style.cssText = "margin-top:12px;font-size:12px;color:var(--text-secondary)";
+        lbl.textContent = t("ssh_rotate_new_key") + ":";
+        body.appendChild(lbl);
+        const pre = document.createElement("div");
+        pre.className = "key-display";
+        pre.style.cssText = "margin-top:4px;word-break:break-all;font-family:monospace;font-size:11px";
+        pre.textContent = r.new_pubkey;
+        body.appendChild(pre);
+    }
+    openModal(t("ssh_rotate_title"), body.outerHTML, null);
+    // Refresh Home view to show new key
+    if (r.success) {
+        setTimeout(() => { if (currentView === "home") viewHome(); }, 500);
     }
 }
 
@@ -403,6 +619,28 @@ async function viewHosts() {
     setContent(container);
 
     document.getElementById("add-host-btn").addEventListener("click", addHost);
+
+    // Auto-probe each host in parallel so the "unknown" badge resolves
+    // without requiring a manual click. Uses the same /api/hosts/test
+    // endpoint as the Test button.
+    for (const host of hosts) {
+        _probeHostBadge(host.address);
+    }
+}
+
+async function _probeHostBadge(addr) {
+    const el = document.getElementById(`status-${addr}`);
+    if (!el) return;
+    el.textContent = t("testing");
+    el.className = "badge badge-stopped";
+    try {
+        const r = await API.post("/api/hosts/test", { address: addr });
+        el.textContent = r.success ? t("online") : t("offline");
+        el.className = r.success ? "badge badge-online" : "badge badge-offline";
+    } catch (e) {
+        el.textContent = t("offline");
+        el.className = "badge badge-offline";
+    }
 }
 
 async function addHost() {
@@ -2134,6 +2372,276 @@ function formatBytes(bytes) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
+
+// -- Metrics (historical pool trends) --------------------------------------
+function _svgLineChart(points, opts = {}) {
+    // points: [{x: number, y: number}, ...]  — x is epoch, y is value
+    const w = opts.width || 760;
+    const hgt = opts.height || 180;
+    const pad = { l: 40, r: 12, t: 12, b: 26 };
+    if (!points || points.length === 0) {
+        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
+    }
+    const xs = points.map(p => p.x);
+    const ys = points.map(p => p.y).filter(v => v != null && !isNaN(v));
+    if (ys.length === 0) {
+        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
+    }
+    const xmin = Math.min(...xs), xmax = Math.max(...xs);
+    let ymin = Math.min(...ys), ymax = Math.max(...ys);
+    if (ymin === ymax) { ymin -= 1; ymax += 1; }
+    if (opts.yZero) ymin = 0;
+    if (opts.yMax != null) ymax = Math.max(ymax, opts.yMax);
+    const xRange = xmax - xmin || 1;
+    const yRange = ymax - ymin || 1;
+    const plotW = w - pad.l - pad.r;
+    const plotH = hgt - pad.t - pad.b;
+    const px = x => pad.l + ((x - xmin) / xRange) * plotW;
+    const py = y => pad.t + plotH - ((y - ymin) / yRange) * plotH;
+    const path = points
+        .filter(p => p.y != null && !isNaN(p.y))
+        .map((p, i) => (i === 0 ? "M" : "L") + px(p.x).toFixed(1) + "," + py(p.y).toFixed(1))
+        .join(" ");
+    // Y axis ticks (5 steps)
+    let yTicks = "";
+    for (let i = 0; i <= 4; i++) {
+        const v = ymin + (yRange * i / 4);
+        const yp = py(v);
+        const label = opts.yFmt ? opts.yFmt(v) : v.toFixed(1);
+        yTicks += `<line x1="${pad.l}" y1="${yp}" x2="${w - pad.r}" y2="${yp}" stroke="#eee" stroke-width="1"/>`;
+        yTicks += `<text x="${pad.l - 6}" y="${yp + 3}" text-anchor="end" font-size="10" fill="#888">${label}</text>`;
+    }
+    // X axis ticks (start/end timestamps)
+    const fmtTs = ts => {
+        const d = new Date(ts * 1000);
+        return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    };
+    const xTicks =
+        `<text x="${pad.l}" y="${hgt - 8}" font-size="10" fill="#888">${fmtTs(xmin)}</text>` +
+        `<text x="${w - pad.r}" y="${hgt - 8}" font-size="10" fill="#888" text-anchor="end">${fmtTs(xmax)}</text>`;
+    const color = opts.color || "#4a90e2";
+    return `<svg viewBox="0 0 ${w} ${hgt}" style="width:100%;height:${hgt}px;background:#fafbfc;border-radius:4px">
+        ${yTicks}
+        <path d="${path}" fill="none" stroke="${color}" stroke-width="2"/>
+        ${xTicks}
+    </svg>`;
+}
+
+async function viewMetrics() {
+    if (!requireHost()) { setContent(`<div class="card"><h2>${t("nav_metrics")}</h2><p>${t("select_host_first")}</p></div>`); return; }
+    setContent(loading());
+    const hours = parseInt(sessionStorage.getItem("metrics_hours") || "24", 10);
+    const [summary, poolsInfo] = await Promise.all([
+        API.get(`/api/metrics/summary?host=${encodeURIComponent(currentHost)}`),
+        API.get(`/api/metrics/pools?host=${encodeURIComponent(currentHost)}`),
+    ]);
+    const pools = poolsInfo.pools || [];
+
+    const container = document.createElement("div");
+    container.appendChild(h("h2", {}, t("nav_metrics")));
+
+    // Summary + controls
+    const top = h("div", { className: "card" });
+    const lastTs = summary.newest ? new Date(summary.newest * 1000).toLocaleString() : "—";
+    const oldTs = summary.oldest ? new Date(summary.oldest * 1000).toLocaleString() : "—";
+    top.innerHTML = `
+        <div class="row" style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
+            <div><b>${t("metrics_samples")}:</b> ${summary.samples || 0}</div>
+            <div><b>${t("metrics_pools")}:</b> ${summary.pools || 0}</div>
+            <div><b>${t("metrics_oldest")}:</b> ${oldTs}</div>
+            <div><b>${t("metrics_newest")}:</b> ${lastTs}</div>
+            <div><b>${t("metrics_interval")}:</b> ${Math.round((summary.interval_seconds || 900) / 60)} min</div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <label>${t("metrics_range")}:</label>
+            <select id="m-range">
+                <option value="6">6 h</option>
+                <option value="24" selected>24 h</option>
+                <option value="168">7 d</option>
+                <option value="720">30 d</option>
+                <option value="2160">90 d</option>
+            </select>
+            <button class="btn btn-sm" id="m-refresh">${t("refresh")}</button>
+            <button class="btn btn-sm" id="m-sample-now">${t("metrics_sample_now")}</button>
+        </div>
+    `;
+    container.appendChild(top);
+
+    if (pools.length === 0) {
+        container.appendChild(h("div", { className: "card" }, [
+            h("p", {}, t("metrics_no_samples_yet")),
+        ]));
+        setContent(container);
+        document.getElementById("m-sample-now").onclick = async () => {
+            try {
+                const r = await API.post("/api/metrics/sample-now", { host: currentHost });
+                if (r.success) { toast(`${r.pools_sampled} pools sampled`, "success"); viewMetrics(); }
+                else { toast(r.error || "Error", "error"); }
+            } catch (e) { toast(e.message, "error"); }
+        };
+        document.getElementById("m-refresh").onclick = () => viewMetrics();
+        return;
+    }
+
+    // Fetch all pool series for this range
+    for (const pool of pools) {
+        const series = await API.get(`/api/metrics/series?host=${encodeURIComponent(currentHost)}&pool=${encodeURIComponent(pool)}&hours=${hours}`);
+        const data = (series.data || []);
+        const card = h("div", { className: "card" });
+        card.innerHTML = `<h3 style="margin-top:0">${pool} <span class="muted" style="font-weight:normal;font-size:0.85em">(${data.length} ${t("metrics_samples")})</span></h3>`;
+
+        // Three charts: capacity%, fragmentation%, alloc GB
+        const capPts = data.map(d => ({ x: d.timestamp, y: d.cap_pct }));
+        const fragPts = data.map(d => ({ x: d.timestamp, y: d.frag_pct }));
+        const allocPts = data.map(d => ({ x: d.timestamp, y: d.alloc_bytes != null ? d.alloc_bytes / (1024 ** 3) : null }));
+
+        const grid = h("div", { className: "metric-grid", style: "display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px" });
+        const chartBox = (label, svgHtml, sub) => {
+            const box = document.createElement("div");
+            box.innerHTML = `<div style="font-weight:600;font-size:0.9em;margin-bottom:4px">${label}</div>
+                ${svgHtml}
+                <div class="muted" style="font-size:0.8em;margin-top:4px">${sub || ""}</div>`;
+            return box;
+        };
+        const latest = data[data.length - 1] || {};
+        grid.appendChild(chartBox(
+            t("metrics_capacity") + " (%)",
+            _svgLineChart(capPts, { yZero: true, yMax: 100, color: "#4a90e2", yFmt: v => v.toFixed(0) + "%" }),
+            `${t("metrics_current")}: ${latest.cap_pct != null ? latest.cap_pct.toFixed(1) + "%" : "—"}`,
+        ));
+        grid.appendChild(chartBox(
+            t("metrics_frag") + " (%)",
+            _svgLineChart(fragPts, { yZero: true, color: "#e67e22", yFmt: v => v.toFixed(0) + "%" }),
+            `${t("metrics_current")}: ${latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—"}<br><span style="font-size:0.75em;opacity:0.8">${escapeHtml(t("metrics_frag_hint"))}</span>`,
+        ));
+        grid.appendChild(chartBox(
+            t("metrics_alloc") + " (GB)",
+            _svgLineChart(allocPts, { yZero: true, color: "#27ae60", yFmt: v => v.toFixed(1) }),
+            `${t("metrics_current")}: ${latest.alloc_bytes != null ? formatBytes(latest.alloc_bytes) : "—"}`,
+        ));
+        card.appendChild(grid);
+        container.appendChild(card);
+    }
+
+    setContent(container);
+    const rangeSel = document.getElementById("m-range");
+    rangeSel.value = String(hours);
+    rangeSel.onchange = () => { sessionStorage.setItem("metrics_hours", rangeSel.value); viewMetrics(); };
+    document.getElementById("m-refresh").onclick = () => viewMetrics();
+    document.getElementById("m-sample-now").onclick = async () => {
+        try {
+            const r = await API.post("/api/metrics/sample-now", { host: currentHost });
+            if (r.success) { toast(`${r.pools_sampled} pools sampled`, "success"); viewMetrics(); }
+            else { toast(r.error || "Error", "error"); }
+        } catch (e) { toast(e.message, "error"); }
+    };
+}
+
+
+// -- Audit Log -------------------------------------------------------------
+function _auditFmt(ts) { return new Date(ts * 1000).toLocaleString(); }
+
+async function viewAudit() {
+    setContent(loading());
+    const filter = {
+        action: sessionStorage.getItem("audit_action") || "",
+        user: sessionStorage.getItem("audit_user") || "",
+        only_failures: sessionStorage.getItem("audit_failures") === "1",
+        // Host filter is opt-in (default OFF). Many entries (login, logout,
+        // host.add, config.*, cache.*) are logged with host="" and would
+        // otherwise be invisible when a host is selected.
+        host_filter: sessionStorage.getItem("audit_host_filter") === "1",
+        limit: 200,
+        offset: 0,
+    };
+    const params = new URLSearchParams();
+    if (filter.action) params.set("action", filter.action);
+    if (filter.user) params.set("user", filter.user);
+    if (filter.only_failures) params.set("only_failures", "1");
+    if (filter.host_filter && currentHost) params.set("host", currentHost);
+    params.set("limit", String(filter.limit));
+
+    const data = await API.get("/api/audit?" + params.toString());
+    const entries = data.entries || [];
+
+    const container = document.createElement("div");
+    container.appendChild(h("h2", {}, t("nav_audit")));
+
+    const filterCard = h("div", { className: "card" });
+    const actionOpts = ['<option value="">' + t("audit_all_actions") + '</option>']
+        .concat((data.actions || []).map(a => `<option value="${a}"${a === filter.action ? " selected" : ""}>${a}</option>`))
+        .join("");
+    filterCard.innerHTML = `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <label>${t("audit_action")}:</label>
+            <select id="a-action">${actionOpts}</select>
+            <label>${t("audit_user")}:</label>
+            <input id="a-user" type="text" value="${filter.user.replace(/"/g, "&quot;")}" style="width:140px" placeholder="admin"/>
+            <label><input id="a-failures" type="checkbox"${filter.only_failures ? " checked" : ""}/> ${t("audit_only_failures")}</label>
+            ${currentHost ? `<label><input id="a-host-filter" type="checkbox"${filter.host_filter ? " checked" : ""}/> ${t("audit_current_host")}: ${currentHost}</label>` : ""}
+            <button class="btn btn-sm" id="a-apply">${t("audit_apply")}</button>
+            <button class="btn btn-sm" id="a-reset">${t("audit_reset")}</button>
+            <span class="muted" style="margin-left:auto">${entries.length} / ${data.total} ${t("audit_entries")}</span>
+        </div>
+    `;
+    container.appendChild(filterCard);
+
+    const listCard = h("div", { className: "card" });
+    if (entries.length === 0) {
+        listCard.innerHTML = `<p>${t("audit_no_entries")}</p>`;
+    } else {
+        let html = `<table><thead><tr>
+            <th>${t("audit_time")}</th>
+            <th>${t("audit_user")}</th>
+            <th>${t("audit_ip")}</th>
+            <th>${t("audit_host")}</th>
+            <th>${t("audit_action")}</th>
+            <th>${t("audit_target")}</th>
+            <th>${t("audit_status")}</th>
+            <th>${t("audit_details")}</th>
+        </tr></thead><tbody>`;
+        for (const e of entries) {
+            const statusBadgeHtml = e.success
+                ? `<span class="badge badge-online">OK</span>`
+                : `<span class="badge badge-offline">FAIL</span>`;
+            const det = (e.details || "").length > 80
+                ? (e.details.substring(0, 80) + "…")
+                : (e.details || "");
+            html += `<tr>
+                <td>${_auditFmt(e.timestamp)}</td>
+                <td>${e.user || "—"}</td>
+                <td style="font-family:monospace;font-size:0.85em">${e.ip || "—"}</td>
+                <td style="font-family:monospace;font-size:0.85em">${e.host || "—"}</td>
+                <td><code style="font-size:0.85em">${e.action}</code></td>
+                <td style="font-family:monospace;font-size:0.85em">${(e.target || "").replace(/</g, "&lt;")}</td>
+                <td>${statusBadgeHtml}</td>
+                <td style="font-size:0.85em;color:#666" title="${(e.details || "").replace(/"/g, "&quot;")}">${det.replace(/</g, "&lt;")}</td>
+            </tr>`;
+        }
+        html += "</tbody></table>";
+        listCard.innerHTML = html;
+    }
+    container.appendChild(listCard);
+
+    setContent(container);
+
+    document.getElementById("a-apply").onclick = () => {
+        sessionStorage.setItem("audit_action", document.getElementById("a-action").value);
+        sessionStorage.setItem("audit_user", document.getElementById("a-user").value);
+        sessionStorage.setItem("audit_failures", document.getElementById("a-failures").checked ? "1" : "0");
+        const hf = document.getElementById("a-host-filter");
+        sessionStorage.setItem("audit_host_filter", (hf && hf.checked) ? "1" : "0");
+        viewAudit();
+    };
+    document.getElementById("a-reset").onclick = () => {
+        sessionStorage.removeItem("audit_action");
+        sessionStorage.removeItem("audit_user");
+        sessionStorage.removeItem("audit_failures");
+        sessionStorage.removeItem("audit_host_filter");
+        viewAudit();
+    };
+}
+
 
 // -- Notifications ---------------------------------------------------------
 async function viewNotifications() {

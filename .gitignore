@@ -13,3 +13,4 @@ venv/
 *.swo
 data/
 .claude/
+docs/
