@@ -2391,6 +2391,10 @@ async function viewAudit() {
         action: sessionStorage.getItem("audit_action") || "",
         user: sessionStorage.getItem("audit_user") || "",
         only_failures: sessionStorage.getItem("audit_failures") === "1",
+        // Host filter is opt-in (default OFF). Many entries (login, logout,
+        // host.add, config.*, cache.*) are logged with host="" and would
+        // otherwise be invisible when a host is selected.
+        host_filter: sessionStorage.getItem("audit_host_filter") === "1",
         limit: 200,
         offset: 0,
     };
@@ -2398,7 +2402,7 @@ async function viewAudit() {
     if (filter.action) params.set("action", filter.action);
     if (filter.user) params.set("user", filter.user);
     if (filter.only_failures) params.set("only_failures", "1");
-    if (currentHost) params.set("host", currentHost);
+    if (filter.host_filter && currentHost) params.set("host", currentHost);
     params.set("limit", String(filter.limit));
 
     const data = await API.get("/api/audit?" + params.toString());
@@ -2418,7 +2422,7 @@ async function viewAudit() {
             <label>${t("audit_user")}:</label>
             <input id="a-user" type="text" value="${filter.user.replace(/"/g, "&quot;")}" style="width:140px" placeholder="admin"/>
             <label><input id="a-failures" type="checkbox"${filter.only_failures ? " checked" : ""}/> ${t("audit_only_failures")}</label>
-            ${currentHost ? `<label><input id="a-host-filter" type="checkbox" checked disabled/> ${t("audit_current_host")}: ${currentHost}</label>` : ""}
+            ${currentHost ? `<label><input id="a-host-filter" type="checkbox"${filter.host_filter ? " checked" : ""}/> ${t("audit_current_host")}: ${currentHost}</label>` : ""}
             <button class="btn btn-sm" id="a-apply">${t("audit_apply")}</button>
             <button class="btn btn-sm" id="a-reset">${t("audit_reset")}</button>
             <span class="muted" style="margin-left:auto">${entries.length} / ${data.total} ${t("audit_entries")}</span>
@@ -2469,12 +2473,15 @@ async function viewAudit() {
         sessionStorage.setItem("audit_action", document.getElementById("a-action").value);
         sessionStorage.setItem("audit_user", document.getElementById("a-user").value);
         sessionStorage.setItem("audit_failures", document.getElementById("a-failures").checked ? "1" : "0");
+        const hf = document.getElementById("a-host-filter");
+        sessionStorage.setItem("audit_host_filter", (hf && hf.checked) ? "1" : "0");
         viewAudit();
     };
     document.getElementById("a-reset").onclick = () => {
         sessionStorage.removeItem("audit_action");
         sessionStorage.removeItem("audit_user");
         sessionStorage.removeItem("audit_failures");
+        sessionStorage.removeItem("audit_host_filter");
         viewAudit();
     };
 }
