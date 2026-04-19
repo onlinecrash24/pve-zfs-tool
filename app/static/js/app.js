@@ -267,6 +267,15 @@ async function viewHome() {
                 </ul>
             </div>
             <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_monitor_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_monitor_1"))}</li>
+                    <li>${escapeHtml(t("feat_monitor_2"))}</li>
+                    <li>${escapeHtml(t("feat_monitor_3"))}</li>
+                    <li>${escapeHtml(t("feat_monitor_4"))}</li>
+                </ul>
+            </div>
+            <div>
                 <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_auth_title"))}</h4>
                 <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
                     <li>${escapeHtml(t("feat_auth_1"))}</li>
