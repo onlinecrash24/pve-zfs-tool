@@ -117,17 +117,25 @@ def _sample_and_monitor(host):
     Always calls monitor.run_checks, even when SSH fails, so that the
     host_offline detector sees the transition.
     """
+    from app.ssh_manager import test_connection
     from app.zfs_commands import get_pools, get_pool_status
     from app.monitor import run_checks
 
+    # Explicit reachability probe — a host with zero pools is still "up"
     try:
-        pools = get_pools(host)
-    except Exception as e:
-        log.warning("metrics: get_pools failed for %s: %s",
-                    host.get("address"), e)
-        pools = []
+        reachable = test_connection(host)
+    except Exception:
+        reachable = False
 
-    reachable = bool(pools)
+    pools = []
+    if reachable:
+        try:
+            pools = get_pools(host)
+        except Exception as e:
+            log.warning("metrics: get_pools failed for %s: %s",
+                        host.get("address"), e)
+            pools = []
+
     n = 0
 
     # Insert metrics rows on success

@@ -258,29 +258,32 @@ def check_pool_errors(host, pools_status):
 def check_auto_snapshots(host):
     """Fire auto_snapshot when the newest snap per label is stale.
 
-    Uses ``get_auto_snapshot_status(host)`` (cached, ~5 min TTL) and the
-    retention-analysis structure it exposes. Throttled per
-    (host, pool, label) via STALE_ALERT_COOLDOWN.
+    Pipeline: get_snapshot_ages(host) + retention_policy (from cron)
+              → analyze_snapshots() → per_label[label].stale_datasets
+    Throttled per (host, label) via STALE_ALERT_COOLDOWN.
     """
     try:
-        from app.zfs_commands import get_auto_snapshot_status
+        from app.zfs_commands import get_snapshot_ages, get_auto_snapshot_status
+        from app.snapshot_analysis import analyze_snapshots
     except Exception:
         return
     try:
-        status = get_auto_snapshot_status(host)
+        snap_age_data = get_snapshot_ages(host)
+        if not isinstance(snap_age_data, dict) or not snap_age_data.get("datasets"):
+            return
+        retention_cfg = {}
+        try:
+            st = get_auto_snapshot_status(host)
+            if isinstance(st, dict):
+                retention_cfg = st.get("retention_policy") or {}
+        except Exception:
+            pass
+        analysis = analyze_snapshots(snap_age_data, retention_cfg)
     except Exception as e:
-        log.debug("auto-snap status failed for %s: %s", host.get("address"), e)
-        return
-    if not isinstance(status, dict):
+        log.debug("auto-snap analysis failed for %s: %s", host.get("address"), e)
         return
 
-    # The status dict's shape varies; we defensively walk both well-known
-    # variants: top-level "retention_analysis.per_label" and/or
-    # "stale_datasets" per label.
-    per_label = {}
-    ra = status.get("retention_analysis") or {}
-    if isinstance(ra, dict):
-        per_label = ra.get("per_label") or {}
+    per_label = (analysis or {}).get("per_label") or {}
     if not isinstance(per_label, dict):
         return
 
@@ -293,8 +296,8 @@ def check_auto_snapshots(host):
         stale = info.get("stale_datasets") or []
         if not stale:
             continue
-        # stale_datasets entries may be plain strings (dataset names) or
-        # dicts with dataset/newest_age. Normalise.
+        # stale_datasets entries are dicts {dataset, newest_age, ...}
+        # (analyze_snapshots in snapshot_analysis.py). Be defensive anyway.
         norm = []
         for e in stale:
             if isinstance(e, str):
