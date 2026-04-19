@@ -485,6 +485,28 @@ async function viewHosts() {
     setContent(container);
 
     document.getElementById("add-host-btn").addEventListener("click", addHost);
+
+    // Auto-probe each host in parallel so the "unknown" badge resolves
+    // without requiring a manual click. Uses the same /api/hosts/test
+    // endpoint as the Test button.
+    for (const host of hosts) {
+        _probeHostBadge(host.address);
+    }
+}
+
+async function _probeHostBadge(addr) {
+    const el = document.getElementById(`status-${addr}`);
+    if (!el) return;
+    el.textContent = t("testing");
+    el.className = "badge badge-stopped";
+    try {
+        const r = await API.post("/api/hosts/test", { address: addr });
+        el.textContent = r.success ? t("online") : t("offline");
+        el.className = r.success ? "badge badge-online" : "badge badge-offline";
+    } catch (e) {
+        el.textContent = t("offline");
+        el.className = "badge badge-offline";
+    }
 }
 
 async function addHost() {
