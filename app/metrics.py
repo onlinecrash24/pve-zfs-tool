@@ -5,6 +5,7 @@ exposes query helpers for the frontend trend charts.
 """
 
 import logging
+import re
 import threading
 import time
 
@@ -65,41 +66,37 @@ def _parse_dedup(s):
 # ---------------------------------------------------------------------------
 
 def sample_host(host):
-    """Take one sample of all pools on a host. Returns number of pools stored."""
-    # Import lazily to avoid circular deps at module load time
-    from app.zfs_commands import get_pools
+    """Take one sample of all pools on a host AND run monitor checks.
 
-    now = int(time.time())
-    pools = get_pools(host)
-    if not pools:
-        return 0
+    Returns the number of pools stored (0 if the host is unreachable).
+    """
+    return _sample_and_monitor(host)
 
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        for p in pools:
-            cur.execute(
-                """INSERT INTO pool_metrics
-                   (timestamp, host, pool, size_bytes, alloc_bytes, free_bytes,
-                    frag_pct, cap_pct, health, dedup_ratio)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    now,
-                    host["address"],
-                    p.get("name", ""),
-                    _parse_size(p.get("size")),
-                    _parse_size(p.get("alloc")),
-                    _parse_size(p.get("free")),
-                    _parse_pct(p.get("frag")),
-                    _parse_pct(p.get("cap")),
-                    p.get("health") or None,
-                    _parse_dedup(p.get("dedup")),
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-    return len(pools)
+
+# Match the pool summary line in `zpool status` — it repeats READ/WRITE/CKSUM
+# totals at the vdev level. Shape:
+#   <name>   <state>   <read>   <write>   <cksum>
+_POOL_LINE_RE = re.compile(
+    r"^\s*(\S+)\s+(ONLINE|DEGRADED|FAULTED|OFFLINE|UNAVAIL|REMOVED|SUSPENDED)"
+    r"\s+(\d+)\s+(\d+)\s+(\d+)"
+)
+
+
+def parse_pool_errors(status_stdout, pool_name):
+    """Return {'read','write','cksum'} totals parsed from `zpool status`.
+
+    Uses the pool's own summary line (not the sum of child vdevs, which
+    would double-count). Returns None if the pool line is missing.
+    """
+    if not status_stdout:
+        return None
+    for line in status_stdout.splitlines():
+        m = _POOL_LINE_RE.match(line)
+        if m and m.group(1) == pool_name:
+            return {"read": int(m.group(3)),
+                    "write": int(m.group(4)),
+                    "cksum": int(m.group(5))}
+    return None
 
 
 def _cleanup_old():
@@ -114,6 +111,76 @@ def _cleanup_old():
         log.warning("metrics cleanup failed: %s", e)
 
 
+def _sample_and_monitor(host):
+    """Sample one host and run all monitoring checks.
+
+    Always calls monitor.run_checks, even when SSH fails, so that the
+    host_offline detector sees the transition.
+    """
+    from app.zfs_commands import get_pools, get_pool_status
+    from app.monitor import run_checks
+
+    try:
+        pools = get_pools(host)
+    except Exception as e:
+        log.warning("metrics: get_pools failed for %s: %s",
+                    host.get("address"), e)
+        pools = []
+
+    reachable = bool(pools)
+    n = 0
+
+    # Insert metrics rows on success
+    if reachable:
+        now = int(time.time())
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            for p in pools:
+                cur.execute(
+                    """INSERT INTO pool_metrics
+                       (timestamp, host, pool, size_bytes, alloc_bytes, free_bytes,
+                        frag_pct, cap_pct, health, dedup_ratio)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        now,
+                        host["address"],
+                        p.get("name", ""),
+                        _parse_size(p.get("size")),
+                        _parse_size(p.get("alloc")),
+                        _parse_size(p.get("free")),
+                        _parse_pct(p.get("frag")),
+                        _parse_pct(p.get("cap")),
+                        p.get("health") or None,
+                        _parse_dedup(p.get("dedup")),
+                    ),
+                )
+            conn.commit()
+            n = len(pools)
+        finally:
+            conn.close()
+
+    # Collect error counters (cheap — uses cached status)
+    pools_status = {}
+    if reachable:
+        for p in pools:
+            pname = p.get("name") or ""
+            if not pname:
+                continue
+            try:
+                r = get_pool_status(host, pname)
+                if r.get("success"):
+                    totals = parse_pool_errors(r.get("stdout", ""), pname)
+                    if totals:
+                        pools_status[pname] = {"error_totals": totals}
+            except Exception:
+                pass
+
+    # Run the state-change detectors (never raises)
+    run_checks(host, pools, reachable, pools_status=pools_status)
+    return n
+
+
 def _loop():
     from app.ssh_manager import load_hosts
 
@@ -126,7 +193,7 @@ def _loop():
             hosts = load_hosts()
             for host in hosts:
                 try:
-                    n = sample_host(host)
+                    n = _sample_and_monitor(host)
                     log.debug("metrics: sampled %s pools from %s", n, host.get("address"))
                 except Exception as e:
                     log.warning("metrics: sample failed for %s: %s",

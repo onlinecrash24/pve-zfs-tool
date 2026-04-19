@@ -69,6 +69,19 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_al_ts ON audit_log(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_al_action ON audit_log(action);
                 CREATE INDEX IF NOT EXISTS idx_al_user ON audit_log(user);
+
+                -- Monitor state: tracks last-seen values per (scope, key) so
+                -- we can fire state-change notifications (pool health,
+                -- host reachability, capacity thresholds, stale auto-snaps)
+                -- without spamming on every sample.
+                CREATE TABLE IF NOT EXISTS monitor_state (
+                    scope TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT,
+                    last_alert_ts INTEGER,
+                    updated_ts INTEGER NOT NULL,
+                    PRIMARY KEY (scope, key)
+                );
                 """
             )
             conn.commit()

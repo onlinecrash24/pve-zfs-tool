@@ -88,6 +88,11 @@
 - **Matrix** -- Receive notifications via Matrix room (Client-Server API v3), PDF reports as `m.file` attachments
 - **Email (SMTP)** -- Send notifications and PDF reports to one or more recipients; STARTTLS, SSL/TLS or plaintext
 - **Scrub Monitor** -- Background thread detects scrub completion and sends notification automatically
+- **Proactive Monitoring** -- Every 15 min the sampler checks each host for state changes and fires notifications (no manual action required):
+  - `pool_error` -- pool health transitions ONLINE → DEGRADED/FAULTED/UNAVAIL and back
+  - `health_warning` -- capacity crosses 90 %, or read/write/checksum errors appear
+  - `host_offline` -- SSH probe fails where it previously succeeded (and recovery)
+  - `auto_snapshot` -- newest auto-snap per label (frequent/hourly/daily/weekly/monthly) older than expected (throttled to once per day per host/label)
 - **Test Notifications** -- Send test messages per channel to verify configuration
 - **Configurable Events** -- Enable/disable notifications per event type:
   - Scrub started/finished
