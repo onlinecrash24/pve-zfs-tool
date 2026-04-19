@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PVE ZFS Tool — Manage ZFS on Proxmox, visually</title>
-    <meta name="description" content="Open-source Docker-based web UI for managing ZFS pools, datasets, snapshots, and VM file restores across Proxmox VE hosts.">
+    <title>PVE ZFS Tool — ZFS auf Proxmox verwalten, visuell</title>
+    <meta name="description" content="Open-Source Docker-basierte Web-UI zur Verwaltung von ZFS Pools, Datasets, Snapshots und VM File Restores auf Proxmox VE Hosts.">
     <meta property="og:title" content="PVE ZFS Tool">
-    <meta property="og:description" content="Manage ZFS on Proxmox — visually. Open Source.">
+    <meta property="og:description" content="ZFS auf Proxmox verwalten — visuell. Open Source.">
     <meta property="og:image" content="https://pvezfs.de/logo.png">
     <meta property="og:url" content="https://pvezfs.de">
     <link rel="icon" href="logo.png" type="image/png">
@@ -40,6 +40,39 @@
             max-width: 1100px;
             margin: 0 auto;
             padding: 0 24px;
+        }
+
+        /* Language Switch */
+        .lang-switch {
+            position: fixed;
+            top: 16px;
+            right: 20px;
+            z-index: 100;
+            display: flex;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .lang-btn {
+            padding: 6px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .lang-btn.active {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .lang-btn:hover:not(.active) {
+            color: var(--text);
         }
 
         /* Hero */
@@ -202,32 +235,59 @@
             background: #0d1117;
             border: 1px solid var(--border);
             border-radius: 10px;
-            padding: 24px;
-            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-            font-size: 13px;
-            line-height: 1.8;
-            overflow-x: auto;
+            overflow: hidden;
             position: relative;
         }
 
-        .code-block .comment { color: #8b949e; }
-        .code-block .key { color: #7ee787; }
-        .code-block .val { color: #a5d6ff; }
-        .code-block .cmd { color: #d2a8ff; }
+        .code-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 16px;
+            background: #161b22;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .code-header span {
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+        }
 
         .copy-btn {
-            position: absolute;
-            top: 12px;
-            right: 12px;
             background: var(--border);
             color: var(--text-secondary);
             border: none;
             border-radius: 6px;
-            padding: 6px 12px;
+            padding: 4px 12px;
             font-size: 12px;
             cursor: pointer;
+            transition: all 0.2s;
         }
         .copy-btn:hover { background: var(--accent); color: #fff; }
+
+        .code-body {
+            padding: 20px;
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-size: 13px;
+            line-height: 1.7;
+            overflow-x: auto;
+            white-space: pre;
+            tab-size: 2;
+        }
+
+        .code-body .c { color: #8b949e; }        /* comment */
+        .code-body .k { color: #7ee787; }        /* key */
+        .code-body .v { color: #a5d6ff; }        /* value */
+        .code-body .p { color: #e6edf3; }        /* punctuation */
+        .code-body .ln {
+            color: #484f58;
+            user-select: none;
+            display: inline-block;
+            width: 24px;
+            text-align: right;
+            margin-right: 16px;
+        }
 
         .steps {
             display: grid;
@@ -289,6 +349,83 @@
             flex-wrap: wrap;
         }
 
+        /* Impressum Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+            padding: 24px;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 520px;
+            width: 100%;
+            position: relative;
+            max-height: 80vh;
+            overflow-y: auto;
+            animation: modalIn 0.25s ease;
+        }
+
+        @keyframes modalIn {
+            from { opacity: 0; transform: translateY(20px) scale(0.96); }
+            to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 14px;
+            right: 16px;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 22px;
+            cursor: pointer;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        .modal-box h2 {
+            text-align: left;
+            font-size: 1.4rem;
+            margin-bottom: 24px;
+        }
+
+        .modal-box p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            line-height: 1.8;
+            margin-bottom: 8px;
+        }
+
+        .modal-box .imp-label {
+            color: var(--text);
+            font-weight: 600;
+            margin-top: 16px;
+        }
+
         /* Footer */
         footer {
             border-top: 1px solid var(--border);
@@ -316,6 +453,7 @@
             .highlights-grid { grid-template-columns: repeat(2, 1fr); }
             .steps { grid-template-columns: 1fr; }
             .hero img { max-width: 240px; }
+            .code-body { font-size: 12px; }
         }
 
         /* SVG icons inline */
@@ -324,12 +462,18 @@
 </head>
 <body>
 
+<!-- Language Switch -->
+<div class="lang-switch">
+    <button class="lang-btn active" onclick="setLang('de')" id="btn-de">DE</button>
+    <button class="lang-btn" onclick="setLang('en')" id="btn-en">EN</button>
+</div>
+
 <!-- Hero -->
 <section class="hero">
     <div class="container">
         <img src="logo.png" alt="PVE ZFS Tool">
-        <h1>Manage ZFS on Proxmox — <span>visually</span></h1>
-        <p class="tagline">Open-source Docker-based web UI for ZFS pools, snapshots, VM file restores, AI-powered reports, and more.</p>
+        <h1 data-de="ZFS auf Proxmox — <span>visuell</span> verwalten" data-en="Manage ZFS on Proxmox — <span>visually</span>"></h1>
+        <p class="tagline" data-de="Open-Source Docker-basierte Web-UI f&uuml;r ZFS Pools, Snapshots, VM File Restores, KI-Reports und mehr." data-en="Open-source Docker-based web UI for ZFS pools, snapshots, VM file restores, AI-powered reports, and more."></p>
         <div class="hero-buttons">
             <a href="https://github.com/onlinecrash24/pve-zfs-tool" class="btn btn-primary" target="_blank">
                 <svg class="icon-gh" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -363,7 +507,7 @@
             </div>
             <div class="highlight-item">
                 <div class="number">EN/DE</div>
-                <div class="label">Bilingual UI</div>
+                <div class="label" data-de="Zweisprachige UI" data-en="Bilingual UI"></div>
             </div>
         </div>
     </div>
@@ -372,53 +516,53 @@
 <!-- Features -->
 <section id="features">
     <div class="container">
-        <h2>Features</h2>
-        <p class="section-sub">Everything you need to manage ZFS on Proxmox VE</p>
+        <h2 data-de="Funktionen" data-en="Features"></h2>
+        <p class="section-sub" data-de="Alles was du brauchst, um ZFS auf Proxmox VE zu verwalten" data-en="Everything you need to manage ZFS on Proxmox VE"></p>
         <div class="features-grid">
             <div class="feature-card">
                 <div class="feature-icon">&#x1F5C4;</div>
-                <h3>Pool & Dataset Management</h3>
-                <p>Pool overview with health, IO stats, scrub control, upgrade detection. Datasets separated by type — filesystems and VM volumes with type-specific actions.</p>
+                <h3 data-de="Pool- &amp; Dataset-Verwaltung" data-en="Pool &amp; Dataset Management"></h3>
+                <p data-de="Pool-&Uuml;bersicht mit Health, IO-Stats, Scrub-Steuerung, Upgrade-Erkennung. Datasets getrennt nach Typ — Filesystems und VM-Volumes mit typspezifischen Aktionen." data-en="Pool overview with health, IO stats, scrub control, upgrade detection. Datasets separated by type — filesystems and VM volumes with type-specific actions."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F4F8;</div>
-                <h3>Snapshot Management</h3>
-                <p>Interactive timeline and table views. Create, clone, diff, rollback with automatic VM/LXC stop &amp; restart. Cross-pool cloning via zfs send/recv.</p>
+                <h3 data-de="Snapshot-Verwaltung" data-en="Snapshot Management"></h3>
+                <p data-de="Interaktive Timeline- und Tabellen-Ansichten. Erstellen, Klonen, Diff, Rollback mit automatischem VM/LXC-Stop &amp; Restart. Cross-Pool-Klonen via zfs send/recv." data-en="Interactive timeline and table views. Create, clone, diff, rollback with automatic VM/LXC stop &amp; restart. Cross-pool cloning via zfs send/recv."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F504;</div>
-                <h3>File-Level Restore</h3>
-                <p>Browse and restore files from LXC snapshots directly. VM restore via kpartx — supports ext4, xfs, btrfs, NTFS. BitLocker detection included.</p>
+                <h3 data-de="File-Level Restore" data-en="File-Level Restore"></h3>
+                <p data-de="Dateien aus LXC-Snapshots direkt durchsuchen und wiederherstellen. VM-Restore via kpartx — unterst&uuml;tzt ext4, xfs, btrfs, NTFS. BitLocker-Erkennung inklusive." data-en="Browse and restore files from LXC snapshots directly. VM restore via kpartx — supports ext4, xfs, btrfs, NTFS. BitLocker detection included."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F50D;</div>
-                <h3>Snapshot Check</h3>
-                <p>Retention policy verification, gap detection, stale snapshot warnings, count mismatches (SOLL/IST), missing labels, and manual snapshot tracking.</p>
+                <h3 data-de="Snapshot-Pr&uuml;fung" data-en="Snapshot Check"></h3>
+                <p data-de="Aufbewahrungs-Policy-Pr&uuml;fung, L&uuml;cken-Erkennung, veraltete Snapshot-Warnungen, Anzahl-Abweichungen (SOLL/IST), fehlende Labels und manuelle Snapshot-Verfolgung." data-en="Retention policy verification, gap detection, stale snapshot warnings, count mismatches (SOLL/IST), missing labels, and manual snapshot tracking."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F916;</div>
-                <h3>AI Reports</h3>
-                <p>Automated analysis via OpenAI, Anthropic, Ollama, or any compatible API. Scheduled reports, interactive chat, PDF export, raw data export.</p>
+                <h3 data-de="KI-Reports" data-en="AI Reports"></h3>
+                <p data-de="Automatisierte Analyse via OpenAI, Anthropic, Ollama oder jede kompatible API. Geplante Reports, interaktiver Chat, PDF-Export, Rohdaten-Export." data-en="Automated analysis via OpenAI, Anthropic, Ollama, or any compatible API. Scheduled reports, interactive chat, PDF export, raw data export."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F6E1;</div>
-                <h3>Health & Monitoring</h3>
-                <p>ARC stats, SMART disk health, ZFS events, ZDB deep diagnostics for degraded pools. Restore session cleanup with one-click bulk operations.</p>
+                <h3 data-de="Health &amp; Monitoring" data-en="Health &amp; Monitoring"></h3>
+                <p data-de="ARC-Stats, SMART-Festplatten-Health, ZFS-Events, ZDB-Deep-Diagnostik f&uuml;r degradierte Pools. Restore-Session-Cleanup mit Ein-Klick-Massenoperationen." data-en="ARC stats, SMART disk health, ZFS events, ZDB deep diagnostics for degraded pools. Restore session cleanup with one-click bulk operations."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F514;</div>
-                <h3>Notifications</h3>
-                <p>Telegram, Gotify, and Matrix. Configurable per event — scrub, snapshot, rollback, pool errors, health warnings, host offline alerts.</p>
+                <h3 data-de="Benachrichtigungen" data-en="Notifications"></h3>
+                <p data-de="Telegram, Gotify und Matrix. Konfigurierbar pro Event — Scrub, Snapshot, Rollback, Pool-Fehler, Health-Warnungen, Host-Offline-Alerts." data-en="Telegram, Gotify, and Matrix. Configurable per event — scrub, snapshot, rollback, pool errors, health warnings, host offline alerts."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F512;</div>
-                <h3>Security</h3>
-                <p>CSRF protection, input validation, rate limiting, secure sessions, security headers, path traversal prevention, SSH TOFU, reverse proxy ready.</p>
+                <h3 data-de="Sicherheit" data-en="Security"></h3>
+                <p data-de="CSRF-Schutz, Input-Validierung, Rate Limiting, sichere Sessions, Security-Headers, Path-Traversal-Schutz, SSH TOFU, Reverse-Proxy-ready." data-en="CSRF protection, input validation, rate limiting, secure sessions, security headers, path traversal prevention, SSH TOFU, reverse proxy ready."></p>
             </div>
             <div class="feature-card">
                 <div class="feature-icon">&#x1F310;</div>
-                <h3>Multi-Host SSH</h3>
-                <p>Manage multiple Proxmox nodes via SSH. Auto-generated Ed25519 keys, connection testing, persistent known hosts with TOFU verification.</p>
+                <h3 data-de="Multi-Host SSH" data-en="Multi-Host SSH"></h3>
+                <p data-de="Mehrere Proxmox-Nodes via SSH verwalten. Automatisch generierte Ed25519-Keys, Verbindungstest, persistente Known Hosts mit TOFU-Verifizierung." data-en="Manage multiple Proxmox nodes via SSH. Auto-generated Ed25519 keys, connection testing, persistent known hosts with TOFU verification."></p>
             </div>
         </div>
     </div>
@@ -428,30 +572,32 @@
 <section class="quickstart" id="quickstart">
     <div class="container">
         <h2>Quick Start</h2>
-        <p class="section-sub">Up and running in under a minute</p>
+        <p class="section-sub" data-de="In unter einer Minute einsatzbereit" data-en="Up and running in under a minute"></p>
         <div class="quickstart-content">
             <div class="code-block">
-                <button class="copy-btn" onclick="copyCode()">Copy</button>
-<span class="comment"># docker-compose.yml</span>
-<span class="key">services</span>:
-  <span class="key">zfs-tool</span>:
-    <span class="key">image</span>: <span class="val">ghcr.io/onlinecrash24/pve-zfs-tool:latest</span>
-    <span class="key">container_name</span>: <span class="val">zfs-tool</span>
-    <span class="key">restart</span>: <span class="val">unless-stopped</span>
-    <span class="key">ports</span>:
-      - <span class="val">"5000:5000"</span>
-    <span class="key">volumes</span>:
-      - <span class="val">ssh-keys:/root/.ssh</span>
-      - <span class="val">zfs-data:/app/data</span>
-    <span class="key">environment</span>:
-      - <span class="val">SECRET_KEY=change-me</span>
-      - <span class="val">ADMIN_USER=admin</span>
-      - <span class="val">ADMIN_PASSWORD=change-me</span>
-      - <span class="val">TZ=Europe/Berlin</span>
-
-<span class="key">volumes</span>:
-  <span class="val">ssh-keys</span>:
-  <span class="val">zfs-data</span>:
+                <div class="code-header">
+                    <span>docker-compose.yml</span>
+                    <button class="copy-btn" onclick="copyCode()">Copy</button>
+                </div>
+                <div class="code-body"><span class="ln"> 1</span><span class="k">services</span><span class="p">:</span>
+<span class="ln"> 2</span>  <span class="k">zfs-tool</span><span class="p">:</span>
+<span class="ln"> 3</span>    <span class="k">image</span><span class="p">:</span> <span class="v">ghcr.io/onlinecrash24/pve-zfs-tool:latest</span>
+<span class="ln"> 4</span>    <span class="k">container_name</span><span class="p">:</span> <span class="v">zfs-tool</span>
+<span class="ln"> 5</span>    <span class="k">restart</span><span class="p">:</span> <span class="v">unless-stopped</span>
+<span class="ln"> 6</span>    <span class="k">ports</span><span class="p">:</span>
+<span class="ln"> 7</span>      - <span class="v">"5000:5000"</span>
+<span class="ln"> 8</span>    <span class="k">volumes</span><span class="p">:</span>
+<span class="ln"> 9</span>      - <span class="v">ssh-keys:/root/.ssh</span>
+<span class="ln">10</span>      - <span class="v">zfs-data:/app/data</span>
+<span class="ln">11</span>    <span class="k">environment</span><span class="p">:</span>
+<span class="ln">12</span>      - <span class="v">SECRET_KEY=change-me</span>
+<span class="ln">13</span>      - <span class="v">ADMIN_USER=admin</span>
+<span class="ln">14</span>      - <span class="v">ADMIN_PASSWORD=change-me</span>
+<span class="ln">15</span>      - <span class="v">TZ=Europe/Berlin</span>
+<span class="ln">16</span>
+<span class="ln">17</span><span class="k">volumes</span><span class="p">:</span>
+<span class="ln">18</span>  <span class="v">ssh-keys</span><span class="p">:</span>
+<span class="ln">19</span>  <span class="v">zfs-data</span><span class="p">:</span></div>
             </div>
 
             <div class="steps">
@@ -462,13 +608,13 @@
                 </div>
                 <div class="step">
                     <div class="step-num">2</div>
-                    <h4>Copy SSH Key</h4>
-                    <p>Shown on the home page — paste it on your Proxmox hosts</p>
+                    <h4 data-de="SSH Key kopieren" data-en="Copy SSH Key"></h4>
+                    <p data-de="Wird auf der Startseite angezeigt — auf deinen Proxmox-Hosts einf&uuml;gen" data-en="Shown on the home page — paste it on your Proxmox hosts"></p>
                 </div>
                 <div class="step">
                     <div class="step-num">3</div>
-                    <h4>Add Hosts</h4>
-                    <p>Add your Proxmox nodes and start managing ZFS</p>
+                    <h4 data-de="Hosts hinzuf&uuml;gen" data-en="Add Hosts"></h4>
+                    <p data-de="Proxmox-Nodes hinzuf&uuml;gen und ZFS verwalten" data-en="Add your Proxmox nodes and start managing ZFS"></p>
                 </div>
             </div>
         </div>
@@ -479,8 +625,8 @@
 <section class="support" id="support">
     <div class="container">
         <div class="support-box">
-            <h3>Open Source &amp; Free Forever</h3>
-            <p>PVE ZFS Tool is MIT-licensed and always will be. If it saves you time, consider supporting the project.</p>
+            <h3 data-de="Open Source &amp; f&uuml;r immer kostenlos" data-en="Open Source &amp; Free Forever"></h3>
+            <p data-de="PVE ZFS Tool ist MIT-lizenziert und wird es immer bleiben. Wenn es dir Zeit spart, unterst&uuml;tze gerne das Projekt." data-en="PVE ZFS Tool is MIT-licensed and always will be. If it saves you time, consider supporting the project."></p>
             <div class="support-buttons">
                 <a href="https://buymeacoffee.com/onlinecrash" class="btn btn-coffee" target="_blank">&#9749; Buy me a Coffee</a>
                 <a href="https://github.com/onlinecrash24/pve-zfs-tool" class="btn btn-outline" target="_blank">
@@ -492,6 +638,27 @@
     </div>
 </section>
 
+<!-- Impressum Modal -->
+<div class="modal-overlay" id="impressum-modal" onclick="if(event.target===this)closeImpressum()">
+    <div class="modal-box">
+        <button class="modal-close" onclick="closeImpressum()">&times;</button>
+        <h2>Impressum</h2>
+        <p class="imp-label" data-de="Angaben gem&auml;&szlig; &sect; 5 TMG" data-en="Information according to &sect; 5 TMG"></p>
+        <p>
+            Max Mustermann<br>
+            Musterstra&szlig;e 1<br>
+            12345 Musterstadt<br>
+            Deutschland
+        </p>
+        <p class="imp-label" data-de="Kontakt" data-en="Contact"></p>
+        <p>
+            E-Mail: <a href="mailto:info@pvezfs.de">info@pvezfs.de</a>
+        </p>
+        <p class="imp-label" data-de="Haftungsausschluss" data-en="Disclaimer"></p>
+        <p data-de="Die Inhalte dieser Website wurden mit gr&ouml;&szlig;ter Sorgfalt erstellt. F&uuml;r die Richtigkeit, Vollst&auml;ndigkeit und Aktualit&auml;t der Inhalte wird jedoch keine Gew&auml;hr &uuml;bernommen. Die Nutzung der Software erfolgt auf eigenes Risiko." data-en="The contents of this website have been created with the greatest care. However, no guarantee is given for the accuracy, completeness, or timeliness of the content. Use of the software is at your own risk."></p>
+    </div>
+</div>
+
 <!-- Footer -->
 <footer>
     <div class="container">
@@ -499,8 +666,9 @@
             <a href="https://github.com/onlinecrash24/pve-zfs-tool" target="_blank">GitHub</a>
             <a href="https://github.com/onlinecrash24/pve-zfs-tool/pkgs/container/pve-zfs-tool" target="_blank">Docker Registry</a>
             <a href="https://github.com/onlinecrash24/pve-zfs-tool/blob/main/LICENSE" target="_blank">MIT License</a>
+            <a href="#" onclick="openImpressum();return false">Impressum</a>
         </div>
-        <p>Made with care in Germany</p>
+        <p data-de="Mit Sorgfalt entwickelt in Deutschland" data-en="Made with care in Germany"></p>
     </div>
 </footer>
 
@@ -531,6 +699,50 @@ volumes:
         setTimeout(() => btn.textContent = 'Copy', 2000);
     });
 }
+
+/* i18n */
+let currentLang = localStorage.getItem('pvezfs-lang') || 'de';
+
+function setLang(lang) {
+    currentLang = lang;
+    localStorage.setItem('pvezfs-lang', lang);
+    document.documentElement.lang = lang;
+
+    document.getElementById('btn-de').classList.toggle('active', lang === 'de');
+    document.getElementById('btn-en').classList.toggle('active', lang === 'en');
+
+    document.querySelectorAll('[data-de]').forEach(el => {
+        const text = el.getAttribute('data-' + lang);
+        if (text) el.innerHTML = text;
+    });
+
+    /* Update meta */
+    if (lang === 'de') {
+        document.title = 'PVE ZFS Tool — ZFS auf Proxmox verwalten, visuell';
+        document.querySelector('meta[name="description"]').content = 'Open-Source Docker-basierte Web-UI zur Verwaltung von ZFS Pools, Datasets, Snapshots und VM File Restores auf Proxmox VE Hosts.';
+    } else {
+        document.title = 'PVE ZFS Tool — Manage ZFS on Proxmox, visually';
+        document.querySelector('meta[name="description"]').content = 'Open-source Docker-based web UI for managing ZFS pools, datasets, snapshots, and VM file restores across Proxmox VE hosts.';
+    }
+}
+
+/* Impressum Modal */
+function openImpressum() {
+    document.getElementById('impressum-modal').classList.add('active');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeImpressum() {
+    document.getElementById('impressum-modal').classList.remove('active');
+    document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeImpressum();
+});
+
+/* Init */
+setLang(currentLang);
 </script>
 
 </body>
