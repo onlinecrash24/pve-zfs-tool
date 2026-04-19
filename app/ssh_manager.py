@@ -122,17 +122,47 @@ def get_ssh_client(host):
     return client
 
 
-def run_command(host, command):
+def run_command(host, command, timeout=30, cache_ttl=0):
+    """Run a command on a remote host via SSH.
+
+    Parameters
+    ----------
+    host : dict
+        Host entry (from hosts.json).
+    command : str
+        Shell command to execute.
+    timeout : int
+        Command timeout in seconds (default 30).
+    cache_ttl : int
+        If > 0, cache successful results for this many seconds, keyed by
+        (host address, command). Reads hit the cache before SSH-ing.
+        Writes should not pass a TTL and should invalidate the host cache
+        via ``app.cache.invalidate_host`` after a successful write.
+    """
+    # Cache lookup (read-only fast path)
+    if cache_ttl > 0:
+        from app.cache import get as _cache_get
+        cached = _cache_get(host["address"], command)
+        if cached is not None:
+            return cached
+
     try:
         client = get_ssh_client(host)
-        stdin, stdout, stderr = client.exec_command(command, timeout=30)
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
         out = stdout.read().decode("utf-8", errors="replace")
         err = stderr.read().decode("utf-8", errors="replace")
         exit_code = stdout.channel.recv_exit_status()
         client.close()
-        return {"success": exit_code == 0, "stdout": out, "stderr": err}
+        result = {"success": exit_code == 0, "stdout": out, "stderr": err}
     except Exception as e:
-        return {"success": False, "stdout": "", "stderr": str(e)}
+        result = {"success": False, "stdout": "", "stderr": str(e)}
+
+    # Only cache successful results — don't poison the cache with errors
+    if cache_ttl > 0 and result.get("success"):
+        from app.cache import set as _cache_set
+        _cache_set(host["address"], command, result, cache_ttl)
+
+    return result
 
 
 def test_connection(host):

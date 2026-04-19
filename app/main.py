@@ -45,6 +45,17 @@ from app.ai_reports import (
     list_ollama_models,
     get_active_schedules,
 )
+from app.database import init_db
+from app.metrics import (
+    start_sampler as start_metrics_sampler,
+    query_pool_series, list_pools as list_metric_pools,
+    summary as metrics_summary, sample_host as metrics_sample_host,
+)
+from app.audit import log_action as audit_log, query as audit_query, count as audit_count, distinct_actions as audit_actions
+from app import cache as ssh_cache
+
+# Initialise shared SQLite DB (metrics + audit) once at import time
+init_db()
 
 log = logging.getLogger(__name__)
 
@@ -158,14 +169,20 @@ def api_login():
         # Rotate session ID to prevent session fixation attacks
         session.clear()
         session["authenticated"] = True
+        session["username"] = username
         session["csrf_token"] = secrets.token_hex(32)
         session.permanent = True
+        audit_log("login.success", target=username, success=True,
+                  user=username, ip=client_ip)
         return jsonify({"success": True, "csrf_token": session["csrf_token"]})
 
     # Track failed attempt
     info["count"] += 1
     info["last"] = now
     _login_attempts[client_ip] = info
+    audit_log("login.failure", target=username or "?", success=False,
+              user="?", ip=client_ip,
+              details={"attempts": info["count"]})
     return jsonify({"success": False, "error": "Invalid credentials"}), 401
 
 
@@ -179,7 +196,9 @@ def api_csrf_token():
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
+    user = session.get("username", "")
     session.clear()
+    audit_log("logout", target=user, user=user or "anonymous")
     return jsonify({"success": True})
 
 
@@ -242,13 +261,19 @@ def api_add_host():
         data.get("port", 22),
         data.get("user", "root"),
     )
+    audit_log("host.add", target=data.get("address", ""), success=ok,
+              host=data.get("address", ""),
+              details={"name": data.get("name", ""), "user": data.get("user", "root")})
     return jsonify({"success": ok, "message": msg})
 
 
 @app.route("/api/hosts", methods=["DELETE"])
 def api_remove_host():
     data = request.json
-    ok, msg = remove_host(data.get("address", ""))
+    addr = data.get("address", "")
+    ok, msg = remove_host(addr)
+    audit_log("host.remove", target=addr, host=addr, success=ok)
+    ssh_cache.invalidate_host(addr)
     return jsonify({"success": ok, "message": msg})
 
 
@@ -300,6 +325,8 @@ def api_pool_scrub():
         return jsonify({"error": "Host not found"}), 404
     pool_name = data.get("pool", "")
     result = scrub_pool(host, pool_name)
+    audit_log("pool.scrub", target=pool_name, host=host["address"],
+              success=result.get("success", False))
     if result.get("success"):
         send_notification("scrub_started", "Scrub Started",
                           f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})")
@@ -332,10 +359,13 @@ def api_pool_upgrade():
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    result = upgrade_pool(host, data.get("pool", ""))
+    pool = data.get("pool", "")
+    result = upgrade_pool(host, pool)
+    audit_log("pool.upgrade", target=pool, host=host["address"],
+              success=result.get("success", False))
     if result.get("success"):
         send_notification("pool_error", "Pool Upgraded",
-                          f"Pool: {data.get('pool')}\nHost: {host['name']} ({host['address']})")
+                          f"Pool: {pool}\nHost: {host['name']} ({host['address']})")
     return jsonify(result)
 
 
@@ -367,7 +397,11 @@ def api_set_dataset_prop():
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    return jsonify(set_dataset_property(host, data["dataset"], data["property"], data["value"]))
+    result = set_dataset_property(host, data["dataset"], data["property"], data["value"])
+    audit_log("dataset.set_property", target=data["dataset"], host=host["address"],
+              success=result.get("success", False),
+              details={"property": data["property"], "value": data["value"]})
+    return jsonify(result)
 
 
 @app.route("/api/datasets/create", methods=["POST"])
@@ -377,7 +411,10 @@ def api_create_dataset():
     if not host:
         return jsonify({"error": "Host not found"}), 404
     opts = data.get("options")
-    return jsonify(create_dataset(host, data["name"], opts))
+    result = create_dataset(host, data["name"], opts)
+    audit_log("dataset.create", target=data["name"], host=host["address"],
+              success=result.get("success", False), details={"options": opts} if opts else None)
+    return jsonify(result)
 
 
 @app.route("/api/datasets/destroy", methods=["POST"])
@@ -386,7 +423,12 @@ def api_destroy_dataset():
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    return jsonify(destroy_dataset(host, data["name"], data.get("recursive", False)))
+    recursive = data.get("recursive", False)
+    result = destroy_dataset(host, data["name"], recursive)
+    audit_log("dataset.destroy", target=data["name"], host=host["address"],
+              success=result.get("success", False),
+              details={"recursive": recursive})
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +451,11 @@ def api_create_snapshot():
     if not host:
         return jsonify({"error": "Host not found"}), 404
     snap_name = data.get("name", f"manual-{int(time.time())}")
-    result = create_snapshot(host, data["dataset"], snap_name, data.get("recursive", False))
+    recursive = data.get("recursive", False)
+    result = create_snapshot(host, data["dataset"], snap_name, recursive)
+    audit_log("snapshot.create", target=f"{data['dataset']}@{snap_name}",
+              host=host["address"], success=result.get("success", False),
+              details={"recursive": recursive})
     if result.get("success"):
         send_notification("snapshot_created", "Snapshot Created",
                           f"Dataset: {data['dataset']}@{snap_name}\nHost: {host['name']} ({host['address']})")
@@ -422,7 +468,11 @@ def api_destroy_snapshot():
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    result = destroy_snapshot(host, data["snapshot"], data.get("recursive", False))
+    recursive = data.get("recursive", False)
+    result = destroy_snapshot(host, data["snapshot"], recursive)
+    audit_log("snapshot.destroy", target=data["snapshot"], host=host["address"],
+              success=result.get("success", False),
+              details={"recursive": recursive})
     if result.get("success"):
         send_notification("snapshot_deleted", "Snapshot Deleted",
                           f"Snapshot: {data['snapshot']}\nHost: {host['name']} ({host['address']})")
@@ -443,6 +493,11 @@ def api_rollback_snapshot():
         vmid=data.get("vmid"),
         vm_type=data.get("vm_type"),
     )
+    audit_log("snapshot.rollback", target=data["snapshot"], host=host["address"],
+              success=result.get("success", False),
+              details={k: data.get(k) for k in
+                       ("force", "destroy_recent", "stop_guest", "vmid", "vm_type")
+                       if data.get(k) is not None})
     if result.get("success"):
         send_notification("rollback", "Rollback Performed",
                           f"Snapshot: {data['snapshot']}\nHost: {host['name']} ({host['address']})",
@@ -456,7 +511,11 @@ def api_clone_snapshot():
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    return jsonify(clone_snapshot(host, data["snapshot"], data["clone_name"]))
+    result = clone_snapshot(host, data["snapshot"], data["clone_name"])
+    audit_log("snapshot.clone", target=data["snapshot"], host=host["address"],
+              success=result.get("success", False),
+              details={"clone_name": data["clone_name"]})
+    return jsonify(result)
 
 
 @app.route("/api/snapshots/clone-targets")
@@ -515,11 +574,13 @@ def api_set_auto_snap():
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    return jsonify(set_auto_snapshot(
-        host, data["dataset"],
-        enabled=data.get("enabled", True),
-        label=data.get("label"),
-    ))
+    enabled = data.get("enabled", True)
+    label = data.get("label")
+    result = set_auto_snapshot(host, data["dataset"], enabled=enabled, label=label)
+    audit_log("auto_snapshot.set", target=data["dataset"], host=host["address"],
+              success=result.get("success", False),
+              details={"enabled": enabled, "label": label})
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +682,9 @@ def api_restore_file():
         data.get("file_path", ""),
         data.get("dest_path", ""),
     )
+    audit_log("restore.file", target=data.get("file_path", ""), host=host["address"],
+              success=result.get("success", False),
+              details={"dest": data.get("dest_path", "")})
     if result.get("success"):
         send_notification("rollback", "File Restored",
                           f"File: {data.get('file_path')}\nTo: {data.get('dest_path')}\nHost: {host['name']}",
@@ -640,6 +704,9 @@ def api_restore_dir():
         data.get("dir_path", ""),
         data.get("dest_path", ""),
     )
+    audit_log("restore.dir", target=data.get("dir_path", ""), host=host["address"],
+              success=result.get("success", False),
+              details={"dest": data.get("dest_path", "")})
     if result.get("success"):
         send_notification("rollback", "Directory Restored",
                           f"Dir: {data.get('dir_path')}\nTo: {data.get('dest_path')}\nHost: {host['name']}",
@@ -659,6 +726,8 @@ def api_zvol_mount():
     if not host:
         return jsonify({"error": "Host not found"}), 404
     result = zvol_snapshot_mount(host, data.get("snapshot", ""))
+    audit_log("zvol.mount", target=data.get("snapshot", ""), host=host["address"],
+              success=result.get("success", False))
     return jsonify(result)
 
 
@@ -681,6 +750,8 @@ def api_zvol_unmount():
     if not host:
         return jsonify({"error": "Host not found"}), 404
     result = zvol_unmount(host, data.get("mount_path", ""), data.get("zvol_dev", ""))
+    audit_log("zvol.unmount", target=data.get("mount_path", ""), host=host["address"],
+              success=result.get("success", False))
     return jsonify(result)
 
 
@@ -700,6 +771,9 @@ def api_zvol_cleanup():
     if err:
         return err, code
     result = zvol_cleanup_all(host)
+    audit_log("zvol.cleanup_all", target=host["address"], host=host["address"],
+              success=result.get("success", False),
+              details={"total_cleaned": result.get("total_cleaned", 0)})
     return jsonify(result)
 
 
@@ -787,6 +861,9 @@ def api_save_notify_config():
         if new_val and "..." in new_val and len(new_val) < 32:
             data.setdefault(section, {})[field] = existing.get(section, {}).get(field, "")
     save_notify_config(data)
+    audit_log("config.notifications.save", target="notifications", success=True,
+              details={"channels": [k for k in ("email", "telegram", "gotify", "matrix")
+                                    if (data.get(k) or {}).get("enabled")]})
     return jsonify({"success": True, "message": "Configuration saved"})
 
 
@@ -855,6 +932,9 @@ def api_ai_config():
 def api_save_ai_config_route():
     data = request.json
     save_ai_config(data)
+    audit_log("config.ai.save", target="ai_reports", success=True,
+              details={"provider": (data or {}).get("provider"),
+                       "model": (data or {}).get("model")})
     start_ai_scheduler()
     return jsonify({"success": True, "message": "Configuration saved"})
 
@@ -955,10 +1035,126 @@ def api_ai_chat():
 
 
 # ---------------------------------------------------------------------------
+# API: Historical Metrics
+# ---------------------------------------------------------------------------
 
-# Start AI report scheduler if configured
+@app.route("/api/metrics/pools")
+@login_required
+def api_metrics_pools():
+    """List pools that have historical samples for a host."""
+    host_addr = request.args.get("host", "")
+    if not host_addr:
+        return jsonify({"pools": []})
+    return jsonify({"pools": list_metric_pools(host_addr)})
+
+
+@app.route("/api/metrics/series")
+@login_required
+def api_metrics_series():
+    """Return pool metric time-series. Query params: host, pool (optional), hours."""
+    host_addr = request.args.get("host", "")
+    pool = request.args.get("pool") or None
+    try:
+        hours = int(request.args.get("hours", "24"))
+    except ValueError:
+        hours = 24
+    hours = max(1, min(hours, 24 * 365))  # clamp to 1h..1y
+    if not host_addr:
+        return jsonify({"error": "host required"}), 400
+    rows = query_pool_series(host_addr, pool=pool, hours=hours)
+    return jsonify({"host": host_addr, "pool": pool, "hours": hours, "data": rows})
+
+
+@app.route("/api/metrics/summary")
+@login_required
+def api_metrics_summary():
+    host_addr = request.args.get("host") or None
+    return jsonify(metrics_summary(host_addr))
+
+
+@app.route("/api/metrics/sample-now", methods=["POST"])
+@login_required
+def api_metrics_sample_now():
+    """Trigger an immediate sample for a host (useful after adding a new host)."""
+    data = request.json or {}
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    try:
+        n = metrics_sample_host(host)
+        return jsonify({"success": True, "pools_sampled": n})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# API: Audit Log
+# ---------------------------------------------------------------------------
+
+@app.route("/api/audit")
+@login_required
+def api_audit():
+    """Query the audit log. Filters: action, host, user, since, until, only_failures, limit, offset."""
+    def _int(name, default):
+        try:
+            v = request.args.get(name)
+            return int(v) if v not in (None, "") else default
+        except ValueError:
+            return default
+    entries = audit_query(
+        limit=_int("limit", 200),
+        offset=_int("offset", 0),
+        action=request.args.get("action") or None,
+        host=request.args.get("host") or None,
+        user=request.args.get("user") or None,
+        since=_int("since", None),
+        until=_int("until", None),
+        only_failures=request.args.get("only_failures") in ("1", "true", "yes"),
+    )
+    total = audit_count(
+        action=request.args.get("action") or None,
+        host=request.args.get("host") or None,
+        user=request.args.get("user") or None,
+        since=_int("since", None),
+        only_failures=request.args.get("only_failures") in ("1", "true", "yes"),
+    )
+    return jsonify({"entries": entries, "total": total,
+                    "actions": audit_actions()})
+
+
+# ---------------------------------------------------------------------------
+# API: Cache (admin/ops visibility)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/cache/stats")
+@login_required
+def api_cache_stats():
+    return jsonify(ssh_cache.stats())
+
+
+@app.route("/api/cache/invalidate", methods=["POST"])
+@login_required
+def api_cache_invalidate():
+    data = request.json or {}
+    host = data.get("host")
+    if host:
+        ssh_cache.invalidate_host(host)
+        audit_log("cache.invalidate", target=host, host=host)
+    else:
+        ssh_cache.invalidate_all()
+        audit_log("cache.invalidate_all", target="*")
+    return jsonify({"success": True})
+
+
+# ---------------------------------------------------------------------------
+
+# Start background services
 try:
     start_ai_scheduler()
+except Exception:
+    pass
+try:
+    start_metrics_sampler()
 except Exception:
     pass
 

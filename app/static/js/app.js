@@ -145,6 +145,8 @@ async function renderView() {
         "snapshot-check": viewSnapshotCheck,
         guests: viewGuests,
         health: viewHealth,
+        metrics: viewMetrics,
+        audit: viewAudit,
         notifications: viewNotifications,
         ai: viewAI,
     };
@@ -2134,6 +2136,269 @@ function formatBytes(bytes) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
+
+// -- Metrics (historical pool trends) --------------------------------------
+function _svgLineChart(points, opts = {}) {
+    // points: [{x: number, y: number}, ...]  — x is epoch, y is value
+    const w = opts.width || 760;
+    const hgt = opts.height || 180;
+    const pad = { l: 40, r: 12, t: 12, b: 26 };
+    if (!points || points.length === 0) {
+        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
+    }
+    const xs = points.map(p => p.x);
+    const ys = points.map(p => p.y).filter(v => v != null && !isNaN(v));
+    if (ys.length === 0) {
+        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
+    }
+    const xmin = Math.min(...xs), xmax = Math.max(...xs);
+    let ymin = Math.min(...ys), ymax = Math.max(...ys);
+    if (ymin === ymax) { ymin -= 1; ymax += 1; }
+    if (opts.yZero) ymin = 0;
+    if (opts.yMax != null) ymax = Math.max(ymax, opts.yMax);
+    const xRange = xmax - xmin || 1;
+    const yRange = ymax - ymin || 1;
+    const plotW = w - pad.l - pad.r;
+    const plotH = hgt - pad.t - pad.b;
+    const px = x => pad.l + ((x - xmin) / xRange) * plotW;
+    const py = y => pad.t + plotH - ((y - ymin) / yRange) * plotH;
+    const path = points
+        .filter(p => p.y != null && !isNaN(p.y))
+        .map((p, i) => (i === 0 ? "M" : "L") + px(p.x).toFixed(1) + "," + py(p.y).toFixed(1))
+        .join(" ");
+    // Y axis ticks (5 steps)
+    let yTicks = "";
+    for (let i = 0; i <= 4; i++) {
+        const v = ymin + (yRange * i / 4);
+        const yp = py(v);
+        const label = opts.yFmt ? opts.yFmt(v) : v.toFixed(1);
+        yTicks += `<line x1="${pad.l}" y1="${yp}" x2="${w - pad.r}" y2="${yp}" stroke="#eee" stroke-width="1"/>`;
+        yTicks += `<text x="${pad.l - 6}" y="${yp + 3}" text-anchor="end" font-size="10" fill="#888">${label}</text>`;
+    }
+    // X axis ticks (start/end timestamps)
+    const fmtTs = ts => {
+        const d = new Date(ts * 1000);
+        return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    };
+    const xTicks =
+        `<text x="${pad.l}" y="${hgt - 8}" font-size="10" fill="#888">${fmtTs(xmin)}</text>` +
+        `<text x="${w - pad.r}" y="${hgt - 8}" font-size="10" fill="#888" text-anchor="end">${fmtTs(xmax)}</text>`;
+    const color = opts.color || "#4a90e2";
+    return `<svg viewBox="0 0 ${w} ${hgt}" style="width:100%;height:${hgt}px;background:#fafbfc;border-radius:4px">
+        ${yTicks}
+        <path d="${path}" fill="none" stroke="${color}" stroke-width="2"/>
+        ${xTicks}
+    </svg>`;
+}
+
+async function viewMetrics() {
+    if (!requireHost()) { setContent(`<div class="card"><h2>${t("nav_metrics")}</h2><p>${t("select_host_first")}</p></div>`); return; }
+    setContent(loading());
+    const hours = parseInt(sessionStorage.getItem("metrics_hours") || "24", 10);
+    const [summary, poolsInfo] = await Promise.all([
+        API.get(`/api/metrics/summary?host=${encodeURIComponent(currentHost)}`),
+        API.get(`/api/metrics/pools?host=${encodeURIComponent(currentHost)}`),
+    ]);
+    const pools = poolsInfo.pools || [];
+
+    const container = document.createElement("div");
+    container.appendChild(h("h2", {}, t("nav_metrics")));
+
+    // Summary + controls
+    const top = h("div", { className: "card" });
+    const lastTs = summary.newest ? new Date(summary.newest * 1000).toLocaleString() : "—";
+    const oldTs = summary.oldest ? new Date(summary.oldest * 1000).toLocaleString() : "—";
+    top.innerHTML = `
+        <div class="row" style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
+            <div><b>${t("metrics_samples")}:</b> ${summary.samples || 0}</div>
+            <div><b>${t("metrics_pools")}:</b> ${summary.pools || 0}</div>
+            <div><b>${t("metrics_oldest")}:</b> ${oldTs}</div>
+            <div><b>${t("metrics_newest")}:</b> ${lastTs}</div>
+            <div><b>${t("metrics_interval")}:</b> ${Math.round((summary.interval_seconds || 900) / 60)} min</div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <label>${t("metrics_range")}:</label>
+            <select id="m-range">
+                <option value="6">6 h</option>
+                <option value="24" selected>24 h</option>
+                <option value="168">7 d</option>
+                <option value="720">30 d</option>
+                <option value="2160">90 d</option>
+            </select>
+            <button class="btn btn-sm" id="m-refresh">${t("refresh")}</button>
+            <button class="btn btn-sm" id="m-sample-now">${t("metrics_sample_now")}</button>
+        </div>
+    `;
+    container.appendChild(top);
+
+    if (pools.length === 0) {
+        container.appendChild(h("div", { className: "card" }, [
+            h("p", {}, t("metrics_no_samples_yet")),
+        ]));
+        setContent(container);
+        document.getElementById("m-sample-now").onclick = async () => {
+            try {
+                const r = await API.post("/api/metrics/sample-now", { host: currentHost });
+                if (r.success) { toast(`${r.pools_sampled} pools sampled`, "success"); viewMetrics(); }
+                else { toast(r.error || "Error", "error"); }
+            } catch (e) { toast(e.message, "error"); }
+        };
+        document.getElementById("m-refresh").onclick = () => viewMetrics();
+        return;
+    }
+
+    // Fetch all pool series for this range
+    for (const pool of pools) {
+        const series = await API.get(`/api/metrics/series?host=${encodeURIComponent(currentHost)}&pool=${encodeURIComponent(pool)}&hours=${hours}`);
+        const data = (series.data || []);
+        const card = h("div", { className: "card" });
+        card.innerHTML = `<h3 style="margin-top:0">${pool} <span class="muted" style="font-weight:normal;font-size:0.85em">(${data.length} ${t("metrics_samples")})</span></h3>`;
+
+        // Three charts: capacity%, fragmentation%, alloc GB
+        const capPts = data.map(d => ({ x: d.timestamp, y: d.cap_pct }));
+        const fragPts = data.map(d => ({ x: d.timestamp, y: d.frag_pct }));
+        const allocPts = data.map(d => ({ x: d.timestamp, y: d.alloc_bytes != null ? d.alloc_bytes / (1024 ** 3) : null }));
+
+        const grid = h("div", { className: "metric-grid", style: "display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px" });
+        const chartBox = (label, svgHtml, sub) => {
+            const box = document.createElement("div");
+            box.innerHTML = `<div style="font-weight:600;font-size:0.9em;margin-bottom:4px">${label}</div>
+                ${svgHtml}
+                <div class="muted" style="font-size:0.8em;margin-top:4px">${sub || ""}</div>`;
+            return box;
+        };
+        const latest = data[data.length - 1] || {};
+        grid.appendChild(chartBox(
+            t("metrics_capacity") + " (%)",
+            _svgLineChart(capPts, { yZero: true, yMax: 100, color: "#4a90e2", yFmt: v => v.toFixed(0) + "%" }),
+            `${t("metrics_current")}: ${latest.cap_pct != null ? latest.cap_pct.toFixed(1) + "%" : "—"}`,
+        ));
+        grid.appendChild(chartBox(
+            t("metrics_frag") + " (%)",
+            _svgLineChart(fragPts, { yZero: true, color: "#e67e22", yFmt: v => v.toFixed(0) + "%" }),
+            `${t("metrics_current")}: ${latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—"}`,
+        ));
+        grid.appendChild(chartBox(
+            t("metrics_alloc") + " (GB)",
+            _svgLineChart(allocPts, { yZero: true, color: "#27ae60", yFmt: v => v.toFixed(1) }),
+            `${t("metrics_current")}: ${latest.alloc_bytes != null ? formatBytes(latest.alloc_bytes) : "—"}`,
+        ));
+        card.appendChild(grid);
+        container.appendChild(card);
+    }
+
+    setContent(container);
+    const rangeSel = document.getElementById("m-range");
+    rangeSel.value = String(hours);
+    rangeSel.onchange = () => { sessionStorage.setItem("metrics_hours", rangeSel.value); viewMetrics(); };
+    document.getElementById("m-refresh").onclick = () => viewMetrics();
+    document.getElementById("m-sample-now").onclick = async () => {
+        try {
+            const r = await API.post("/api/metrics/sample-now", { host: currentHost });
+            if (r.success) { toast(`${r.pools_sampled} pools sampled`, "success"); viewMetrics(); }
+            else { toast(r.error || "Error", "error"); }
+        } catch (e) { toast(e.message, "error"); }
+    };
+}
+
+
+// -- Audit Log -------------------------------------------------------------
+function _auditFmt(ts) { return new Date(ts * 1000).toLocaleString(); }
+
+async function viewAudit() {
+    setContent(loading());
+    const filter = {
+        action: sessionStorage.getItem("audit_action") || "",
+        user: sessionStorage.getItem("audit_user") || "",
+        only_failures: sessionStorage.getItem("audit_failures") === "1",
+        limit: 200,
+        offset: 0,
+    };
+    const params = new URLSearchParams();
+    if (filter.action) params.set("action", filter.action);
+    if (filter.user) params.set("user", filter.user);
+    if (filter.only_failures) params.set("only_failures", "1");
+    if (currentHost) params.set("host", currentHost);
+    params.set("limit", String(filter.limit));
+
+    const data = await API.get("/api/audit?" + params.toString());
+    const entries = data.entries || [];
+
+    const container = document.createElement("div");
+    container.appendChild(h("h2", {}, t("nav_audit")));
+
+    const filterCard = h("div", { className: "card" });
+    const actionOpts = ['<option value="">' + t("audit_all_actions") + '</option>']
+        .concat((data.actions || []).map(a => `<option value="${a}"${a === filter.action ? " selected" : ""}>${a}</option>`))
+        .join("");
+    filterCard.innerHTML = `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <label>${t("audit_action")}:</label>
+            <select id="a-action">${actionOpts}</select>
+            <label>${t("audit_user")}:</label>
+            <input id="a-user" type="text" value="${filter.user.replace(/"/g, "&quot;")}" style="width:140px" placeholder="admin"/>
+            <label><input id="a-failures" type="checkbox"${filter.only_failures ? " checked" : ""}/> ${t("audit_only_failures")}</label>
+            ${currentHost ? `<label><input id="a-host-filter" type="checkbox" checked disabled/> ${t("audit_current_host")}: ${currentHost}</label>` : ""}
+            <button class="btn btn-sm" id="a-apply">${t("audit_apply")}</button>
+            <button class="btn btn-sm" id="a-reset">${t("audit_reset")}</button>
+            <span class="muted" style="margin-left:auto">${entries.length} / ${data.total} ${t("audit_entries")}</span>
+        </div>
+    `;
+    container.appendChild(filterCard);
+
+    const listCard = h("div", { className: "card" });
+    if (entries.length === 0) {
+        listCard.innerHTML = `<p>${t("audit_no_entries")}</p>`;
+    } else {
+        let html = `<table><thead><tr>
+            <th>${t("audit_time")}</th>
+            <th>${t("audit_user")}</th>
+            <th>${t("audit_ip")}</th>
+            <th>${t("audit_host")}</th>
+            <th>${t("audit_action")}</th>
+            <th>${t("audit_target")}</th>
+            <th>${t("audit_status")}</th>
+            <th>${t("audit_details")}</th>
+        </tr></thead><tbody>`;
+        for (const e of entries) {
+            const statusBadgeHtml = e.success
+                ? `<span class="badge badge-online">OK</span>`
+                : `<span class="badge badge-offline">FAIL</span>`;
+            const det = (e.details || "").length > 80
+                ? (e.details.substring(0, 80) + "…")
+                : (e.details || "");
+            html += `<tr>
+                <td>${_auditFmt(e.timestamp)}</td>
+                <td>${e.user || "—"}</td>
+                <td style="font-family:monospace;font-size:0.85em">${e.ip || "—"}</td>
+                <td style="font-family:monospace;font-size:0.85em">${e.host || "—"}</td>
+                <td><code style="font-size:0.85em">${e.action}</code></td>
+                <td style="font-family:monospace;font-size:0.85em">${(e.target || "").replace(/</g, "&lt;")}</td>
+                <td>${statusBadgeHtml}</td>
+                <td style="font-size:0.85em;color:#666" title="${(e.details || "").replace(/"/g, "&quot;")}">${det.replace(/</g, "&lt;")}</td>
+            </tr>`;
+        }
+        html += "</tbody></table>";
+        listCard.innerHTML = html;
+    }
+    container.appendChild(listCard);
+
+    setContent(container);
+
+    document.getElementById("a-apply").onclick = () => {
+        sessionStorage.setItem("audit_action", document.getElementById("a-action").value);
+        sessionStorage.setItem("audit_user", document.getElementById("a-user").value);
+        sessionStorage.setItem("audit_failures", document.getElementById("a-failures").checked ? "1" : "0");
+        viewAudit();
+    };
+    document.getElementById("a-reset").onclick = () => {
+        sessionStorage.removeItem("audit_action");
+        sessionStorage.removeItem("audit_user");
+        sessionStorage.removeItem("audit_failures");
+        viewAudit();
+    };
+}
+
 
 // -- Notifications ---------------------------------------------------------
 async function viewNotifications() {

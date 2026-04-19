@@ -65,6 +65,23 @@
 - **Scheduled Tasks Overview** -- Shows active AI report schedules (per-host and combined) with next-run and last-run times
 - **ZDB Deep Diagnostics** -- Automatic `zdb` analysis for DEGRADED/FAULTED pools (block stats, disk labels)
 
+### Historical Metrics (Trends)
+- **Background Sampler** -- Captures pool capacity, fragmentation, allocation, health and dedup ratio every 15 minutes per host
+- **SQLite Storage** -- 90-day retention in `/app/data/pvezfs.db` (WAL journaling)
+- **Inline Trend Charts** -- Capacity%, fragmentation%, allocated GB per pool rendered as lightweight inline SVG (no external JS)
+- **Configurable Range** -- 6 h / 24 h / 7 d / 30 d / 90 d views
+- **Sample Now** -- Trigger an immediate sample after adding a new host
+
+### Audit Log
+- **Destructive Actions Logged** -- Login success/failure, host add/remove, pool scrub/upgrade, dataset create/destroy/set, snapshot create/destroy/rollback/clone, auto-snapshot toggle, file & zvol restores, cache invalidation, notifications/AI config saves
+- **Fields Recorded** -- Timestamp, user, IP, host, action code, target, JSON details, success flag
+- **Filterable UI** -- Filter by action, user, current host, or failures only
+- **SQLite Backed** -- Indexed for fast queries, persisted across restarts
+
+### Performance
+- **SSH Command Cache** -- TTL-based in-memory cache (15-300s) for read-only ZFS queries drastically reduces SSH round-trips on active views; writes automatically invalidate the cache for the affected host
+- **Cache Stats API** -- `/api/cache/stats` exposes hit rate and entry count for ops visibility
+
 ### Notifications
 - **Telegram** -- Receive notifications via Telegram bot, PDF reports delivered as documents
 - **Gotify** -- Receive notifications via self-hosted Gotify server (text only)
