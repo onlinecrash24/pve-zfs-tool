@@ -10,6 +10,7 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 
 from app.ssh_manager import (
     load_hosts, add_host, remove_host, test_connection, get_public_key,
+    rotate_ssh_keys,
 )
 from app.zfs_commands import (
     get_pools, get_pool_status, get_pool_iostat, scrub_pool, get_pool_history,
@@ -235,6 +236,30 @@ def index():
 # ---------------------------------------------------------------------------
 # API: SSH Key
 # ---------------------------------------------------------------------------
+
+@app.route("/api/ssh-key/rotate", methods=["POST"])
+@login_required
+def api_rotate_ssh_key():
+    """Generate a new SSH key and deploy it to all configured hosts.
+
+    Failures are surfaced per-host. Old key is kept on any host where the
+    new key does not verify, so the operator can fix the situation without
+    being locked out.
+    """
+    result = rotate_ssh_keys()
+    audit_log(
+        "ssh.key.rotate",
+        target="all_hosts",
+        success=result.get("success", False),
+        details={
+            "host_count": len(result.get("results", [])),
+            "verified_all": result.get("success", False),
+            "cleanup_all": result.get("old_pubkey_removed_on_all", False),
+            "error": result.get("error"),
+        },
+    )
+    return jsonify(result)
+
 
 @app.route("/api/public-key")
 def api_public_key():

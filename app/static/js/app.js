@@ -172,7 +172,10 @@ async function viewHome() {
     const keyCard = h("div", { className: "card" });
     keyCard.appendChild(h("div", { className: "card-header" }, [
         h("span", {}, t("ssh_public_key")),
-        h("button", { className: "btn btn-sm btn-primary", onClick: () => copyKey(key.key) }, t("copy")),
+        h("div", { style: "display:flex;gap:6px" }, [
+            h("button", { className: "btn btn-sm btn-warning", onClick: () => rotateSshKey() }, t("ssh_rotate_btn")),
+            h("button", { className: "btn btn-sm btn-primary", onClick: () => copyKey(key.key) }, t("copy")),
+        ]),
     ]));
     const keyBody = h("div", { className: "card-body" });
     if (key.key) {
@@ -330,6 +333,83 @@ function copyKey(key) {
             }
         }
         document.body.removeChild(ta);
+    }
+}
+
+async function rotateSshKey() {
+    if (!confirm(t("ssh_rotate_confirm"))) return;
+    if (!confirm(t("ssh_rotate_confirm2"))) return;
+    toast(t("ssh_rotate_running"), "info");
+    let r;
+    try {
+        r = await API.post("/api/ssh-key/rotate", {});
+    } catch (e) {
+        toast(t("ssh_rotate_failed") + ": " + (e.message || e), "error");
+        return;
+    }
+    // Build a results modal
+    const body = document.createElement("div");
+    if (r.success) {
+        const ok = document.createElement("div");
+        ok.style.cssText = "color:var(--success, #4caf50);font-weight:bold;margin-bottom:10px";
+        ok.textContent = "✅ " + t("ssh_rotate_success");
+        body.appendChild(ok);
+    } else {
+        const err = document.createElement("div");
+        err.style.cssText = "color:var(--error, #f44336);font-weight:bold;margin-bottom:10px";
+        err.textContent = "❌ " + (r.error || t("ssh_rotate_failed"));
+        body.appendChild(err);
+    }
+    if (r.warning) {
+        const w = document.createElement("div");
+        w.style.cssText = "background:rgba(255,165,0,0.1);border-left:3px solid orange;padding:8px;margin-bottom:10px;font-size:13px";
+        w.textContent = "⚠️ " + r.warning;
+        body.appendChild(w);
+    }
+    if (r.note) {
+        const n = document.createElement("div");
+        n.style.cssText = "font-size:13px;color:var(--text-secondary);margin-bottom:10px";
+        n.textContent = r.note;
+        body.appendChild(n);
+    }
+    if (Array.isArray(r.results) && r.results.length) {
+        const tbl = document.createElement("table");
+        tbl.style.cssText = "width:100%;font-size:13px;border-collapse:collapse";
+        tbl.innerHTML = `<thead><tr>
+            <th style="text-align:left;padding:4px 8px">${escapeHtml(t("host"))}</th>
+            <th style="text-align:center;padding:4px 8px">${escapeHtml(t("ssh_rotate_deploy"))}</th>
+            <th style="text-align:center;padding:4px 8px">${escapeHtml(t("ssh_rotate_verify"))}</th>
+            <th style="text-align:center;padding:4px 8px">${escapeHtml(t("ssh_rotate_cleanup"))}</th>
+        </tr></thead>`;
+        const tb = document.createElement("tbody");
+        for (const res of r.results) {
+            const tr = document.createElement("tr");
+            const mark = (v) => v === true ? "✅" : v === false ? "❌" : "—";
+            tr.innerHTML = `
+                <td style="padding:4px 8px">${escapeHtml(res.name || res.host)}</td>
+                <td style="text-align:center;padding:4px 8px" title="${escapeHtml(res.deploy_error || '')}">${mark(res.deploy)}</td>
+                <td style="text-align:center;padding:4px 8px">${mark(res.verify)}</td>
+                <td style="text-align:center;padding:4px 8px">${mark(res.cleanup)}</td>`;
+            tb.appendChild(tr);
+        }
+        tbl.appendChild(tb);
+        body.appendChild(tbl);
+    }
+    if (r.new_pubkey) {
+        const lbl = document.createElement("div");
+        lbl.style.cssText = "margin-top:12px;font-size:12px;color:var(--text-secondary)";
+        lbl.textContent = t("ssh_rotate_new_key") + ":";
+        body.appendChild(lbl);
+        const pre = document.createElement("div");
+        pre.className = "key-display";
+        pre.style.cssText = "margin-top:4px;word-break:break-all;font-family:monospace;font-size:11px";
+        pre.textContent = r.new_pubkey;
+        body.appendChild(pre);
+    }
+    openModal(t("ssh_rotate_title"), body.outerHTML, null);
+    // Refresh Home view to show new key
+    if (r.success) {
+        setTimeout(() => { if (currentView === "home") viewHome(); }, 500);
     }
 }
 
@@ -2276,7 +2356,7 @@ async function viewMetrics() {
         grid.appendChild(chartBox(
             t("metrics_frag") + " (%)",
             _svgLineChart(fragPts, { yZero: true, color: "#e67e22", yFmt: v => v.toFixed(0) + "%" }),
-            `${t("metrics_current")}: ${latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—"}`,
+            `${t("metrics_current")}: ${latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—"}<br><span style="font-size:0.75em;opacity:0.8">${escapeHtml(t("metrics_frag_hint"))}</span>`,
         ));
         grid.appendChild(chartBox(
             t("metrics_alloc") + " (GB)",

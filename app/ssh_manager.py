@@ -2,6 +2,9 @@ import paramiko
 import os
 import json
 import hashlib
+import shlex
+import shutil
+import subprocess
 import threading
 import logging
 
@@ -176,3 +179,165 @@ def get_public_key():
         with open(pub_key_path, "r") as f:
             return f.read().strip()
     return None
+
+
+# ---------------------------------------------------------------------------
+# SSH Key Rotation
+# ---------------------------------------------------------------------------
+
+def _append_authorized_key(host, pubkey):
+    """Append a public key to ~/.ssh/authorized_keys idempotently."""
+    cmd = (
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+        "touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
+        f"grep -qxF {shlex.quote(pubkey)} ~/.ssh/authorized_keys || "
+        f"echo {shlex.quote(pubkey)} >> ~/.ssh/authorized_keys"
+    )
+    return run_command(host, cmd)
+
+
+def _remove_authorized_key(host, pubkey):
+    """Remove an exact-match public key line from ~/.ssh/authorized_keys."""
+    cmd = (
+        f"if grep -qxF {shlex.quote(pubkey)} ~/.ssh/authorized_keys 2>/dev/null; then "
+        f"  grep -vxF {shlex.quote(pubkey)} ~/.ssh/authorized_keys > ~/.ssh/.ak_new && "
+        f"  mv ~/.ssh/.ak_new ~/.ssh/authorized_keys && "
+        f"  chmod 600 ~/.ssh/authorized_keys; "
+        f"fi"
+    )
+    return run_command(host, cmd)
+
+
+def rotate_ssh_keys():
+    """Rotate the tool's SSH key across all configured hosts.
+
+    Flow (safe — never locks us out):
+      1. Generate new Ed25519 keypair into a temp path.
+      2. For each host: append the NEW public key to authorized_keys
+         while the OLD key is still active. Abort on first failure
+         and roll back any already-deployed new keys.
+      3. Swap files: old → id_ed25519.old(.pub), new → id_ed25519(.pub).
+      4. Verify the new key works on each host. On success, remove the
+         old public key from that host's authorized_keys.
+      5. Invalidate the SSH command cache so fresh connections are used.
+    """
+    from app.cache import invalidate_all
+
+    old_pub = get_public_key() or ""
+    tmp_key = "/tmp/pvezfs_rotate_key"
+
+    # Clean temp files from a previous abort
+    for p in (tmp_key, tmp_key + ".pub"):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+    # 1. Generate new keypair
+    try:
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", tmp_key, "-N", "",
+             "-C", "pvezfs-tool-rotated"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        return {"success": False, "error": "ssh-keygen not available in container"}
+    except subprocess.CalledProcessError as e:
+        return {"success": False, "error": f"ssh-keygen failed: {e.stderr or e.stdout}"}
+
+    try:
+        with open(tmp_key + ".pub") as f:
+            new_pub = f.read().strip()
+    except Exception as e:
+        return {"success": False, "error": f"cannot read new public key: {e}"}
+
+    hosts = load_hosts()
+    if not hosts:
+        # No hosts configured — just swap locally
+        try:
+            for suf in ("", ".pub"):
+                if os.path.exists(SSH_KEY + suf):
+                    shutil.move(SSH_KEY + suf, SSH_KEY + suf + ".old")
+                shutil.move(tmp_key + suf, SSH_KEY + suf)
+            os.chmod(SSH_KEY, 0o600)
+        except Exception as e:
+            return {"success": False, "error": f"local swap failed: {e}"}
+        return {"success": True, "new_pubkey": new_pub, "results": [],
+                "note": "No hosts configured; key rotated locally only."}
+
+    # 2. Deploy new pubkey to all hosts (old key still active)
+    results = []
+    deploy_ok = True
+    for h in hosts:
+        r = _append_authorized_key(h, new_pub)
+        ok = r.get("success", False)
+        results.append({
+            "host": h["address"], "name": h.get("name", h["address"]),
+            "deploy": ok,
+            "deploy_error": ("" if ok else (r.get("stderr") or r.get("stdout") or "unknown error")),
+            "verify": None, "cleanup": None,
+        })
+        if not ok:
+            deploy_ok = False
+
+    if not deploy_ok:
+        # Roll back: remove new_pub from hosts where we succeeded
+        for h, res in zip(hosts, results):
+            if res["deploy"]:
+                _remove_authorized_key(h, new_pub)
+        for p in (tmp_key, tmp_key + ".pub"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        return {
+            "success": False,
+            "error": "Deployment failed on one or more hosts; rolled back",
+            "results": results,
+        }
+
+    # 3. Swap local files
+    try:
+        for suf in ("", ".pub"):
+            # Remove any stale .old from a previous rotation
+            if os.path.exists(SSH_KEY + suf + ".old"):
+                os.remove(SSH_KEY + suf + ".old")
+            if os.path.exists(SSH_KEY + suf):
+                shutil.move(SSH_KEY + suf, SSH_KEY + suf + ".old")
+            shutil.move(tmp_key + suf, SSH_KEY + suf)
+        os.chmod(SSH_KEY, 0o600)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"local key swap failed: {e}",
+            "results": results,
+            "warning": "New key is deployed to hosts but local swap failed — old key still active.",
+        }
+
+    # 4. Verify new key works on every host, then remove old pubkey
+    invalidate_all()  # drop any cached SSH results tied to old auth
+
+    all_verified = True
+    for h, res in zip(hosts, results):
+        ok = test_connection(h)
+        res["verify"] = ok
+        if ok and old_pub:
+            cr = _remove_authorized_key(h, old_pub)
+            res["cleanup"] = cr.get("success", False)
+        else:
+            res["cleanup"] = False
+            if not ok:
+                all_verified = False
+
+    return {
+        "success": all_verified,
+        "new_pubkey": new_pub,
+        "old_pubkey_removed_on_all": all(r["cleanup"] for r in results),
+        "results": results,
+        "warning": None if all_verified else (
+            "New key does not authenticate on some hosts — old key was kept "
+            "on those hosts so you are not locked out. Investigate and re-run "
+            "rotation or fix authorized_keys manually."
+        ),
+    }

@@ -123,6 +123,7 @@
 - **Security Headers** -- CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - **Path Traversal Prevention** -- Realpath validation with symlink attack protection
 - **SSH Host Key Verification** -- Trust On First Use (TOFU), known hosts saved and verified on subsequent connections
+- **SSH Key Rotation** -- One-click rotation from the Home page; generates a new Ed25519 keypair, deploys it to all hosts before removing the old key (never locks you out), with per-host deploy/verify/cleanup status
 - **Reverse Proxy Ready** -- ProxyFix middleware for correct HTTPS detection behind NPM, nginx, Caddy
 
 ### Authentication & i18n
