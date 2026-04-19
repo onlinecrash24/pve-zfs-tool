@@ -88,6 +88,9 @@
 - **Matrix** -- Receive notifications via Matrix room (Client-Server API v3), PDF reports as `m.file` attachments
 - **Email (SMTP)** -- Send notifications and PDF reports to one or more recipients; STARTTLS, SSL/TLS or plaintext
 - **Scrub Monitor** -- Background thread detects scrub completion and sends notification automatically
+- **Live Dashboard** -- Home page shows per-host status, pool health, capacity, free space, and a linear-regression forecast "full in X days" computed from 30 d of sample data
+- **Capacity Forecast** -- `/api/forecast?host=...&pool=...` returns projected days until the pool reaches 100 % allocated (least-squares on `alloc_bytes`)
+- **Prometheus Exporter** -- `/metrics` in Prometheus text exposition format (opt-in: set `PROMETHEUS_TOKEN` env var; access with `Authorization: Bearer <token>` or `?token=`). Exposes host reachability, pool size/alloc/free/capacity/fragmentation, pool health (one-hot), I/O error totals, capacity forecast, and scrape timestamp
 - **Proactive Monitoring** -- Every 15 min the sampler checks each host for state changes and fires notifications (no manual action required):
   - `pool_error` -- pool health transitions ONLINE → DEGRADED/FAULTED/UNAVAIL and back
   - `health_warning` -- capacity crosses 90 %, or read/write/checksum errors appear

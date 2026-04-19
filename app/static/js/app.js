@@ -190,21 +190,20 @@ async function viewHome() {
     keyCard.appendChild(keyBody);
     container.appendChild(keyCard);
 
-    // Quick stats
+    // Live dashboard (replaces the old hardcoded stat tiles)
     if (hosts.length > 0) {
-        const statsGrid = h("div", { className: "grid grid-3", style: "margin-top:16px" });
-        statsGrid.appendChild(makeStatCard(t("hosts"), hosts.length, ""));
-        statsGrid.appendChild(makeStatCard(t("status"), t("active"), ""));
-
-        let totalPools = 0;
-        for (const host of hosts) {
+        const dashMount = h("div", { style: "margin-top:16px" }, loading());
+        container.appendChild(dashMount);
+        // Async — don't block rest of page
+        (async () => {
             try {
-                const pools = await API.get(`/api/pools?host=${host.address}`);
-                totalPools += pools.length;
-            } catch (e) { /* skip */ }
-        }
-        statsGrid.appendChild(makeStatCard(t("total_pools"), totalPools, ""));
-        container.appendChild(statsGrid);
+                const d = await API.get("/api/dashboard");
+                dashMount.innerHTML = "";
+                dashMount.appendChild(_renderDashboard(d));
+            } catch (e) {
+                dashMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Dashboard load failed")}</p>`;
+            }
+        })();
     }
 
     // Feature overview
@@ -305,6 +304,132 @@ function makeStatCard(label, value, extra) {
     card.appendChild(h("div", { className: "stat-value" }, String(value)));
     if (extra) card.appendChild(h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:4px" }, extra));
     return card;
+}
+
+function _renderDashboard(d) {
+    const root = document.createElement("div");
+    const agg = d.aggregate || {};
+
+    // Aggregate tiles
+    const tiles = h("div", { className: "grid grid-4", style: "gap:12px;margin-bottom:16px" });
+    const tile = (label, value, sub, ok) => {
+        const card = h("div", { className: "stat-card" });
+        card.appendChild(h("div", { className: "stat-label" }, label));
+        card.appendChild(h("div", {
+            className: "stat-value",
+            style: ok === false ? "color:var(--error,#f44336)" : (ok === true ? "color:var(--success,#4caf50)" : ""),
+        }, String(value)));
+        if (sub) card.appendChild(h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:4px" }, sub));
+        return card;
+    };
+    tiles.appendChild(tile(t("dash_hosts"),
+        `${agg.hosts_online || 0} / ${(agg.hosts_online || 0) + (agg.hosts_offline || 0)}`,
+        t("dash_hosts_online"),
+        (agg.hosts_offline || 0) === 0 ? true : false));
+    tiles.appendChild(tile(t("dash_pools"),
+        `${agg.pools_ok || 0} / ${agg.pools_total || 0}`,
+        t("dash_pools_ok"),
+        (agg.pools_degraded || 0) === 0 ? true : false));
+    tiles.appendChild(tile(t("dash_capacity_warn"),
+        String(agg.pools_capacity_warn || 0),
+        t("dash_capacity_warn_sub"),
+        (agg.pools_capacity_warn || 0) === 0 ? true : ((agg.pools_capacity_warn || 0) > 0 ? false : undefined)));
+    tiles.appendChild(tile(t("dash_forecast_critical"),
+        String(agg.forecast_pools_critical || 0),
+        t("dash_forecast_critical_sub"),
+        (agg.forecast_pools_critical || 0) === 0 ? true : false));
+    root.appendChild(tiles);
+
+    const tiles2 = h("div", { className: "grid grid-3", style: "gap:12px;margin-bottom:16px" });
+    tiles2.appendChild(tile(t("dash_stale_labels"),
+        String(agg.stale_snap_labels || 0),
+        t("dash_stale_labels_sub"),
+        (agg.stale_snap_labels || 0) === 0 ? true : false));
+    tiles2.appendChild(tile(t("dash_audit_failures"),
+        String(agg.recent_audit_failures_24h || 0),
+        t("dash_audit_failures_sub"),
+        (agg.recent_audit_failures_24h || 0) === 0 ? true : false));
+    tiles2.appendChild(tile(t("dash_pools_degraded"),
+        String(agg.pools_degraded || 0),
+        "",
+        (agg.pools_degraded || 0) === 0 ? true : false));
+    root.appendChild(tiles2);
+
+    // Per-host breakdown
+    const hostsCard = h("div", { className: "card" });
+    hostsCard.appendChild(h("div", { className: "card-header" }, t("dash_per_host")));
+    const tbl = document.createElement("table");
+    tbl.innerHTML = `<thead><tr>
+        <th>${escapeHtml(t("name"))}</th>
+        <th>${escapeHtml(t("status"))}</th>
+        <th>${escapeHtml(t("dash_pool"))}</th>
+        <th>${escapeHtml(t("dash_health"))}</th>
+        <th>${escapeHtml(t("dash_cap"))}</th>
+        <th>${escapeHtml(t("dash_free"))}</th>
+        <th>${escapeHtml(t("dash_forecast"))}</th>
+    </tr></thead>`;
+    const tb = document.createElement("tbody");
+    for (const host of (d.hosts || [])) {
+        const pools = host.pools || [];
+        if (pools.length === 0) {
+            const tr = document.createElement("tr");
+            const statusBadge = host.reachable === true ? `<span class="badge badge-online">${escapeHtml(t("online"))}</span>`
+                : host.reachable === false ? `<span class="badge badge-offline">${escapeHtml(t("offline"))}</span>`
+                : `<span class="badge badge-stopped">${escapeHtml(t("unknown"))}</span>`;
+            tr.innerHTML = `<td>${escapeHtml(host.name)}</td>
+                <td>${statusBadge}</td>
+                <td colspan="5" class="muted">${escapeHtml(t("dash_no_samples"))}</td>`;
+            tb.appendChild(tr);
+            continue;
+        }
+        pools.forEach((p, idx) => {
+            const tr = document.createElement("tr");
+            let nameCell = "", statusCell = "";
+            if (idx === 0) {
+                const statusBadge = host.reachable === true ? `<span class="badge badge-online">${escapeHtml(t("online"))}</span>`
+                    : host.reachable === false ? `<span class="badge badge-offline">${escapeHtml(t("offline"))}</span>`
+                    : `<span class="badge badge-stopped">${escapeHtml(t("unknown"))}</span>`;
+                nameCell = `<td rowspan="${pools.length}">${escapeHtml(host.name)}</td>`;
+                statusCell = `<td rowspan="${pools.length}">${statusBadge}</td>`;
+            }
+            const healthCls = p.health === "ONLINE" ? "badge-online" :
+                (p.health ? "badge-offline" : "badge-stopped");
+            const capPct = p.cap_pct != null ? p.cap_pct.toFixed(0) + "%" : "—";
+            const capClass = (p.cap_pct != null && p.cap_pct >= 90) ? "color:var(--error,#f44336);font-weight:bold" :
+                             (p.cap_pct != null && p.cap_pct >= 80) ? "color:#e67e22" : "";
+            const free = p.free_bytes != null ? formatBytes(p.free_bytes) : "—";
+            let fc;
+            if (p.forecast_days_until_full == null) {
+                fc = `<span class="muted">—</span>`;
+            } else if (p.forecast_days_until_full < 30) {
+                fc = `<span style="color:var(--error,#f44336);font-weight:bold">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
+            } else if (p.forecast_days_until_full < 90) {
+                fc = `<span style="color:#e67e22">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
+            } else {
+                fc = `${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}`;
+            }
+            tr.innerHTML = `${nameCell}${statusCell}
+                <td style="font-family:monospace">${escapeHtml(p.pool)}</td>
+                <td><span class="badge ${healthCls}">${escapeHtml(p.health || "?")}</span></td>
+                <td style="${capClass}">${capPct}</td>
+                <td>${free}</td>
+                <td>${fc}</td>`;
+            tb.appendChild(tr);
+        });
+    }
+    tbl.appendChild(tb);
+    hostsCard.appendChild(tbl);
+    root.appendChild(hostsCard);
+
+    // Generated-at footer
+    if (d.generated_at) {
+        const foot = document.createElement("p");
+        foot.className = "muted";
+        foot.style.cssText = "font-size:11px;text-align:right;margin-top:6px";
+        foot.textContent = `${t("dash_generated_at")}: ${new Date(d.generated_at * 1000).toLocaleString()}`;
+        root.appendChild(foot);
+    }
+    return root;
 }
 
 function copyKey(key) {

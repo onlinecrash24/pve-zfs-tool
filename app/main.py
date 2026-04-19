@@ -1157,6 +1157,64 @@ def api_cache_stats():
     return jsonify(ssh_cache.stats())
 
 
+# ---------------------------------------------------------------------------
+# API: Dashboard + Forecast
+# ---------------------------------------------------------------------------
+
+@app.route("/api/dashboard")
+@login_required
+def api_dashboard():
+    from app.analytics import dashboard
+    return jsonify(dashboard())
+
+
+@app.route("/api/forecast")
+@login_required
+def api_forecast():
+    from app.analytics import forecast_days_until_full
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    pool = request.args.get("pool")
+    if not pool:
+        return jsonify({"error": "pool parameter required"}), 400
+    days = forecast_days_until_full(host["address"], pool)
+    return jsonify({"host": host["address"], "pool": pool,
+                    "days_until_full": days})
+
+
+# ---------------------------------------------------------------------------
+# Prometheus exporter — opt-in via PROMETHEUS_TOKEN env var
+# ---------------------------------------------------------------------------
+
+@app.route("/metrics")
+def prometheus_endpoint():
+    """Expose Prometheus text-format metrics.
+
+    Disabled unless ``PROMETHEUS_TOKEN`` is set in the environment.
+    The client must present ``Authorization: Bearer <token>`` or
+    ``?token=<token>``. Compare in constant time.
+    """
+    token_cfg = os.environ.get("PROMETHEUS_TOKEN", "")
+    if not token_cfg:
+        return make_response("prometheus exporter disabled (set PROMETHEUS_TOKEN)\n",
+                             404, {"Content-Type": "text/plain; charset=utf-8"})
+    auth = request.headers.get("Authorization", "")
+    supplied = ""
+    if auth.startswith("Bearer "):
+        supplied = auth[7:].strip()
+    if not supplied:
+        supplied = request.args.get("token", "")
+    if not supplied or not hmac.compare_digest(supplied, token_cfg):
+        return make_response("unauthorized\n", 401,
+                             {"Content-Type": "text/plain; charset=utf-8"})
+
+    from app.analytics import prometheus_metrics
+    body = prometheus_metrics()
+    return make_response(body, 200,
+                         {"Content-Type": "text/plain; version=0.0.4; charset=utf-8"})
+
+
 @app.route("/api/cache/invalidate", methods=["POST"])
 @login_required
 def api_cache_invalidate():
