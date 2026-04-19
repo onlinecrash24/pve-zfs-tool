@@ -4,6 +4,10 @@
 
 <p align="center">A Docker-based web application for managing ZFS pools, datasets, snapshots, and auto-snapshots across one or more Proxmox VE hosts via SSH.</p>
 
+<p align="center">
+  <b>English</b> &middot; <a href="README_DE.md">Deutsch</a>
+</p>
+
 ## Features
 
 ### ZFS Pool Management
@@ -281,6 +285,23 @@ server {
 4. Enter homeserver URL, access token, and room ID in the Notifications settings
 5. Click "Send Test" to verify
 
+## Prometheus Integration (optional)
+
+Set the `PROMETHEUS_TOKEN` environment variable to enable the `/metrics` endpoint (it stays `404` otherwise). Example Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: pvezfs
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: your-long-random-token
+    static_configs:
+      - targets: ['zfs-tool.example.com']
+```
+
+Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`, `pvezfs_pool_size_bytes`, `pvezfs_pool_alloc_bytes`, `pvezfs_pool_free_bytes`, `pvezfs_pool_fragmentation_percent`, `pvezfs_pool_health{state="…"}`, `pvezfs_pool_error_total_sum`, `pvezfs_pool_forecast_days_until_full`, and a scrape timestamp.
+
 ## Configuration
 
 ### Environment Variables
@@ -292,6 +313,7 @@ server {
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
+| `PROMETHEUS_TOKEN` | _(unset)_ | Opt-in bearer token for `/metrics` endpoint. If unset, the Prometheus exporter is disabled |
 
 ### Persistent Volumes
 
@@ -316,14 +338,20 @@ pve-zfs-tool/
 ├── requirements.txt
 └── app/
     ├── main.py              # Flask API routes & authentication
-    ├── ssh_manager.py       # SSH connection & host management
-    ├── zfs_commands.py      # ZFS command wrappers via SSH
+    ├── ssh_manager.py       # SSH connection, host management, key rotation
+    ├── zfs_commands.py      # ZFS command wrappers via SSH (cached reads)
     ├── validators.py        # Input validation (whitelist-based)
+    ├── cache.py             # TTL in-memory cache for SSH results
+    ├── database.py          # Shared SQLite (metrics / audit / monitor state)
+    ├── metrics.py           # Background sampler + pool timeseries queries
+    ├── monitor.py           # Proactive state-change notifications
+    ├── analytics.py         # Dashboard aggregation, forecast, Prometheus
+    ├── audit.py             # Audit-log writer and query API
     ├── ai_reports.py        # AI-powered ZFS analysis & reports
     ├── ai_pdf.py            # PDF report generation
     ├── snapshot_analysis.py # Shared snapshot health analysis (UI + AI)
     ├── timezone.py          # Timezone helper (TZ environment variable)
-    ├── notifications.py     # Telegram, Gotify & Matrix notifications
+    ├── notifications.py     # Telegram, Gotify, Matrix & Email notifications
     ├── templates/
     │   ├── index.html       # Single-page application
     │   └── login.html       # Login page
