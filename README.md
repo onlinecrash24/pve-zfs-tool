@@ -62,12 +62,14 @@
 - **SMART Status** -- Disk health for all drives in each pool (resolved via `/dev/disk/by-id/`)
 - **LXC Restore Clone Cleanup** -- View and destroy leftover restore-mount datasets with one-click cleanup
 - **VM Zvol Restore Sessions** -- Overview of active mounts, kpartx mappings, and snapdev status with per-item unmount and bulk cleanup
+- **Scheduled Tasks Overview** -- Shows active AI report schedules (per-host and combined) with next-run and last-run times
 - **ZDB Deep Diagnostics** -- Automatic `zdb` analysis for DEGRADED/FAULTED pools (block stats, disk labels)
 
 ### Notifications
-- **Telegram** -- Receive notifications via Telegram bot
-- **Gotify** -- Receive notifications via self-hosted Gotify server
-- **Matrix** -- Receive notifications via Matrix room (Client-Server API)
+- **Telegram** -- Receive notifications via Telegram bot, PDF reports delivered as documents
+- **Gotify** -- Receive notifications via self-hosted Gotify server (text only)
+- **Matrix** -- Receive notifications via Matrix room (Client-Server API v3), PDF reports as `m.file` attachments
+- **Email (SMTP)** -- Send notifications and PDF reports to one or more recipients; STARTTLS, SSL/TLS or plaintext
 - **Scrub Monitor** -- Background thread detects scrub completion and sends notification automatically
 - **Test Notifications** -- Send test messages per channel to verify configuration
 - **Configurable Events** -- Enable/disable notifications per event type:
@@ -79,20 +81,22 @@
   - Health warnings
   - Host offline
   - File restore actions
+  - AI report generated (delivered with PDF attachment)
 
 ### AI Reports & Analysis
 - **Multi-Provider Support** -- OpenAI (GPT), Anthropic (Claude), Ollama (local), or any OpenAI-compatible API
 - **Ollama Model Discovery** -- Automatically query and select available models from your Ollama instance
-- **Daily/Weekly Reports** -- Automated ZFS infrastructure analysis on schedule
+- **Per-Host & Combined Schedules** -- Independent daily/weekly plans per host, plus an optional combined "all hosts" report
 - **Comprehensive Analysis** -- Pool health, storage capacity, scrub status, snapshot coverage, SMART health, anomalies
 - **Snapshot Retention Analysis** -- Per-dataset per-label retention check, gap detection, stale snapshot warnings
 - **ZDB Diagnostics** -- Automatic deep analysis triggered for degraded/faulted pools
 - **Actionable Recommendations** -- Prioritized suggestions for scrubs, cleanup, capacity planning
 - **Interactive Chat** -- Ask follow-up questions about your ZFS data
-- **Notification Integration** -- Optionally send reports via Telegram, Gotify, or Matrix
+- **Notification Integration** -- Send reports via Telegram, Gotify, Matrix or Email -- PDF attachment supported on Email, Telegram and Matrix
 - **Bilingual Reports** -- Reports follow the global UI language (English/German)
 - **Customizable System Prompt** -- Edit the AI prompt to reduce false positives for your environment
-- **PDF Export** -- Download reports as PDF
+- **PDF Export** -- Download reports as PDF or have them delivered automatically
+- **Raw Data Export** -- Export the JSON payload that would be sent to the LLM
 
 ### Security
 - **CSRF Protection** -- Token-based protection for all state-changing requests

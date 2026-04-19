@@ -250,6 +250,7 @@ async function viewHome() {
                     <li>${escapeHtml(t("feat_notify_1"))}</li>
                     <li>${escapeHtml(t("feat_notify_2"))}</li>
                     <li>${escapeHtml(t("feat_notify_3"))}</li>
+                    <li>${escapeHtml(t("feat_notify_4"))}</li>
                 </ul>
             </div>
             <div>
@@ -258,6 +259,7 @@ async function viewHome() {
                     <li>${escapeHtml(t("feat_ai_1"))}</li>
                     <li>${escapeHtml(t("feat_ai_2"))}</li>
                     <li>${escapeHtml(t("feat_ai_3"))}</li>
+                    <li>${escapeHtml(t("feat_ai_4"))}</li>
                 </ul>
             </div>
             <div>
