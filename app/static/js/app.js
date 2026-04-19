@@ -2060,6 +2060,60 @@ async function viewHealth() {
     zCard.appendChild(zBody);
     container.appendChild(zCard);
 
+    // Scheduled Tasks (AI reports)
+    try {
+        const schedResp = await API.get("/api/ai/schedules");
+        const schedList = (schedResp && schedResp.schedules) || [];
+        const active = schedList.filter(s => s.enabled);
+
+        const stCard = h("div", { className: "card" });
+        stCard.appendChild(h("div", { className: "card-header" }, [
+            h("span", {}, t("scheduled_tasks")),
+            h("span", { className: "badge badge-online" }, String(active.length)),
+        ]));
+        const stBody = h("div", { className: "card-body" });
+
+        if (active.length === 0) {
+            stBody.appendChild(h("p", { style: "color:var(--text-secondary);margin:0" }, t("no_scheduled_tasks")));
+        } else {
+            const tbl = h("table");
+            const thead = h("thead");
+            thead.innerHTML = `<tr>
+                <th>${escapeHtml(t("sched_host"))}</th>
+                <th>${escapeHtml(t("sched_interval"))}</th>
+                <th>${escapeHtml(t("sched_next_run"))}</th>
+                <th>${escapeHtml(t("sched_last_run"))}</th>
+                <th>${escapeHtml(t("sched_status"))}</th>
+            </tr>`;
+            tbl.appendChild(thead);
+            const tbody = h("tbody");
+            const weekdays = t("ai_weekdays").split(",");
+            for (const s of active) {
+                let intervalText = s.interval === "weekly"
+                    ? `${t("ai_schedule_weekly")} (${weekdays[s.weekday] || "?"}, ${String(s.hour).padStart(2, "0")}:00)`
+                    : `${t("ai_schedule_daily")} (${String(s.hour).padStart(2, "0")}:00)`;
+                const label = s.host === null || s.host === undefined
+                    ? t("sched_all_hosts")
+                    : s.host;
+                const tr = h("tr");
+                tr.innerHTML = `
+                    <td><code style="font-size:12px">${escapeHtml(label)}</code></td>
+                    <td>${escapeHtml(intervalText)}</td>
+                    <td>${escapeHtml(s.next_run || "—")}</td>
+                    <td style="color:var(--text-secondary)">${escapeHtml(s.last_run || t("sched_never"))}</td>
+                    <td><span class="badge badge-online">${escapeHtml(t("enabled"))}</span></td>
+                `;
+                tbody.appendChild(tr);
+            }
+            tbl.appendChild(tbody);
+            stBody.appendChild(tbl);
+        }
+        stCard.appendChild(stBody);
+        container.appendChild(stCard);
+    } catch (e) {
+        // Silently ignore if schedules endpoint unavailable
+    }
+
     // Events (am Ende)
     const evCard = h("div", { className: "card" });
     evCard.appendChild(h("div", { className: "card-header" }, t("recent_events")));
@@ -2202,6 +2256,73 @@ async function viewNotifications() {
     mxCard.appendChild(mxBody);
     container.appendChild(mxCard);
 
+    // --- Email Card ---
+    const emCard = h("div", { className: "card" });
+    emCard.appendChild(h("div", { className: "card-header" }, [
+        h("span", {}, t("email")),
+        h("span", {
+            className: `badge ${config.email?.enabled ? "badge-online" : "badge-offline"}`,
+        }, config.email?.enabled ? t("enabled") : t("disabled")),
+    ]));
+    const emBody = h("div", { className: "card-body" });
+    const em = config.email || {};
+    const sec = em.security || "starttls";
+    emBody.innerHTML = `
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="em-enabled" ${em.enabled ? "checked" : ""}>
+                ${escapeHtml(t("enable_email"))}
+            </label>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>${escapeHtml(t("email_smtp_host"))}</label>
+                <input class="form-control" id="em-host" placeholder="smtp.example.com" value="${escapeAttr(em.smtp_host || "")}">
+            </div>
+            <div class="form-group" style="max-width:140px">
+                <label>${escapeHtml(t("email_smtp_port"))}</label>
+                <input class="form-control" id="em-port" type="number" min="1" max="65535" value="${em.smtp_port || 587}">
+            </div>
+            <div class="form-group">
+                <label>${escapeHtml(t("email_security"))}</label>
+                <select class="form-control" id="em-security">
+                    <option value="starttls" ${sec === "starttls" ? "selected" : ""}>${escapeHtml(t("email_security_starttls"))}</option>
+                    <option value="ssl" ${sec === "ssl" ? "selected" : ""}>${escapeHtml(t("email_security_ssl"))}</option>
+                    <option value="none" ${sec === "none" ? "selected" : ""}>${escapeHtml(t("email_security_none"))}</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>${escapeHtml(t("email_smtp_user"))}</label>
+                <input class="form-control" id="em-user" autocomplete="off" value="${escapeAttr(em.smtp_user || "")}">
+            </div>
+            <div class="form-group">
+                <label>${escapeHtml(t("email_smtp_password"))}</label>
+                <input class="form-control" id="em-pass" type="password" autocomplete="new-password" value="${escapeAttr(em.smtp_password || "")}">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>${escapeHtml(t("email_from"))}</label>
+                <input class="form-control" id="em-from" placeholder="zfs-tool@example.com" value="${escapeAttr(em.from_address || "")}">
+            </div>
+            <div class="form-group">
+                <label>${escapeHtml(t("email_to"))}</label>
+                <input class="form-control" id="em-to" placeholder="admin@example.com, ops@example.com" value="${escapeAttr(em.to_addresses || "")}">
+            </div>
+        </div>
+        <div class="btn-group" style="margin-top:8px">
+            <button class="btn btn-sm btn-success" id="em-test-btn">${escapeHtml(t("send_test"))}</button>
+        </div>
+        <p style="margin-top:10px;font-size:12px;color:var(--text-secondary)">
+            ${escapeHtml(t("email_help"))}<br>
+            <span style="opacity:0.8">${escapeHtml(t("email_to_hint"))}</span>
+        </p>
+    `;
+    emCard.appendChild(emBody);
+    container.appendChild(emCard);
+
     // --- Event Configuration ---
     const evCard = h("div", { className: "card" });
     evCard.appendChild(h("div", { className: "card-header" }, t("event_config")));
@@ -2271,6 +2392,24 @@ async function viewNotifications() {
             r.success ? "success" : "error");
     });
 
+    document.getElementById("em-test-btn").addEventListener("click", async () => {
+        const payload = {
+            smtp_host: document.getElementById("em-host").value.trim(),
+            smtp_port: parseInt(document.getElementById("em-port").value) || 587,
+            smtp_user: document.getElementById("em-user").value.trim(),
+            smtp_password: document.getElementById("em-pass").value,
+            from_address: document.getElementById("em-from").value.trim(),
+            to_addresses: document.getElementById("em-to").value.trim(),
+            security: document.getElementById("em-security").value,
+        };
+        if (!payload.smtp_host || !payload.from_address || !payload.to_addresses) {
+            toast(t("email_fields_required"), "error"); return;
+        }
+        const r = await API.post("/api/notifications/test/email", payload);
+        toast(r.success ? t("email_test_sent") : t("email_failed", r.detail || t("error")),
+            r.success ? "success" : "error");
+    });
+
     document.getElementById("notify-save-btn").addEventListener("click", async () => {
         const events = {};
         document.querySelectorAll(".ev-checkbox").forEach(cb => {
@@ -2292,6 +2431,16 @@ async function viewNotifications() {
                 homeserver: document.getElementById("mx-homeserver").value.trim(),
                 access_token: document.getElementById("mx-token").value.trim(),
                 room_id: document.getElementById("mx-room").value.trim(),
+            },
+            email: {
+                enabled: document.getElementById("em-enabled").checked,
+                smtp_host: document.getElementById("em-host").value.trim(),
+                smtp_port: parseInt(document.getElementById("em-port").value) || 587,
+                smtp_user: document.getElementById("em-user").value.trim(),
+                smtp_password: document.getElementById("em-pass").value,
+                from_address: document.getElementById("em-from").value.trim(),
+                to_addresses: document.getElementById("em-to").value.trim(),
+                security: document.getElementById("em-security").value,
             },
             events,
         };
@@ -2482,40 +2631,85 @@ async function viewAI() {
     const schedBody = h("div", { className: "card-body" });
 
     const sched = config.schedule || {};
+    const schedules = config.schedules || {};
+    const hostSched = schedules[currentHost] || { enabled: false, interval: "daily", hour: 6, weekday: 0 };
     const weekdays = t("ai_weekdays").split(",");
-    let weekdayOpts = weekdays.map((d, i) =>
-        `<option value="${i}" ${sched.weekday === i ? "selected" : ""}>${escapeHtml(d)}</option>`
+    const mkWeekdayOpts = (sel) => weekdays.map((d, i) =>
+        `<option value="${i}" ${sel === i ? "selected" : ""}>${escapeHtml(d)}</option>`
     ).join("");
 
     schedBody.innerHTML = `
-        <div class="grid grid-2" style="gap:16px">
-            <div style="grid-column:1/-1">
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                    <input type="checkbox" id="ai-sched-enabled" ${sched.enabled ? "checked" : ""}>
-                    ${escapeHtml(t("ai_schedule_enable"))}
-                </label>
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">
+            ${escapeHtml(t("ai_schedule_note"))}
+        </p>
+
+        <!-- Combined all-hosts schedule -->
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px">
+            <legend style="padding:0 8px;color:var(--accent);font-weight:600">${escapeHtml(t("ai_schedule_all_hosts"))}</legend>
+            <div class="grid grid-2" style="gap:14px">
+                <div style="grid-column:1/-1">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="ai-sched-enabled" ${sched.enabled ? "checked" : ""}>
+                        ${escapeHtml(t("ai_schedule_enable"))}
+                    </label>
+                </div>
+                <div>
+                    <label>${escapeHtml(t("ai_schedule_interval"))}</label>
+                    <select id="ai-sched-interval" class="form-control" style="margin-top:4px">
+                        <option value="daily" ${sched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
+                        <option value="weekly" ${sched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
+                    </select>
+                </div>
+                <div>
+                    <label>${escapeHtml(t("ai_schedule_hour"))}</label>
+                    <input id="ai-sched-hour" class="form-control" type="number" min="0" max="23" value="${sched.hour ?? 6}" style="margin-top:4px">
+                </div>
+                <div id="ai-weekday-row" style="${sched.interval === "weekly" ? "" : "display:none"}">
+                    <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
+                    <select id="ai-sched-weekday" class="form-control" style="margin-top:4px">${mkWeekdayOpts(sched.weekday)}</select>
+                </div>
             </div>
-            <div>
-                <label>${escapeHtml(t("ai_schedule_interval"))}</label>
-                <select id="ai-sched-interval" class="form-control" style="margin-top:4px">
-                    <option value="daily" ${sched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
-                    <option value="weekly" ${sched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
-                </select>
+        </fieldset>
+
+        <!-- Per-host schedule -->
+        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px">
+            <legend style="padding:0 8px;color:var(--accent);font-weight:600">${escapeHtml(t("ai_schedule_this_host"))} &mdash; <code>${escapeHtml(currentHost || "?")}</code></legend>
+            <div class="grid grid-2" style="gap:14px">
+                <div style="grid-column:1/-1">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="ai-hsched-enabled" ${hostSched.enabled ? "checked" : ""}>
+                        ${escapeHtml(t("ai_schedule_enable"))}
+                    </label>
+                </div>
+                <div>
+                    <label>${escapeHtml(t("ai_schedule_interval"))}</label>
+                    <select id="ai-hsched-interval" class="form-control" style="margin-top:4px">
+                        <option value="daily" ${hostSched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
+                        <option value="weekly" ${hostSched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
+                    </select>
+                </div>
+                <div>
+                    <label>${escapeHtml(t("ai_schedule_hour"))}</label>
+                    <input id="ai-hsched-hour" class="form-control" type="number" min="0" max="23" value="${hostSched.hour ?? 6}" style="margin-top:4px">
+                </div>
+                <div id="ai-hweekday-row" style="${hostSched.interval === "weekly" ? "" : "display:none"}">
+                    <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
+                    <select id="ai-hsched-weekday" class="form-control" style="margin-top:4px">${mkWeekdayOpts(hostSched.weekday)}</select>
+                </div>
             </div>
-            <div>
-                <label>${escapeHtml(t("ai_schedule_hour"))}</label>
-                <input id="ai-sched-hour" class="form-control" type="number" min="0" max="23" value="${sched.hour ?? 6}" style="margin-top:4px">
-            </div>
-            <div id="ai-weekday-row" style="${sched.interval === "weekly" ? "" : "display:none"}">
-                <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
-                <select id="ai-sched-weekday" class="form-control" style="margin-top:4px">${weekdayOpts}</select>
-            </div>
-            <div style="grid-column:1/-1">
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                    <input type="checkbox" id="ai-notify-report" ${config.notify_on_report ? "checked" : ""}>
-                    ${escapeHtml(t("ai_notify_on_report"))}
-                </label>
-            </div>
+        </fieldset>
+
+        <div style="margin-top:8px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="ai-notify-report" ${config.notify_on_report ? "checked" : ""}>
+                ${escapeHtml(t("ai_notify_on_report"))}
+            </label>
+        </div>
+        <div style="margin-top:6px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="ai-attach-pdf" ${config.attach_pdf !== false ? "checked" : ""}>
+                ${escapeHtml(t("ai_attach_pdf"))}
+            </label>
         </div>
 
         <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
@@ -2585,6 +2779,9 @@ async function viewAI() {
     // Weekly/daily toggle
     document.getElementById("ai-sched-interval").addEventListener("change", (e) => {
         document.getElementById("ai-weekday-row").style.display = e.target.value === "weekly" ? "" : "none";
+    });
+    document.getElementById("ai-hsched-interval").addEventListener("change", (e) => {
+        document.getElementById("ai-hweekday-row").style.display = e.target.value === "weekly" ? "" : "none";
     });
 
     // Ollama model refresh
@@ -2721,6 +2918,25 @@ async function viewAI() {
 
 async function _saveAIConfig() {
     const provider = document.getElementById("ai-provider").value;
+
+    // Build per-host schedule patch. We only touch the currentHost entry so
+    // schedules for other hosts are preserved via a server-side merge.
+    const existing = await API.get("/api/ai/config");
+    const schedules = existing.schedules || {};
+    const hostEnabled = document.getElementById("ai-hsched-enabled").checked;
+    const hostCfg = {
+        enabled: hostEnabled,
+        interval: document.getElementById("ai-hsched-interval").value,
+        hour: parseInt(document.getElementById("ai-hsched-hour").value) || 6,
+        weekday: parseInt(document.getElementById("ai-hsched-weekday").value) || 0,
+    };
+    if (hostEnabled) {
+        schedules[currentHost] = hostCfg;
+    } else {
+        // Keep disabled entry so UI values persist, but mark disabled
+        schedules[currentHost] = hostCfg;
+    }
+
     const newConfig = {
         provider,
         openai: {
@@ -2747,8 +2963,10 @@ async function _saveAIConfig() {
             hour: parseInt(document.getElementById("ai-sched-hour").value) || 6,
             weekday: parseInt(document.getElementById("ai-sched-weekday").value) || 0,
         },
+        schedules,
         report_language: getLang(),
         notify_on_report: document.getElementById("ai-notify-report").checked,
+        attach_pdf: document.getElementById("ai-attach-pdf").checked,
         system_prompt: document.getElementById("ai-system-prompt").value.trim(),
     };
     await API.post("/api/ai/config", newConfig);

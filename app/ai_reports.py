@@ -19,7 +19,8 @@ log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _scheduler_thread = None
 _scheduler_stop = threading.Event()
-_last_run_key = None  # Persists across scheduler restarts
+_last_run_key = None  # Legacy: single-schedule last-run (kept for backwards compat)
+_last_run_keys = {}   # Per-schedule last-run: {schedule_key: run_key}
 
 # Cache for latest collected data (used by chat)
 _latest_data = None
@@ -50,8 +51,10 @@ DEFAULT_CONFIG = {
         "hour": 6,
         "weekday": 0,
     },
+    "schedules": {},
     "report_language": "en",
     "notify_on_report": False,
+    "attach_pdf": True,
     "system_prompt": "",
     "max_reports": 50,
 }
@@ -645,10 +648,30 @@ def generate_report(host_address=None, lang_override=None):
             if len(content_text) > 4000:
                 report_text += "\n\n... (truncated)"
             title = "KI-Bericht" if lang == "de" else "AI Report"
+            host_tag = ""
+            if host_names:
+                host_tag = f" ({', '.join(host_names)})"
+
+            # Build PDF attachment if enabled
+            pdf_attachment = None
+            if config.get("attach_pdf", True):
+                try:
+                    from app.ai_pdf import generate_pdf
+                    pdf_bytes = generate_pdf(report)
+                    safe_ts = report["timestamp"].replace(" ", "_").replace(":", "-")
+                    host_slug = "all-hosts"
+                    if host_addresses and len(host_addresses) == 1:
+                        host_slug = host_addresses[0].replace(":", "_").replace("/", "_")
+                    pdf_filename = f"ZFS_Report_{host_slug}_{safe_ts}.pdf"
+                    pdf_attachment = (pdf_filename, pdf_bytes)
+                except Exception as e:
+                    log.warning("PDF generation for notification failed: %s", e)
+
             send_notification(
                 "ai_report",
-                title,
+                f"{title}{host_tag}",
                 f"Provider: {provider} ({model})\n\n{report_text}",
+                pdf_attachment=pdf_attachment,
             )
         except Exception as e:
             log.warning("Failed to send report notification: %s", e)
@@ -705,48 +728,115 @@ def chat(question, host_address=None, lang_override=None):
 # Scheduler
 # ---------------------------------------------------------------------------
 
+def get_active_schedules():
+    """Return a list of active schedule entries with computed next-run time.
+
+    Each entry: {key, host, label, enabled, interval, hour, weekday, last_run, next_run}
+    `host` is None for the 'all hosts' schedule, or a host address string.
+    """
+    config = load_config()
+    entries = []
+
+    # Legacy / "all hosts" schedule
+    legacy = config.get("schedule") or {}
+    if legacy:
+        entries.append({
+            "key": "__all__",
+            "host": None,
+            "label": "all_hosts",
+            "enabled": bool(legacy.get("enabled")),
+            "interval": legacy.get("interval", "daily"),
+            "hour": int(legacy.get("hour", 6)),
+            "weekday": int(legacy.get("weekday", 0)),
+        })
+
+    # Per-host schedules
+    schedules = config.get("schedules") or {}
+    if isinstance(schedules, dict):
+        for host_addr, cfg in schedules.items():
+            if not isinstance(cfg, dict):
+                continue
+            entries.append({
+                "key": f"host:{host_addr}",
+                "host": host_addr,
+                "label": host_addr,
+                "enabled": bool(cfg.get("enabled")),
+                "interval": cfg.get("interval", "daily"),
+                "hour": int(cfg.get("hour", 6)),
+                "weekday": int(cfg.get("weekday", 0)),
+            })
+
+    # Compute next_run for each
+    now = tz_now()
+    for e in entries:
+        e["last_run"] = _last_run_keys.get(e["key"])
+        e["next_run"] = _compute_next_run(now, e) if e["enabled"] else None
+    return entries
+
+
+def _compute_next_run(now, entry):
+    """Return a human-readable next-run time for a schedule entry."""
+    import datetime as _dt
+    hour = entry.get("hour", 6)
+    interval = entry.get("interval", "daily")
+    weekday = entry.get("weekday", 0)
+
+    candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if interval == "weekly":
+        days_ahead = (weekday - now.weekday()) % 7
+        candidate = candidate + _dt.timedelta(days=days_ahead)
+        if candidate <= now:
+            candidate = candidate + _dt.timedelta(days=7)
+    else:  # daily
+        if candidate <= now:
+            candidate = candidate + _dt.timedelta(days=1)
+    return candidate.strftime("%Y-%m-%d %H:%M")
+
+
 def _scheduler_loop():
     """Background thread for scheduled report generation.
 
-    Always runs regardless of whether schedule is enabled, so that enabling
-    the schedule at runtime takes effect without restarting.  Uses a
-    last-run date string to avoid the fragile 2-minute window approach.
+    Evaluates all active schedules (legacy "all hosts" + per-host) each tick.
     """
     global _last_run_key
     log.info("AI report scheduler started")
 
     while not _scheduler_stop.is_set():
         try:
-            config = load_config()
-            schedule = config.get("schedule", {})
-            if not schedule.get("enabled"):
-                _scheduler_stop.wait(30)
-                continue
-
             now = tz_now()
-            target_hour = schedule.get("hour", 6)
-            interval = schedule.get("interval", "daily")
+            for entry in get_active_schedules():
+                if not entry["enabled"]:
+                    continue
 
-            # Build a run-key that is unique per scheduled period
-            if interval == "weekly":
-                run_key = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
-            else:
-                run_key = now.strftime("%Y-%m-%d")
+                interval = entry["interval"]
+                target_hour = entry["hour"]
 
-            should_run = False
-            if now.hour >= target_hour and _last_run_key != run_key:
-                if interval == "daily":
-                    should_run = True
-                elif interval == "weekly" and now.weekday() == schedule.get("weekday", 0):
-                    should_run = True
+                # Build a run-key unique per scheduled period
+                if interval == "weekly":
+                    run_key = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
+                else:
+                    run_key = now.strftime("%Y-%m-%d")
 
-            if should_run:
-                log.info("Scheduled AI report generation triggered (key=%s, hour=%s)", run_key, target_hour)
-                _last_run_key = run_key
-                try:
-                    generate_report()
-                except Exception as e:
-                    log.error("Scheduled report generation failed: %s", e)
+                should_run = False
+                if now.hour >= target_hour and _last_run_keys.get(entry["key"]) != run_key:
+                    if interval == "daily":
+                        should_run = True
+                    elif interval == "weekly" and now.weekday() == entry["weekday"]:
+                        should_run = True
+
+                if should_run:
+                    log.info(
+                        "Scheduled AI report triggered for %s (key=%s, hour=%s)",
+                        entry["label"], run_key, target_hour,
+                    )
+                    _last_run_keys[entry["key"]] = run_key
+                    # Mirror into legacy var for the "all hosts" entry
+                    if entry["key"] == "__all__":
+                        _last_run_key = run_key
+                    try:
+                        generate_report(host_address=entry["host"])
+                    except Exception as e:
+                        log.error("Scheduled report generation failed for %s: %s", entry["label"], e)
 
             _scheduler_stop.wait(30)
         except Exception as e:
@@ -762,9 +852,12 @@ def start_scheduler():
     # Only start a new thread if one isn't already running
     if _scheduler_thread and _scheduler_thread.is_alive():
         return
-    # Set last_run_key to today so we don't immediately trigger on startup
+    # Seed last_run for all known schedules so we don't immediately trigger on startup
+    today = tz_now().strftime("%Y-%m-%d")
     if _last_run_key is None:
-        _last_run_key = tz_now().strftime("%Y-%m-%d")
+        _last_run_key = today
+    for entry in get_active_schedules():
+        _last_run_keys.setdefault(entry["key"], today)
     _scheduler_stop.clear()
     _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
     _scheduler_thread.start()

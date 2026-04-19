@@ -31,7 +31,7 @@ from app.zfs_commands import (
 from app.notifications import (
     load_config as load_notify_config,
     save_config as save_notify_config,
-    send_notification, test_telegram, test_gotify, test_matrix,
+    send_notification, test_telegram, test_gotify, test_matrix, test_email,
 )
 from app.ai_reports import (
     load_config_masked as load_ai_config,
@@ -43,6 +43,7 @@ from app.ai_reports import (
     chat as ai_chat,
     start_scheduler as start_ai_scheduler,
     list_ollama_models,
+    get_active_schedules,
 )
 
 log = logging.getLogger(__name__)
@@ -750,14 +751,41 @@ def api_snapshot_check():
 # API: Notifications
 # ---------------------------------------------------------------------------
 
+def _mask_secret(val):
+    if not val or len(val) < 6:
+        return val
+    return val[:2] + "..." + val[-2:]
+
+
 @app.route("/api/notifications/config", methods=["GET"])
 def api_notify_config():
-    return jsonify(load_notify_config())
+    cfg = load_notify_config()
+    # Mask sensitive fields for the frontend
+    if cfg.get("email", {}).get("smtp_password"):
+        cfg["email"]["smtp_password"] = _mask_secret(cfg["email"]["smtp_password"])
+    if cfg.get("telegram", {}).get("bot_token"):
+        cfg["telegram"]["bot_token"] = _mask_secret(cfg["telegram"]["bot_token"])
+    if cfg.get("gotify", {}).get("token"):
+        cfg["gotify"]["token"] = _mask_secret(cfg["gotify"]["token"])
+    if cfg.get("matrix", {}).get("access_token"):
+        cfg["matrix"]["access_token"] = _mask_secret(cfg["matrix"]["access_token"])
+    return jsonify(cfg)
 
 
 @app.route("/api/notifications/config", methods=["POST"])
 def api_save_notify_config():
-    data = request.json
+    data = request.json or {}
+    # Preserve masked secrets (when UI sends back "xx...yy", keep existing value)
+    existing = load_notify_config()
+    for section, field in (
+        ("email", "smtp_password"),
+        ("telegram", "bot_token"),
+        ("gotify", "token"),
+        ("matrix", "access_token"),
+    ):
+        new_val = (data.get(section) or {}).get(field, "")
+        if new_val and "..." in new_val and len(new_val) < 32:
+            data.setdefault(section, {})[field] = existing.get(section, {}).get(field, "")
     save_notify_config(data)
     return jsonify({"success": True, "message": "Configuration saved"})
 
@@ -779,11 +807,26 @@ def api_test_gotify():
 @app.route("/api/notifications/test/matrix", methods=["POST"])
 def api_test_matrix():
     data = request.json
+    # Allow masked token: resolve to stored value
+    token = data.get("access_token", "")
+    if token and "..." in token and len(token) < 32:
+        token = load_notify_config().get("matrix", {}).get("access_token", "")
     result = test_matrix(
         data.get("homeserver", ""),
-        data.get("access_token", ""),
+        token,
         data.get("room_id", ""),
     )
+    return jsonify(result)
+
+
+@app.route("/api/notifications/test/email", methods=["POST"])
+def api_test_email():
+    data = request.json or {}
+    # Allow masked password: resolve to stored value
+    pw = data.get("smtp_password", "")
+    if pw and "..." in pw and len(pw) < 32:
+        data["smtp_password"] = load_notify_config().get("email", {}).get("smtp_password", "")
+    result = test_email(data)
     return jsonify(result)
 
 
@@ -841,6 +884,13 @@ def api_ai_generate_report():
 @app.route("/api/ai/reports", methods=["GET"])
 def api_ai_reports():
     return jsonify(load_ai_reports())
+
+
+@app.route("/api/ai/schedules", methods=["GET"])
+@login_required
+def api_ai_schedules():
+    """Return active AI report schedules with next-run times (for Health page)."""
+    return jsonify({"schedules": get_active_schedules()})
 
 
 @app.route("/api/ai/raw-data")
