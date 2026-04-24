@@ -370,6 +370,76 @@ def create_target_dataset(host: Dict[str, Any], dataset: str) -> Dict[str, Any]:
     }
 
 
+def list_tagged_datasets(host: Dict[str, Any], tag: str = "bashclub:zsync") -> Dict[str, Any]:
+    """List all filesystems + volumes on a host with their tag value.
+
+    Returns ``{datasets: [{name, type, tagged, value}], tag: tag}``.
+    ``value`` is ``""`` for unset (ZFS output ``-``).
+    """
+    # Only allow a safe tag format to avoid shell-escape surprises
+    if not re.match(r"^[A-Za-z0-9_.:-]+$", tag):
+        return {"datasets": [], "tag": tag, "error": "invalid tag format"}
+    cmd = f"zfs list -H -o name,type,{shlex.quote(tag)} -t filesystem,volume"
+    r = run_command(host, cmd, timeout=20)
+    if not r["success"]:
+        return {"datasets": [], "tag": tag, "error": (r["stderr"] or r["stdout"] or "").strip()}
+    datasets = []
+    for line in r["stdout"].splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name, dtype, value = parts[0], parts[1], parts[2]
+        tagged = value not in ("", "-")
+        datasets.append({
+            "name": name,
+            "type": dtype,
+            "tagged": tagged,
+            "value": "" if value == "-" else value,
+        })
+    return {"datasets": datasets, "tag": tag}
+
+
+def set_dataset_tags(host: Dict[str, Any], tag: str,
+                     enable: List[str], disable: List[str],
+                     value: str = "1") -> Dict[str, Any]:
+    """Apply ``zfs set <tag>=<value>`` / ``zfs inherit <tag>`` to a list of datasets.
+
+    The call is idempotent — running it twice is safe. Operates on filesystems
+    and volumes only; invalid names are rejected client-side by the caller.
+    """
+    if not re.match(r"^[A-Za-z0-9_.:-]+$", tag):
+        return {"success": False, "error": "invalid tag format"}
+    if not re.match(r"^[A-Za-z0-9_./:@-]*$", value or ""):
+        return {"success": False, "error": "invalid value format"}
+
+    # Validate dataset names
+    name_re = re.compile(r"^[A-Za-z0-9._:/-]+$")
+    for lst in (enable, disable):
+        for n in lst:
+            if not name_re.match(n or ""):
+                return {"success": False, "error": f"invalid dataset name: {n}"}
+
+    results: List[Dict[str, Any]] = []
+    all_ok = True
+    for n in enable:
+        cmd = f"zfs set {shlex.quote(tag)}={shlex.quote(value)} {shlex.quote(n)}"
+        r = run_command(host, cmd, timeout=15)
+        ok = r.get("success", False)
+        if not ok:
+            all_ok = False
+        results.append({"dataset": n, "op": "set", "success": ok,
+                        "stderr": r.get("stderr", "").strip()})
+    for n in disable:
+        cmd = f"zfs inherit {shlex.quote(tag)} {shlex.quote(n)}"
+        r = run_command(host, cmd, timeout=15)
+        ok = r.get("success", False)
+        if not ok:
+            all_ok = False
+        results.append({"dataset": n, "op": "inherit", "success": ok,
+                        "stderr": r.get("stderr", "").strip()})
+    return {"success": all_ok, "results": results}
+
+
 def tail_log(host: Dict[str, Any], lines: int = 200) -> Dict[str, Any]:
     lines = max(1, min(int(lines), 5000))
     r = run_command(host, f"tail -n {lines} {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=15)

@@ -2648,12 +2648,9 @@ async function viewAudit() {
 async function viewReplication() {
     setContent(loading());
     let hosts;
-    try {
-        hosts = await API.get("/api/hosts");
-    } catch (e) {
-        setContent(h("p", { className: "muted" }, e.message || "Failed to load hosts"));
-        return;
-    }
+    try { hosts = await API.get("/api/hosts"); }
+    catch (e) { setContent(h("p", { className: "muted" }, e.message || "Failed to load hosts")); return; }
+
     if (!hosts || hosts.length < 2) {
         setContent(h("div", { className: "card" },
             h("div", { className: "card-body" }, t("repl_need_two_hosts"))));
@@ -2666,12 +2663,13 @@ async function viewReplication() {
         h("p", {}, t("repl_subtitle")),
     ]));
 
-    // -- Host pair selector -------------------------------------------------
+    // -- Step 1: Source + Target host selection ----------------------------
     const selCard = h("div", { className: "card" });
-    selCard.appendChild(h("div", { className: "card-header" }, t("repl_pair_title")));
+    selCard.appendChild(h("div", { className: "card-header" },
+        "1. " + t("repl_pair_title")));
     const selBody = h("div", { className: "card-body" });
 
-    const hostOptions = (selectedAddr) => {
+    const mkOptions = (selectedAddr) => {
         const opts = [h("option", { value: "" }, "— " + t("repl_choose") + " —")];
         hosts.forEach(hst => {
             const opt = h("option", { value: hst.address }, (hst.name || hst.address) + " (" + hst.address + ")");
@@ -2681,154 +2679,261 @@ async function viewReplication() {
         return opts;
     };
 
-    // Default: target = currentHost (if any), source = first other host
-    const defTarget = currentHost || hosts[0].address;
-    const defSource = hosts.find(x => x.address !== defTarget)?.address || "";
-
-    const targetSel = h("select", { className: "form-input", style: "width:100%" }, hostOptions(defTarget));
-    const sourceSel = h("select", { className: "form-input", style: "width:100%" }, hostOptions(defSource));
+    const sourceSel = h("select", { className: "form-input", style: "width:100%" }, mkOptions(""));
+    const targetSel = h("select", { className: "form-input", style: "width:100%" }, mkOptions(""));
 
     const selGrid = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" }, [
-        h("div", {}, [
-            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_target_host")),
-            targetSel,
-            h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_target_host_hint")),
-        ]),
         h("div", {}, [
             h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_source_host")),
             sourceSel,
             h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_source_host_hint")),
+        ]),
+        h("div", {}, [
+            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_target_host")),
+            targetSel,
+            h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_target_host_hint")),
         ]),
     ]);
     selBody.appendChild(selGrid);
     selCard.appendChild(selBody);
     container.appendChild(selCard);
 
-    // -- Dynamic body (install/config/log) ----------------------------------
-    const dynMount = h("div");
-    container.appendChild(dynMount);
+    // Mount points for dynamic sections (rendered after host pair is chosen)
+    const setupMount    = h("div");
+    const datasetsMount = h("div");
+    const configMount   = h("div");
+    const logMount      = h("div");
+    container.appendChild(setupMount);
+    container.appendChild(datasetsMount);
+    container.appendChild(configMount);
+    container.appendChild(logMount);
 
     setContent(container);
 
-    targetSel.onchange = () => renderFor(targetSel.value, sourceSel.value);
-    sourceSel.onchange = () => renderFor(targetSel.value, sourceSel.value);
+    sourceSel.onchange = () => renderAll();
+    targetSel.onchange = () => renderAll();
 
-    await renderFor(defTarget, defSource);
+    async function renderAll() {
+        setupMount.innerHTML = "";
+        datasetsMount.innerHTML = "";
+        configMount.innerHTML = "";
+        logMount.innerHTML = "";
 
-    // ----------------------------------------------------------------------
-    async function renderFor(targetAddr, sourceAddr) {
-        dynMount.innerHTML = "";
-        if (!targetAddr) return;
-        const tgt = hosts.find(x => x.address === targetAddr);
-        const src = hosts.find(x => x.address === sourceAddr);
-        const qs = "?host=" + encodeURIComponent(targetAddr);
-        const host = h("div");
-
-        let status;
-        host.appendChild(loading());
-        dynMount.appendChild(host);
-        try {
-            status = await API.get("/api/replication/status" + qs);
-        } catch (e) {
-            host.innerHTML = `<p class="muted">${escapeHtml(e.message || "Failed")}</p>`;
-            return;
-        }
-        host.innerHTML = "";
-
-        // Install status
-        const statusCard = h("div", { className: "card", style: "margin-top:16px" });
-        statusCard.appendChild(h("div", { className: "card-header" }, t("repl_install_status") + " — " + (tgt.name || tgt.address)));
-        const statusBody = h("div", { className: "card-body" });
-        if (status.installed) {
-            statusBody.appendChild(h("p", {}, [
-                h("span", { className: "badge badge-success" }, "\u2713 " + t("repl_installed")),
-                status.version ? h("span", { style: "margin-left:10px;color:var(--text-secondary);font-size:13px" }, status.version) : null,
-            ].filter(Boolean)));
-        } else {
-            statusBody.appendChild(h("p", {}, h("span", { className: "badge badge-warning" }, t("repl_not_installed"))));
-            statusBody.appendChild(h("p", { style: "margin-top:10px;font-size:13px;color:var(--text-secondary)" }, t("repl_install_hint")));
-            const installBtn = h("button", { className: "btn btn-primary", style: "margin-top:10px" }, t("repl_install_btn"));
-            installBtn.onclick = async () => {
-                if (!confirm(t("repl_install_confirm"))) return;
-                installBtn.disabled = true; installBtn.textContent = t("repl_installing");
-                try {
-                    const r = await API.post("/api/replication/install" + qs, {});
-                    if (r.success) { toast(t("repl_install_ok"), "success"); renderFor(targetAddr, sourceAddr); }
-                    else {
-                        openModal(t("repl_install_failed"), `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
-                        installBtn.disabled = false; installBtn.textContent = t("repl_install_btn");
-                    }
-                } catch (e) { toast(e.message || "Install failed", "error"); installBtn.disabled = false; installBtn.textContent = t("repl_install_btn"); }
-            };
-            statusBody.appendChild(installBtn);
-        }
-        statusCard.appendChild(statusBody);
-        host.appendChild(statusCard);
-
-        if (!status.installed) return;
-        if (!src) {
-            host.appendChild(h("div", { className: "card", style: "margin-top:16px" },
-                h("div", { className: "card-body" }, t("repl_choose_source"))));
-            return;
-        }
+        const src = hosts.find(x => x.address === sourceSel.value);
+        const tgt = hosts.find(x => x.address === targetSel.value);
+        if (!src || !tgt) return;
         if (src.address === tgt.address) {
-            host.appendChild(h("div", { className: "card", style: "margin-top:16px" },
+            setupMount.appendChild(h("div", { className: "card", style: "margin-top:16px" },
                 h("div", { className: "card-body" }, t("repl_same_host"))));
             return;
         }
 
-        // -- SSH Bootstrap card --------------------------------------------
-        const sshCard = h("div", { className: "card", style: "margin-top:16px" });
-        sshCard.appendChild(h("div", { className: "card-header" }, t("repl_ssh_bootstrap_title")));
-        const sshBody = h("div", { className: "card-body" });
-        sshBody.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin-bottom:10px" },
-            t("repl_ssh_bootstrap_desc").replace("{target}", tgt.name || tgt.address).replace("{source}", src.name || src.address)));
-        const sshBtn = h("button", { className: "btn btn-primary" }, t("repl_ssh_bootstrap_btn"));
-        const sshResult = h("div", { style: "margin-top:10px;font-size:12px" });
-        sshBtn.onclick = async () => {
-            sshBtn.disabled = true; sshBtn.textContent = t("repl_ssh_bootstrap_running");
-            sshResult.innerHTML = "";
+        const qs = "?host=" + encodeURIComponent(tgt.address);
+
+        // Load target status
+        setupMount.appendChild(loading());
+        let status;
+        try { status = await API.get("/api/replication/status" + qs); }
+        catch (e) { setupMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Failed")}</p>`; return; }
+        setupMount.innerHTML = "";
+
+        // -- Step 2: Setup (install + SSH bootstrap) --------------------
+        const setupCard = h("div", { className: "card", style: "margin-top:16px" });
+        setupCard.appendChild(h("div", { className: "card-header" },
+            "2. " + t("repl_setup_title")));
+        const setupBody = h("div", { className: "card-body" });
+        setupCard.appendChild(setupBody);
+        setupMount.appendChild(setupCard);
+
+        // Status badges
+        const badgeRow = h("div", { style: "display:flex;gap:12px;margin-bottom:10px;flex-wrap:wrap" });
+        const zsyncBadge = h("span", { className: "badge " + (status.installed ? "badge-success" : "badge-warning") },
+            (status.installed ? "\u2713 " : "") + t("repl_setup_zsync") + ": " + (status.installed ? t("repl_installed") : t("repl_not_installed")));
+        badgeRow.appendChild(zsyncBadge);
+        const sshBadgeWrap = h("span", {}); // filled after probe
+        badgeRow.appendChild(sshBadgeWrap);
+        setupBody.appendChild(badgeRow);
+
+        setupBody.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin-bottom:10px" },
+            t("repl_setup_desc").replace("{source}", src.name || src.address).replace("{target}", tgt.name || tgt.address)));
+
+        const setupBtn = h("button", { className: "btn btn-primary" }, t("repl_setup_btn"));
+        const setupResult = h("div", { style: "margin-top:10px;font-size:12px" });
+        setupBody.appendChild(setupBtn);
+        setupBody.appendChild(setupResult);
+
+        setupBtn.onclick = async () => {
+            if (!confirm(t("repl_setup_confirm"))) return;
+            setupBtn.disabled = true;
+            setupResult.innerHTML = "";
+            const steps = h("div");
+            setupResult.appendChild(steps);
+            const addStep = (label, state) => {
+                steps.appendChild(h("div", { style: "margin:3px 0" }, [
+                    h("span", { style: "display:inline-block;width:20px;text-align:center;color:" + (state === "ok" ? "var(--success)" : state === "fail" ? "var(--danger)" : "var(--text-secondary)") }, state === "ok" ? "\u2713" : state === "fail" ? "\u2717" : "\u22ef"),
+                    h("span", {}, " " + label),
+                ]));
+            };
+
+            // Step A: install if needed
+            if (!status.installed) {
+                setupBtn.textContent = t("repl_installing");
+                addStep(t("repl_setup_step_install"), "pending");
+                try {
+                    const r = await API.post("/api/replication/install" + qs, {});
+                    steps.lastChild.remove();
+                    addStep(t("repl_setup_step_install"), r.success ? "ok" : "fail");
+                    if (!r.success) {
+                        openModal(t("repl_install_failed"), `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
+                        setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn");
+                        return;
+                    }
+                    status.installed = true;
+                    zsyncBadge.className = "badge badge-success";
+                    zsyncBadge.textContent = "\u2713 " + t("repl_setup_zsync") + ": " + t("repl_installed");
+                } catch (e) {
+                    steps.lastChild.remove();
+                    addStep(t("repl_setup_step_install") + " — " + e.message, "fail");
+                    setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn");
+                    return;
+                }
+            }
+
+            // Step B: SSH bootstrap target → source
+            setupBtn.textContent = t("repl_setup_step_ssh");
+            addStep(t("repl_setup_step_ssh"), "pending");
             try {
                 const r = await API.post("/api/replication/bootstrap-ssh", { target: tgt.address, source: src.address });
-                const rows = [
-                    [t("repl_ssh_step_key"),    r.target_pubkey ? "\u2713" : "\u2717", r.key_generated ? t("repl_ssh_generated") : t("repl_ssh_existing")],
-                    [t("repl_ssh_step_kh"),     r.known_hosts_updated ? "\u2713" : "\u2717", ""],
-                    [t("repl_ssh_step_ak"),     r.authorized_keys_updated ? "\u2713" : "\u2717", ""],
-                    [t("repl_ssh_step_probe"),  r.probe_ok ? "\u2713" : "\u2717", r.probe_output ? (r.probe_output.slice(0, 200)) : ""],
-                ];
-                const tbl = h("table", { className: "table", style: "font-size:12px" });
-                rows.forEach(row => {
-                    tbl.appendChild(h("tr", {}, row.map((c, i) => h("td", { style: i === 1 ? "width:30px;text-align:center;font-weight:bold;color:" + (c === "\u2713" ? "var(--success)" : "var(--danger)") : "" }, c))));
-                });
-                sshResult.appendChild(tbl);
-                if (r.success) toast(t("repl_ssh_bootstrap_ok"), "success");
-                else toast(r.error || t("repl_ssh_bootstrap_failed"), "error");
+                steps.lastChild.remove();
+                addStep(t("repl_ssh_step_key") + (r.key_generated ? " (" + t("repl_ssh_generated") + ")" : " (" + t("repl_ssh_existing") + ")"), r.target_pubkey ? "ok" : "fail");
+                addStep(t("repl_ssh_step_kh"), r.known_hosts_updated ? "ok" : "fail");
+                addStep(t("repl_ssh_step_ak"), r.authorized_keys_updated ? "ok" : "fail");
+                addStep(t("repl_ssh_step_probe"), r.probe_ok ? "ok" : "fail");
+                if (r.probe_output && !r.probe_ok) {
+                    setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
+                }
+                sshBadgeWrap.innerHTML = "";
+                sshBadgeWrap.appendChild(h("span", { className: "badge " + (r.success ? "badge-success" : "badge-warning") },
+                    (r.success ? "\u2713 " : "") + "SSH: " + (r.success ? t("repl_ssh_ok") : t("repl_ssh_not_ok"))));
+                if (r.success) {
+                    toast(t("repl_setup_ok"), "success");
+                    // re-render to unlock the following sections (status refresh)
+                    renderAll();
+                } else {
+                    toast(r.error || t("repl_ssh_bootstrap_failed"), "error");
+                }
             } catch (e) { toast(e.message, "error"); }
-            finally { sshBtn.disabled = false; sshBtn.textContent = t("repl_ssh_bootstrap_btn"); }
+            finally {
+                setupBtn.disabled = false;
+                setupBtn.textContent = t("repl_setup_btn");
+            }
         };
-        sshBody.appendChild(sshBtn);
-        sshBody.appendChild(sshResult);
-        sshCard.appendChild(sshBody);
-        host.appendChild(sshCard);
 
-        // -- Config editor -------------------------------------------------
+        // Bail here if not installed — user must click Setup first
+        if (!status.installed) return;
+
+        // -- Step 3: Datasets to replicate (from SOURCE) ------------------
+        const dsCard = h("div", { className: "card", style: "margin-top:16px" });
+        dsCard.appendChild(h("div", { className: "card-header" },
+            "3. " + t("repl_datasets_title")));
+        const dsBody = h("div", { className: "card-body" });
+        dsCard.appendChild(dsBody);
+        datasetsMount.appendChild(dsCard);
+
+        dsBody.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin-bottom:8px" },
+            t("repl_datasets_desc").replace("{source}", src.name || src.address)));
+
+        const tagInputRow = h("div", { style: "display:flex;gap:8px;align-items:center;margin-bottom:10px" }, [
+            h("label", { style: "font-size:12px;color:var(--text-secondary)" }, t("repl_f_tag") + ":"),
+            h("input", { type: "text", className: "form-input", id: "repl-tag-input", value: (status.config && status.config.tag) || "bashclub:zsync", style: "max-width:220px" }),
+            h("button", { className: "btn btn-sm" }, t("refresh")),
+        ]);
+        const tagInput = tagInputRow.querySelector("input");
+        const tagRefreshBtn = tagInputRow.querySelector("button");
+        dsBody.appendChild(tagInputRow);
+
+        const dsListWrap = h("div", { style: "max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:8px;background:var(--bg)" }, t("loading"));
+        dsBody.appendChild(dsListWrap);
+
+        const dsActionRow = h("div", { style: "margin-top:10px;display:flex;gap:8px;flex-wrap:wrap" });
+        const dsSaveBtn = h("button", { className: "btn btn-primary" }, t("repl_datasets_apply"));
+        dsActionRow.appendChild(dsSaveBtn);
+        dsBody.appendChild(dsActionRow);
+
+        // Track initial state so we only send diffs on Apply
+        let initialTagged = new Set();
+        let currentChecks = new Map(); // name -> checkbox
+
+        async function loadDatasets() {
+            const srcQs = "?host=" + encodeURIComponent(src.address) + "&tag=" + encodeURIComponent(tagInput.value.trim() || "bashclub:zsync");
+            dsListWrap.textContent = t("loading");
+            try {
+                const r = await API.get("/api/replication/tagged-datasets" + srcQs);
+                dsListWrap.innerHTML = "";
+                currentChecks.clear();
+                initialTagged = new Set();
+                if (!r.datasets || !r.datasets.length) {
+                    dsListWrap.appendChild(h("p", { className: "muted" }, t("repl_datasets_none")));
+                    return;
+                }
+                r.datasets.forEach(d => {
+                    if (d.tagged) initialTagged.add(d.name);
+                    const row = h("label", { style: "display:flex;gap:8px;padding:4px 6px;align-items:center;cursor:pointer;border-radius:3px" });
+                    const cb = h("input", { type: "checkbox" });
+                    if (d.tagged) cb.checked = true;
+                    currentChecks.set(d.name, cb);
+                    row.appendChild(cb);
+                    row.appendChild(h("span", { style: "font-family:monospace;font-size:13px;flex:1" }, d.name));
+                    row.appendChild(h("span", { style: "font-size:11px;color:var(--text-secondary)" }, d.type));
+                    dsListWrap.appendChild(row);
+                });
+            } catch (e) { dsListWrap.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`; }
+        }
+        tagRefreshBtn.onclick = loadDatasets;
+        loadDatasets();
+
+        dsSaveBtn.onclick = async () => {
+            const tag = tagInput.value.trim() || "bashclub:zsync";
+            const enable = [], disable = [];
+            currentChecks.forEach((cb, name) => {
+                if (cb.checked && !initialTagged.has(name)) enable.push(name);
+                if (!cb.checked && initialTagged.has(name)) disable.push(name);
+            });
+            if (!enable.length && !disable.length) { toast(t("repl_datasets_nochange"), "info"); return; }
+            dsSaveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/set-tags", {
+                    host: src.address, tag, enable, disable,
+                });
+                if (r.success) {
+                    toast(t("repl_datasets_applied").replace("{n}", String(enable.length + disable.length)), "success");
+                    loadDatasets();
+                } else {
+                    const failed = (r.results || []).filter(x => !x.success).map(x => x.dataset + ": " + (x.stderr || "?"));
+                    openModal(t("repl_datasets_failed"), `<pre class="output">${escapeHtml(failed.join("\n"))}</pre>`);
+                }
+            } catch (e) { toast(e.message, "error"); }
+            finally { dsSaveBtn.disabled = false; }
+        };
+
+        // -- Step 4: Config -----------------------------------------------
         const cfgCard = h("div", { className: "card", style: "margin-top:16px" });
-        cfgCard.appendChild(h("div", { className: "card-header" }, t("repl_config_title")));
+        cfgCard.appendChild(h("div", { className: "card-header" },
+            "4. " + t("repl_config_title")));
         const cfgBody = h("div", { className: "card-body" });
         cfgCard.appendChild(cfgBody);
-        host.appendChild(cfgCard);
+        configMount.appendChild(cfgCard);
 
         const v = status.config || {};
-        // Derived defaults: source computed from source host entry
         const defSourceStr = (src.user || "root") + "@" + src.address;
         const defSourcePort = String(src.port || 22);
 
-        // Target-dataset dropdown: load filesystems from target
+        // Target dataset dropdown
         let datasets = [];
         try {
             const ds = await API.get("/api/datasets" + qs);
             datasets = (ds.filesystems || ds || []).map(d => d.name || d).filter(n => typeof n === "string");
-        } catch (_) { /* ignore */ }
+        } catch (_) {}
 
         const tgtSelect = h("select", { className: "form-input", style: "width:100%" }, [
             h("option", { value: "" }, "— " + t("repl_choose") + " —"),
@@ -2855,7 +2960,6 @@ async function viewReplication() {
                 const r = await API.post("/api/replication/create-target" + qs, { dataset: name });
                 if (r.success) {
                     toast(r.created ? t("repl_create_target_created") : t("repl_create_target_existed"), "success");
-                    // Add to dropdown + select
                     const opt = h("option", { value: name }, name);
                     opt.selected = true;
                     tgtSelect.insertBefore(opt, tgtSelect.querySelector("option[value='__new__']"));
@@ -2869,28 +2973,25 @@ async function viewReplication() {
             finally { tgtCreateBtn.disabled = false; }
         };
 
-        const inputs = {};
+        const cfgInputs = {};
         const form = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" });
-        // Target row (special: dropdown)
+
         const tgtCell = h("div");
         tgtCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_target")));
         tgtCell.appendChild(tgtSelect);
-        const tgtRow2 = h("div", { style: "white-space:nowrap" }, [tgtNewInput, tgtCreateBtn]);
-        tgtCell.appendChild(tgtRow2);
+        tgtCell.appendChild(h("div", { style: "white-space:nowrap" }, [tgtNewInput, tgtCreateBtn]));
         tgtCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_target")));
         form.appendChild(tgtCell);
-        inputs.target = { get: () => tgtSelect.value === "__new__" ? tgtNewInput.value.trim() : tgtSelect.value };
+        cfgInputs.target = { get: () => tgtSelect.value === "__new__" ? tgtNewInput.value.trim() : tgtSelect.value };
 
-        // Source (readonly, computed)
         const srcCell = h("div");
         srcCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_source")));
         const srcInput = h("input", { type: "text", className: "form-input", value: defSourceStr, readonly: true, style: "background:var(--bg)" });
         srcCell.appendChild(srcInput);
         srcCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_source_auto")));
         form.appendChild(srcCell);
-        inputs.source = { get: () => srcInput.value.trim() };
+        cfgInputs.source = { get: () => srcInput.value.trim() };
 
-        // Remaining editable fields
         const simple = [
             { key: "sshport",                      label: "repl_f_sshport",                      hint: "repl_h_sshport",                      placeholder: "22", def: defSourcePort },
             { key: "tag",                          label: "repl_f_tag",                          hint: "repl_h_tag",                          placeholder: "bashclub:zsync", def: "bashclub:zsync" },
@@ -2904,18 +3005,18 @@ async function viewReplication() {
             const cell = h("div");
             cell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t(f.label)));
             const input = h("input", { type: "text", className: "form-input", placeholder: f.placeholder, value: v[f.key] ?? f.def ?? "" });
-            inputs[f.key] = { get: () => input.value.trim() };
+            cfgInputs[f.key] = { get: () => input.value.trim() };
             cell.appendChild(input);
             if (f.hint) cell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t(f.hint)));
             form.appendChild(cell);
         });
         cfgBody.appendChild(form);
 
-        const btnRow = h("div", { style: "margin-top:15px;display:flex;gap:8px;flex-wrap:wrap" });
+        const cfgBtnRow = h("div", { style: "margin-top:15px;display:flex;gap:8px;flex-wrap:wrap" });
         const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
         saveBtn.onclick = async () => {
             const values = {};
-            Object.keys(inputs).forEach(k => { values[k] = inputs[k].get(); });
+            Object.keys(cfgInputs).forEach(k => { values[k] = cfgInputs[k].get(); });
             if (!values.target) { toast(t("repl_target_required"), "error"); return; }
             if (!values.source) { toast(t("repl_source_required"), "error"); return; }
             saveBtn.disabled = true;
@@ -2926,7 +3027,7 @@ async function viewReplication() {
             } catch (e) { toast(e.message, "error"); }
             finally { saveBtn.disabled = false; }
         };
-        btnRow.appendChild(saveBtn);
+        cfgBtnRow.appendChild(saveBtn);
 
         const runBtn = h("button", { className: "btn btn-warning" }, t("repl_run_now"));
         runBtn.onclick = async () => {
@@ -2940,19 +3041,19 @@ async function viewReplication() {
             } catch (e) { toast(e.message, "error"); }
             finally { runBtn.disabled = false; runBtn.textContent = t("repl_run_now"); }
         };
-        btnRow.appendChild(runBtn);
-        cfgBody.appendChild(btnRow);
+        cfgBtnRow.appendChild(runBtn);
+        cfgBody.appendChild(cfgBtnRow);
 
-        // -- Log viewer ----------------------------------------------------
+        // -- Step 5: Log --------------------------------------------------
         const logCard = h("div", { className: "card", style: "margin-top:16px" });
         const refreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
-        const logHeader = h("div", { className: "card-header" }, [h("span", {}, t("repl_log_title")), refreshBtn]);
+        const logHeader = h("div", { className: "card-header" }, [h("span", {}, "5. " + t("repl_log_title")), refreshBtn]);
         logCard.appendChild(logHeader);
         const logBody = h("div", { className: "card-body" });
         const logPre = h("pre", { style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
         logBody.appendChild(logPre);
         logCard.appendChild(logBody);
-        host.appendChild(logCard);
+        logMount.appendChild(logCard);
 
         async function refreshLog() {
             try {

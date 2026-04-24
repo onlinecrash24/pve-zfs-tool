@@ -1306,6 +1306,41 @@ def api_replication_create_target():
     return jsonify(result)
 
 
+@app.route("/api/replication/tagged-datasets")
+@login_required
+def api_replication_tagged_datasets():
+    from app.replication import list_tagged_datasets
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    tag = request.args.get("tag") or "bashclub:zsync"
+    return jsonify(list_tagged_datasets(host, tag))
+
+
+@app.route("/api/replication/set-tags", methods=["POST"])
+@login_required
+def api_replication_set_tags():
+    from app.replication import set_dataset_tags
+    data = request.get_json(silent=True) or {}
+    host_addr = (data.get("host") or "").strip()
+    if not host_addr:
+        return jsonify({"error": "host required"}), 400
+    host = _find_host(host_addr)
+    if not host:
+        return jsonify({"error": "host not found"}), 404
+    tag = (data.get("tag") or "bashclub:zsync").strip()
+    value = (data.get("value") or "1").strip()
+    enable = data.get("enable") or []
+    disable = data.get("disable") or []
+    if not isinstance(enable, list) or not isinstance(disable, list):
+        return jsonify({"error": "enable and disable must be arrays"}), 400
+    result = set_dataset_tags(host, tag, enable, disable, value)
+    audit_log("replication.set_tags", target=host_addr, host=host_addr,
+              success=result.get("success", False),
+              details={"tag": tag, "enable": enable, "disable": disable})
+    return jsonify(result)
+
+
 @app.route("/api/replication/log")
 @login_required
 def api_replication_log():
