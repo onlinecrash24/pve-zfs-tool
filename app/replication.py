@@ -1,0 +1,261 @@
+"""bashclub-zsync replication integration.
+
+Manages the bashclub-zsync ZFS replication tool (pull-based, cron-driven) on
+remote hosts via SSH. Upstream: https://gitlab.bashclub.org/bashclub/zsync/
+
+Scope (Phase 1):
+  * Detect install status + version
+  * Install via APT (bashclub repo)
+  * Read / write /etc/bashclub/zsync.conf (shell-style key=value)
+  * Run manually and tail log
+
+Dataset-tagging, cron-scheduling, cross-host SSH-bootstrap and monitoring are
+intentionally out-of-scope for Phase 1.
+"""
+
+from __future__ import annotations
+
+import re
+import shlex
+from typing import Any, Dict, List, Optional
+
+from app.ssh_manager import run_command
+
+CONFIG_PATH = "/etc/bashclub/zsync.conf"
+LOG_PATH = "/var/log/bashclub-zsync/zsync.log"
+BINARY_NAME = "bashclub-zsync"
+
+# Keys we surface in the UI — everything else is preserved verbatim on write.
+KNOWN_KEYS = [
+    "target",
+    "source",
+    "sshport",
+    "tag",
+    "snapshot_filter",
+    "min_keep",
+    "zfs_auto_snapshot_engine",
+    "prefix",
+    "suffix",
+    "checkzfs_sourcepools",
+    "checkzfs_prefix",
+    "checkzfs_filter",
+    "checkzfs_threshold_warning",
+    "checkzfs_threshold_critical",
+    "checkzfs_output",
+]
+
+# Shell key=value with optional quoting. Allows spaces inside quotes.
+_KV_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$')
+
+
+# ---------------------------------------------------------------------------
+# Config parse / serialize
+# ---------------------------------------------------------------------------
+
+def _parse_config(text: str) -> Dict[str, Any]:
+    """Parse shell-style key=value lines. Preserves order and comments."""
+    values: Dict[str, str] = {}
+    lines: List[Dict[str, Any]] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            lines.append({"type": "raw", "text": raw})
+            continue
+        m = _KV_RE.match(raw)
+        if not m:
+            lines.append({"type": "raw", "text": raw})
+            continue
+        key, val = m.group(1), m.group(2)
+        # Strip one layer of matching quotes
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        values[key] = val
+        lines.append({"type": "kv", "key": key, "value": val})
+    return {"values": values, "lines": lines}
+
+
+def _serialize_config(values: Dict[str, str], existing_lines: Optional[List[Dict[str, Any]]] = None) -> str:
+    """Serialize back to text. If existing_lines is given, keep comments/order
+    and replace values in place; unknown new keys are appended at the end."""
+    out: List[str] = []
+    written = set()
+    if existing_lines:
+        for ln in existing_lines:
+            if ln["type"] == "raw":
+                out.append(ln["text"])
+            else:
+                key = ln["key"]
+                if key in values:
+                    out.append(f'{key}="{_escape(values[key])}"')
+                    written.add(key)
+                else:
+                    # key removed
+                    pass
+    # Append new keys
+    for k, v in values.items():
+        if k in written:
+            continue
+        out.append(f'{k}="{_escape(v)}"')
+    # Trailing newline
+    return "\n".join(out) + "\n"
+
+
+def _escape(s: str) -> str:
+    """Escape a value for double-quoted shell string."""
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+# ---------------------------------------------------------------------------
+# Status / install
+# ---------------------------------------------------------------------------
+
+def get_status(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Return install + config + last-run status for a host."""
+    out: Dict[str, Any] = {
+        "installed": False,
+        "version": None,
+        "config_exists": False,
+        "config": None,
+        "log_present": False,
+        "last_log_lines": [],
+    }
+
+    # Installed?
+    r = run_command(host, f"command -v {BINARY_NAME} 2>/dev/null && {BINARY_NAME} -v 2>/dev/null | head -n 1", timeout=10)
+    if r["success"] and r["stdout"].strip():
+        lines = [ln for ln in r["stdout"].splitlines() if ln.strip()]
+        out["installed"] = True
+        # Second line (if any) is the version banner; first is the path.
+        if len(lines) >= 2:
+            out["version"] = lines[1].strip()
+        elif len(lines) == 1 and "/" not in lines[0]:
+            out["version"] = lines[0].strip()
+
+    # Config
+    r = run_command(host, f"cat {shlex.quote(CONFIG_PATH)} 2>/dev/null", timeout=10)
+    if r["success"] and r["stdout"]:
+        out["config_exists"] = True
+        parsed = _parse_config(r["stdout"])
+        out["config"] = parsed["values"]
+
+    # Log tail (last 5 lines for overview)
+    r = run_command(host, f"tail -n 5 {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=10)
+    if r["success"] and r["stdout"]:
+        out["log_present"] = True
+        out["last_log_lines"] = r["stdout"].splitlines()
+
+    return out
+
+
+def install(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Install bashclub-zsync via the bashclub APT repository.
+
+    Uses the modern signed-by pattern instead of apt-key (which is deprecated).
+    Idempotent — re-running is safe.
+    """
+    script = r"""
+set -e
+KEY=/etc/apt/keyrings/bashclub.gpg
+LIST=/etc/apt/sources.list.d/bashclub.list
+mkdir -p /etc/apt/keyrings
+if [ ! -s "$KEY" ]; then
+  curl -fsSL https://apt.bashclub.org/gpg.key | gpg --dearmor -o "$KEY"
+  chmod 0644 "$KEY"
+fi
+if [ ! -s "$LIST" ]; then
+  echo "deb [signed-by=$KEY] https://apt.bashclub.org/bashclub bookworm main" > "$LIST"
+fi
+DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y bashclub-zsync
+command -v bashclub-zsync
+""".strip()
+    # Use `bash -s` over SSH so we don't have to quote multi-line
+    cmd = f"bash -s <<'EOF'\n{script}\nEOF"
+    r = run_command(host, cmd, timeout=180)
+    return {
+        "success": r["success"],
+        "stdout": r["stdout"],
+        "stderr": r["stderr"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Config write
+# ---------------------------------------------------------------------------
+
+def read_config(host: Dict[str, Any]) -> Dict[str, Any]:
+    r = run_command(host, f"cat {shlex.quote(CONFIG_PATH)} 2>/dev/null", timeout=10)
+    if not r["success"] or not r["stdout"]:
+        return {"exists": False, "values": {}, "raw": ""}
+    parsed = _parse_config(r["stdout"])
+    return {"exists": True, "values": parsed["values"], "raw": r["stdout"], "_lines": parsed["lines"]}
+
+
+def write_config(host: Dict[str, Any], values: Dict[str, str]) -> Dict[str, Any]:
+    """Write config preserving comments/order from existing file.
+
+    Strategy: read current file, parse, replace values in place, write back.
+    A timestamped backup is created alongside.
+    """
+    # Read existing to preserve layout
+    r_read = run_command(host, f"cat {shlex.quote(CONFIG_PATH)} 2>/dev/null", timeout=10)
+    existing_lines = None
+    if r_read["success"] and r_read["stdout"]:
+        existing_lines = _parse_config(r_read["stdout"])["lines"]
+
+    # Filter: only non-empty values get written (empty string = "clear")
+    cleaned = {k: v for k, v in values.items() if v is not None and str(v) != ""}
+    new_text = _serialize_config(cleaned, existing_lines)
+
+    # Encode as base64 to transport safely
+    import base64
+    b64 = base64.b64encode(new_text.encode("utf-8")).decode("ascii")
+    script = (
+        f"mkdir -p /etc/bashclub && "
+        f"if [ -f {shlex.quote(CONFIG_PATH)} ]; then "
+        f"cp -a {shlex.quote(CONFIG_PATH)} {shlex.quote(CONFIG_PATH)}.bak.$(date +%Y%m%d%H%M%S); "
+        f"fi && "
+        f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(CONFIG_PATH)} && "
+        f"chmod 0640 {shlex.quote(CONFIG_PATH)}"
+    )
+    r = run_command(host, script, timeout=15)
+    return {"success": r["success"], "stderr": r["stderr"]}
+
+
+# ---------------------------------------------------------------------------
+# Run + log
+# ---------------------------------------------------------------------------
+
+def run_now(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Trigger bashclub-zsync manually with the default config path.
+
+    Output is captured into the standard log so the UI can read it back.
+    A short timeout is used for the SSH channel; the log is authoritative.
+    """
+    cmd = (
+        f"mkdir -p /var/log/bashclub-zsync && "
+        f"{BINARY_NAME} -c {shlex.quote(CONFIG_PATH)} "
+        f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
+    )
+    r = run_command(host, cmd, timeout=600)
+    # Extract trailing __exit=N
+    exit_code = None
+    if r["stdout"]:
+        m = re.search(r"__exit=(\d+)\s*$", r["stdout"].strip())
+        if m:
+            exit_code = int(m.group(1))
+    return {
+        "success": r["success"] and (exit_code == 0),
+        "exit_code": exit_code,
+        "stderr": r["stderr"],
+    }
+
+
+def tail_log(host: Dict[str, Any], lines: int = 200) -> Dict[str, Any]:
+    lines = max(1, min(int(lines), 5000))
+    r = run_command(host, f"tail -n {lines} {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=15)
+    return {
+        "success": r["success"],
+        "content": r["stdout"] if r["success"] else "",
+        "present": bool(r["success"] and r["stdout"]),
+    }

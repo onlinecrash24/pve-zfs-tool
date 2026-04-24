@@ -143,6 +143,7 @@ async function renderView() {
         datasets: viewDatasets,
         snapshots: viewSnapshots,
         "snapshot-check": viewSnapshotCheck,
+        replication: viewReplication,
         guests: viewGuests,
         health: viewHealth,
         metrics: viewMetrics,
@@ -2640,6 +2641,179 @@ async function viewAudit() {
         sessionStorage.removeItem("audit_host_filter");
         viewAudit();
     };
+}
+
+
+// -- Replication (bashclub-zsync) -----------------------------------------
+async function viewReplication() {
+    setContent(loading());
+    if (!currentHost) {
+        setContent(h("p", {}, t("select_host_first")));
+        return;
+    }
+    const qs = "?host=" + encodeURIComponent(currentHost);
+    let status;
+    try {
+        status = await API.get("/api/replication/status" + qs);
+    } catch (e) {
+        setContent(h("p", { className: "muted" }, e.message || "Failed to load status"));
+        return;
+    }
+
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("repl_title")),
+        h("p", {}, t("repl_subtitle")),
+    ]));
+
+    // -- Install status card ------------------------------------------------
+    const statusCard = h("div", { className: "card" });
+    statusCard.appendChild(h("div", { className: "card-header" }, t("repl_install_status")));
+    const statusBody = h("div", { className: "card-body" });
+    if (status.installed) {
+        statusBody.appendChild(h("p", {}, [
+            h("span", { className: "badge badge-success" }, "✓ " + t("repl_installed")),
+            status.version ? h("span", { style: "margin-left:10px;color:var(--text-secondary);font-size:13px" }, status.version) : null,
+        ].filter(Boolean)));
+    } else {
+        statusBody.appendChild(h("p", {}, [
+            h("span", { className: "badge badge-warning" }, t("repl_not_installed")),
+        ]));
+        statusBody.appendChild(h("p", { style: "margin-top:10px;font-size:13px;color:var(--text-secondary)" }, t("repl_install_hint")));
+        const installBtn = h("button", { className: "btn btn-primary", style: "margin-top:10px" }, t("repl_install_btn"));
+        installBtn.onclick = async () => {
+            if (!confirm(t("repl_install_confirm"))) return;
+            installBtn.disabled = true;
+            installBtn.textContent = t("repl_installing");
+            try {
+                const r = await API.post("/api/replication/install" + qs, {});
+                if (r.success) {
+                    toast(t("repl_install_ok"), "success");
+                    viewReplication();
+                } else {
+                    openModal(t("repl_install_failed"), `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
+                    installBtn.disabled = false;
+                    installBtn.textContent = t("repl_install_btn");
+                }
+            } catch (e) {
+                toast(e.message || "Install failed", "error");
+                installBtn.disabled = false;
+                installBtn.textContent = t("repl_install_btn");
+            }
+        };
+        statusBody.appendChild(installBtn);
+    }
+    statusCard.appendChild(statusBody);
+    container.appendChild(statusCard);
+
+    if (!status.installed) {
+        setContent(container);
+        return;
+    }
+
+    // -- Config editor ------------------------------------------------------
+    const cfgCard = h("div", { className: "card", style: "margin-top:16px" });
+    cfgCard.appendChild(h("div", { className: "card-header" }, t("repl_config_title")));
+    const cfgBody = h("div", { className: "card-body" });
+    cfgCard.appendChild(cfgBody);
+    container.appendChild(cfgCard);
+
+    const v = status.config || {};
+    const fields = [
+        { key: "source",                       label: "repl_f_source",                       hint: "repl_h_source",                       placeholder: "root@10.0.0.2" },
+        { key: "sshport",                      label: "repl_f_sshport",                      hint: "repl_h_sshport",                      placeholder: "22" },
+        { key: "target",                       label: "repl_f_target",                       hint: "repl_h_target",                       placeholder: "backup/replica" },
+        { key: "tag",                          label: "repl_f_tag",                          hint: "repl_h_tag",                          placeholder: "bashclub:zsync" },
+        { key: "snapshot_filter",              label: "repl_f_snapshot_filter",              hint: "repl_h_snapshot_filter",              placeholder: "zfs-auto-snap_daily|zfs-auto-snap_weekly" },
+        { key: "min_keep",                     label: "repl_f_min_keep",                     hint: "repl_h_min_keep",                     placeholder: "2" },
+        { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       placeholder: "zas" },
+        { key: "prefix",                       label: "repl_f_prefix",                       hint: "",                                    placeholder: "" },
+        { key: "suffix",                       label: "repl_f_suffix",                       hint: "",                                    placeholder: "" },
+    ];
+    const inputs = {};
+    const form = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" });
+    fields.forEach(f => {
+        const cell = h("div");
+        cell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t(f.label)));
+        const input = h("input", { type: "text", className: "form-input", placeholder: f.placeholder, value: v[f.key] || "" });
+        inputs[f.key] = input;
+        cell.appendChild(input);
+        if (f.hint) cell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t(f.hint)));
+        form.appendChild(cell);
+    });
+    cfgBody.appendChild(form);
+
+    const btnRow = h("div", { style: "margin-top:15px;display:flex;gap:8px;flex-wrap:wrap" });
+    const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
+    saveBtn.onclick = async () => {
+        const values = {};
+        fields.forEach(f => { values[f.key] = inputs[f.key].value.trim(); });
+        saveBtn.disabled = true;
+        try {
+            const r = await API.post("/api/replication/config" + qs, { values });
+            if (r.success) {
+                toast(t("repl_config_saved"), "success");
+            } else {
+                toast(r.stderr || t("failed"), "error");
+            }
+        } catch (e) {
+            toast(e.message, "error");
+        } finally {
+            saveBtn.disabled = false;
+        }
+    };
+    btnRow.appendChild(saveBtn);
+
+    const runBtn = h("button", { className: "btn btn-warning" }, t("repl_run_now"));
+    runBtn.onclick = async () => {
+        if (!confirm(t("repl_run_confirm"))) return;
+        runBtn.disabled = true;
+        runBtn.textContent = t("repl_running");
+        try {
+            const r = await API.post("/api/replication/run" + qs, {});
+            if (r.success) {
+                toast(t("repl_run_ok"), "success");
+            } else {
+                toast((t("repl_run_failed") + " (exit=" + (r.exit_code ?? "?") + ")"), "error");
+            }
+            refreshLog();
+        } catch (e) {
+            toast(e.message, "error");
+        } finally {
+            runBtn.disabled = false;
+            runBtn.textContent = t("repl_run_now");
+        }
+    };
+    btnRow.appendChild(runBtn);
+    cfgBody.appendChild(btnRow);
+
+    // -- Log viewer ---------------------------------------------------------
+    const logCard = h("div", { className: "card", style: "margin-top:16px" });
+    const logHeader = h("div", { className: "card-header" }, [
+        h("span", {}, t("repl_log_title")),
+        h("button", { className: "btn btn-sm" }, t("refresh")),
+    ]);
+    logCard.appendChild(logHeader);
+    const logBody = h("div", { className: "card-body" });
+    const logPre = h("pre", {
+        style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap"
+    }, t("loading"));
+    logBody.appendChild(logPre);
+    logCard.appendChild(logBody);
+    container.appendChild(logCard);
+
+    async function refreshLog() {
+        try {
+            const r = await API.get("/api/replication/log" + qs + "&lines=300");
+            logPre.textContent = r.present ? r.content : t("repl_log_empty");
+        } catch (e) {
+            logPre.textContent = e.message || "";
+        }
+    }
+    logHeader.querySelector("button").onclick = refreshLog;
+
+    setContent(container);
+    refreshLog();
 }
 
 

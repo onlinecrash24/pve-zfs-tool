@@ -1184,6 +1184,97 @@ def api_forecast():
 
 
 # ---------------------------------------------------------------------------
+# Replication (bashclub-zsync)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/replication/status")
+@login_required
+def api_replication_status():
+    from app.replication import get_status
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(get_status(host))
+
+
+@app.route("/api/replication/install", methods=["POST"])
+@login_required
+def api_replication_install():
+    from app.replication import install
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    result = install(host)
+    audit_log("replication.install", target=host["address"], host=host["address"],
+              success=result["success"],
+              details={"stderr_tail": (result.get("stderr") or "")[-500:]})
+    return jsonify(result)
+
+
+@app.route("/api/replication/config", methods=["GET"])
+@login_required
+def api_replication_config_get():
+    from app.replication import read_config
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    cfg = read_config(host)
+    return jsonify({
+        "exists": cfg["exists"],
+        "values": cfg["values"],
+        "raw": cfg.get("raw", ""),
+    })
+
+
+@app.route("/api/replication/config", methods=["POST"])
+@login_required
+def api_replication_config_set():
+    from app.replication import write_config
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    values = data.get("values") or {}
+    if not isinstance(values, dict):
+        return jsonify({"error": "values must be an object"}), 400
+    # Coerce everything to string
+    values = {str(k): ("" if v is None else str(v)) for k, v in values.items()}
+    result = write_config(host, values)
+    audit_log("replication.config.save", target=host["address"], host=host["address"],
+              success=result["success"],
+              details={"keys": sorted(values.keys())})
+    return jsonify(result)
+
+
+@app.route("/api/replication/run", methods=["POST"])
+@login_required
+def api_replication_run():
+    from app.replication import run_now
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    result = run_now(host)
+    audit_log("replication.run", target=host["address"], host=host["address"],
+              success=result["success"],
+              details={"exit_code": result.get("exit_code")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/log")
+@login_required
+def api_replication_log():
+    from app.replication import tail_log
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    try:
+        lines = int(request.args.get("lines", 200))
+    except (TypeError, ValueError):
+        lines = 200
+    return jsonify(tail_log(host, lines))
+
+
+# ---------------------------------------------------------------------------
 # Prometheus exporter — opt-in via PROMETHEUS_TOKEN env var
 # ---------------------------------------------------------------------------
 
