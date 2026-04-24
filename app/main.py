@@ -1260,6 +1260,52 @@ def api_replication_run():
     return jsonify(result)
 
 
+@app.route("/api/replication/bootstrap-ssh", methods=["POST"])
+@login_required
+def api_replication_bootstrap_ssh():
+    from app.replication import bootstrap_ssh
+    data = request.get_json(silent=True) or {}
+    t_addr = (data.get("target") or "").strip()
+    s_addr = (data.get("source") or "").strip()
+    if not t_addr or not s_addr:
+        return jsonify({"error": "target and source are required"}), 400
+    if t_addr == s_addr:
+        return jsonify({"error": "target and source must differ"}), 400
+    target = _find_host(t_addr)
+    source = _find_host(s_addr)
+    if not target:
+        return jsonify({"error": "Target host not found"}), 404
+    if not source:
+        return jsonify({"error": "Source host not found"}), 404
+    result = bootstrap_ssh(target, source)
+    audit_log("replication.bootstrap_ssh",
+              target=f"{t_addr}<-{s_addr}", host=t_addr,
+              success=result.get("success", False),
+              details={"probe_ok": result.get("probe_ok"),
+                       "key_generated": result.get("key_generated"),
+                       "error": result.get("error")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/create-target", methods=["POST"])
+@login_required
+def api_replication_create_target():
+    from app.replication import create_target_dataset
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    dataset = (data.get("dataset") or "").strip()
+    if not dataset:
+        return jsonify({"error": "dataset is required"}), 400
+    result = create_target_dataset(host, dataset)
+    audit_log("replication.create_target", target=dataset, host=host["address"],
+              success=result.get("success", False),
+              details={"existed": result.get("existed"),
+                       "created": result.get("created")})
+    return jsonify(result)
+
+
 @app.route("/api/replication/log")
 @login_required
 def api_replication_log():

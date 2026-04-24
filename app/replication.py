@@ -251,6 +251,125 @@ def run_now(host: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def bootstrap_ssh(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> Dict[str, Any]:
+    """Enable passwordless SSH from target -> source.
+
+    Steps (all idempotent):
+      1. Ensure /root/.ssh/id_ed25519 exists on the target; generate if missing.
+      2. Read the target's public key.
+      3. Populate target's known_hosts with the source's host key (ssh-keyscan).
+      4. Append the target's public key to source's authorized_keys.
+      5. Probe the SSH connection from target to source in BatchMode.
+
+    Returns a dict describing each step so the UI can surface partial failures.
+    """
+    src_addr = source_host["address"]
+    src_port = int(source_host.get("port") or 22)
+    src_user = source_host.get("user") or "root"
+
+    out: Dict[str, Any] = {
+        "success": False,
+        "key_generated": False,
+        "target_pubkey": "",
+        "known_hosts_updated": False,
+        "authorized_keys_updated": False,
+        "probe_ok": False,
+        "probe_output": "",
+        "error": "",
+    }
+
+    # Step 1+2: ensure key + fetch public
+    gen_script = (
+        "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+        "if [ ! -f /root/.ssh/id_ed25519 ]; then "
+        "  ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N '' -C bashclub-zsync-$(hostname) >/dev/null && "
+        "  echo __GENERATED__; "
+        "fi && "
+        "cat /root/.ssh/id_ed25519.pub"
+    )
+    r = run_command(target_host, gen_script, timeout=20)
+    if not r["success"]:
+        out["error"] = "Key generation/read failed on target: " + (r["stderr"] or r["stdout"])
+        return out
+    stdout = r["stdout"]
+    if "__GENERATED__" in stdout:
+        out["key_generated"] = True
+        stdout = stdout.replace("__GENERATED__", "").strip()
+    pubkey = stdout.strip().splitlines()[-1] if stdout.strip() else ""
+    if not pubkey.startswith("ssh-"):
+        out["error"] = "Unexpected public key format on target"
+        return out
+    out["target_pubkey"] = pubkey
+
+    # Step 3: known_hosts on target
+    kh_script = (
+        f"touch /root/.ssh/known_hosts && chmod 600 /root/.ssh/known_hosts && "
+        f"tmp=$(mktemp) && "
+        f"ssh-keyscan -T 10 -p {src_port} {shlex.quote(src_addr)} >\"$tmp\" 2>/dev/null && "
+        f"if [ -s \"$tmp\" ]; then "
+        f"  while IFS= read -r line; do "
+        f"    grep -qxF \"$line\" /root/.ssh/known_hosts || echo \"$line\" >> /root/.ssh/known_hosts; "
+        f"  done < \"$tmp\"; "
+        f"  rm -f \"$tmp\"; echo __KH_OK__; "
+        f"else rm -f \"$tmp\"; fi"
+    )
+    r = run_command(target_host, kh_script, timeout=20)
+    out["known_hosts_updated"] = "__KH_OK__" in (r.get("stdout") or "")
+
+    # Step 4: append target pubkey to source authorized_keys
+    from app.ssh_manager import _append_authorized_key
+    r = _append_authorized_key(source_host, pubkey)
+    out["authorized_keys_updated"] = bool(r.get("success"))
+    if not out["authorized_keys_updated"]:
+        out["error"] = "Failed to append authorized_keys on source: " + (r.get("stderr") or r.get("stdout") or "unknown")
+        return out
+
+    # Step 5: probe from target
+    probe = (
+        f"ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "
+        f"-p {src_port} {shlex.quote(src_user + '@' + src_addr)} 'echo __PROBE_OK__'"
+    )
+    r = run_command(target_host, probe, timeout=20)
+    combined = (r.get("stdout") or "") + (r.get("stderr") or "")
+    out["probe_output"] = combined.strip()[-500:]
+    out["probe_ok"] = r.get("success", False) and "__PROBE_OK__" in (r.get("stdout") or "")
+    out["success"] = out["probe_ok"]
+    if not out["probe_ok"] and not out["error"]:
+        out["error"] = "SSH probe failed"
+    return out
+
+
+def create_target_dataset(host: Dict[str, Any], dataset: str) -> Dict[str, Any]:
+    """Create a ZFS filesystem intended as a replication target.
+
+    Uses ``-p`` to create parents and disables auto-snapshots via the
+    ``com.sun:auto-snapshot=false`` property (same property ``zfs-auto-snapshot``
+    and Proxmox honor). Idempotent: succeeds silently if the dataset already
+    exists and enforces the property either way.
+    """
+    name = (dataset or "").strip()
+    if not name or "/" not in name or name.startswith("/") or name.endswith("/"):
+        return {"success": False, "error": "Invalid dataset name (expected pool/path)"}
+    if not re.match(r"^[A-Za-z0-9._:/-]+$", name):
+        return {"success": False, "error": "Dataset name contains invalid characters"}
+    q = shlex.quote(name)
+    script = (
+        f"if zfs list -H -o name {q} >/dev/null 2>&1; then "
+        f"  zfs set com.sun:auto-snapshot=false {q}; echo __EXISTS__; "
+        f"else "
+        f"  zfs create -p -o com.sun:auto-snapshot=false {q} && echo __CREATED__; "
+        f"fi"
+    )
+    r = run_command(host, script, timeout=30)
+    msg = r.get("stdout", "")
+    return {
+        "success": r["success"],
+        "existed": "__EXISTS__" in msg,
+        "created": "__CREATED__" in msg,
+        "stderr": r.get("stderr", ""),
+    }
+
+
 def tail_log(host: Dict[str, Any], lines: int = 200) -> Dict[str, Any]:
     lines = max(1, min(int(lines), 5000))
     r = run_command(host, f"tail -n {lines} {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=15)

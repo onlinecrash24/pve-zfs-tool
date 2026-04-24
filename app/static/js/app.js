@@ -2647,16 +2647,16 @@ async function viewAudit() {
 // -- Replication (bashclub-zsync) -----------------------------------------
 async function viewReplication() {
     setContent(loading());
-    if (!currentHost) {
-        setContent(h("p", {}, t("select_host_first")));
+    let hosts;
+    try {
+        hosts = await API.get("/api/hosts");
+    } catch (e) {
+        setContent(h("p", { className: "muted" }, e.message || "Failed to load hosts"));
         return;
     }
-    const qs = "?host=" + encodeURIComponent(currentHost);
-    let status;
-    try {
-        status = await API.get("/api/replication/status" + qs);
-    } catch (e) {
-        setContent(h("p", { className: "muted" }, e.message || "Failed to load status"));
+    if (!hosts || hosts.length < 2) {
+        setContent(h("div", { className: "card" },
+            h("div", { className: "card-body" }, t("repl_need_two_hosts"))));
         return;
     }
 
@@ -2666,154 +2666,303 @@ async function viewReplication() {
         h("p", {}, t("repl_subtitle")),
     ]));
 
-    // -- Install status card ------------------------------------------------
-    const statusCard = h("div", { className: "card" });
-    statusCard.appendChild(h("div", { className: "card-header" }, t("repl_install_status")));
-    const statusBody = h("div", { className: "card-body" });
-    if (status.installed) {
-        statusBody.appendChild(h("p", {}, [
-            h("span", { className: "badge badge-success" }, "✓ " + t("repl_installed")),
-            status.version ? h("span", { style: "margin-left:10px;color:var(--text-secondary);font-size:13px" }, status.version) : null,
-        ].filter(Boolean)));
-    } else {
-        statusBody.appendChild(h("p", {}, [
-            h("span", { className: "badge badge-warning" }, t("repl_not_installed")),
-        ]));
-        statusBody.appendChild(h("p", { style: "margin-top:10px;font-size:13px;color:var(--text-secondary)" }, t("repl_install_hint")));
-        const installBtn = h("button", { className: "btn btn-primary", style: "margin-top:10px" }, t("repl_install_btn"));
-        installBtn.onclick = async () => {
-            if (!confirm(t("repl_install_confirm"))) return;
-            installBtn.disabled = true;
-            installBtn.textContent = t("repl_installing");
-            try {
-                const r = await API.post("/api/replication/install" + qs, {});
-                if (r.success) {
-                    toast(t("repl_install_ok"), "success");
-                    viewReplication();
-                } else {
-                    openModal(t("repl_install_failed"), `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
-                    installBtn.disabled = false;
-                    installBtn.textContent = t("repl_install_btn");
-                }
-            } catch (e) {
-                toast(e.message || "Install failed", "error");
-                installBtn.disabled = false;
-                installBtn.textContent = t("repl_install_btn");
-            }
-        };
-        statusBody.appendChild(installBtn);
-    }
-    statusCard.appendChild(statusBody);
-    container.appendChild(statusCard);
+    // -- Host pair selector -------------------------------------------------
+    const selCard = h("div", { className: "card" });
+    selCard.appendChild(h("div", { className: "card-header" }, t("repl_pair_title")));
+    const selBody = h("div", { className: "card-body" });
 
-    if (!status.installed) {
-        setContent(container);
-        return;
-    }
-
-    // -- Config editor ------------------------------------------------------
-    const cfgCard = h("div", { className: "card", style: "margin-top:16px" });
-    cfgCard.appendChild(h("div", { className: "card-header" }, t("repl_config_title")));
-    const cfgBody = h("div", { className: "card-body" });
-    cfgCard.appendChild(cfgBody);
-    container.appendChild(cfgCard);
-
-    const v = status.config || {};
-    const fields = [
-        { key: "source",                       label: "repl_f_source",                       hint: "repl_h_source",                       placeholder: "root@10.0.0.2" },
-        { key: "sshport",                      label: "repl_f_sshport",                      hint: "repl_h_sshport",                      placeholder: "22" },
-        { key: "target",                       label: "repl_f_target",                       hint: "repl_h_target",                       placeholder: "backup/replica" },
-        { key: "tag",                          label: "repl_f_tag",                          hint: "repl_h_tag",                          placeholder: "bashclub:zsync" },
-        { key: "snapshot_filter",              label: "repl_f_snapshot_filter",              hint: "repl_h_snapshot_filter",              placeholder: "zfs-auto-snap_daily|zfs-auto-snap_weekly" },
-        { key: "min_keep",                     label: "repl_f_min_keep",                     hint: "repl_h_min_keep",                     placeholder: "2" },
-        { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       placeholder: "zas" },
-        { key: "prefix",                       label: "repl_f_prefix",                       hint: "",                                    placeholder: "" },
-        { key: "suffix",                       label: "repl_f_suffix",                       hint: "",                                    placeholder: "" },
-    ];
-    const inputs = {};
-    const form = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" });
-    fields.forEach(f => {
-        const cell = h("div");
-        cell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t(f.label)));
-        const input = h("input", { type: "text", className: "form-input", placeholder: f.placeholder, value: v[f.key] || "" });
-        inputs[f.key] = input;
-        cell.appendChild(input);
-        if (f.hint) cell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t(f.hint)));
-        form.appendChild(cell);
-    });
-    cfgBody.appendChild(form);
-
-    const btnRow = h("div", { style: "margin-top:15px;display:flex;gap:8px;flex-wrap:wrap" });
-    const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
-    saveBtn.onclick = async () => {
-        const values = {};
-        fields.forEach(f => { values[f.key] = inputs[f.key].value.trim(); });
-        saveBtn.disabled = true;
-        try {
-            const r = await API.post("/api/replication/config" + qs, { values });
-            if (r.success) {
-                toast(t("repl_config_saved"), "success");
-            } else {
-                toast(r.stderr || t("failed"), "error");
-            }
-        } catch (e) {
-            toast(e.message, "error");
-        } finally {
-            saveBtn.disabled = false;
-        }
+    const hostOptions = (selectedAddr) => {
+        const opts = [h("option", { value: "" }, "— " + t("repl_choose") + " —")];
+        hosts.forEach(hst => {
+            const opt = h("option", { value: hst.address }, (hst.name || hst.address) + " (" + hst.address + ")");
+            if (selectedAddr === hst.address) opt.selected = true;
+            opts.push(opt);
+        });
+        return opts;
     };
-    btnRow.appendChild(saveBtn);
 
-    const runBtn = h("button", { className: "btn btn-warning" }, t("repl_run_now"));
-    runBtn.onclick = async () => {
-        if (!confirm(t("repl_run_confirm"))) return;
-        runBtn.disabled = true;
-        runBtn.textContent = t("repl_running");
-        try {
-            const r = await API.post("/api/replication/run" + qs, {});
-            if (r.success) {
-                toast(t("repl_run_ok"), "success");
-            } else {
-                toast((t("repl_run_failed") + " (exit=" + (r.exit_code ?? "?") + ")"), "error");
-            }
-            refreshLog();
-        } catch (e) {
-            toast(e.message, "error");
-        } finally {
-            runBtn.disabled = false;
-            runBtn.textContent = t("repl_run_now");
-        }
-    };
-    btnRow.appendChild(runBtn);
-    cfgBody.appendChild(btnRow);
+    // Default: target = currentHost (if any), source = first other host
+    const defTarget = currentHost || hosts[0].address;
+    const defSource = hosts.find(x => x.address !== defTarget)?.address || "";
 
-    // -- Log viewer ---------------------------------------------------------
-    const logCard = h("div", { className: "card", style: "margin-top:16px" });
-    const logHeader = h("div", { className: "card-header" }, [
-        h("span", {}, t("repl_log_title")),
-        h("button", { className: "btn btn-sm" }, t("refresh")),
+    const targetSel = h("select", { className: "form-input", style: "width:100%" }, hostOptions(defTarget));
+    const sourceSel = h("select", { className: "form-input", style: "width:100%" }, hostOptions(defSource));
+
+    const selGrid = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" }, [
+        h("div", {}, [
+            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_target_host")),
+            targetSel,
+            h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_target_host_hint")),
+        ]),
+        h("div", {}, [
+            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_source_host")),
+            sourceSel,
+            h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_source_host_hint")),
+        ]),
     ]);
-    logCard.appendChild(logHeader);
-    const logBody = h("div", { className: "card-body" });
-    const logPre = h("pre", {
-        style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap"
-    }, t("loading"));
-    logBody.appendChild(logPre);
-    logCard.appendChild(logBody);
-    container.appendChild(logCard);
+    selBody.appendChild(selGrid);
+    selCard.appendChild(selBody);
+    container.appendChild(selCard);
 
-    async function refreshLog() {
-        try {
-            const r = await API.get("/api/replication/log" + qs + "&lines=300");
-            logPre.textContent = r.present ? r.content : t("repl_log_empty");
-        } catch (e) {
-            logPre.textContent = e.message || "";
-        }
-    }
-    logHeader.querySelector("button").onclick = refreshLog;
+    // -- Dynamic body (install/config/log) ----------------------------------
+    const dynMount = h("div");
+    container.appendChild(dynMount);
 
     setContent(container);
-    refreshLog();
+
+    targetSel.onchange = () => renderFor(targetSel.value, sourceSel.value);
+    sourceSel.onchange = () => renderFor(targetSel.value, sourceSel.value);
+
+    await renderFor(defTarget, defSource);
+
+    // ----------------------------------------------------------------------
+    async function renderFor(targetAddr, sourceAddr) {
+        dynMount.innerHTML = "";
+        if (!targetAddr) return;
+        const tgt = hosts.find(x => x.address === targetAddr);
+        const src = hosts.find(x => x.address === sourceAddr);
+        const qs = "?host=" + encodeURIComponent(targetAddr);
+        const host = h("div");
+
+        let status;
+        host.appendChild(loading());
+        dynMount.appendChild(host);
+        try {
+            status = await API.get("/api/replication/status" + qs);
+        } catch (e) {
+            host.innerHTML = `<p class="muted">${escapeHtml(e.message || "Failed")}</p>`;
+            return;
+        }
+        host.innerHTML = "";
+
+        // Install status
+        const statusCard = h("div", { className: "card", style: "margin-top:16px" });
+        statusCard.appendChild(h("div", { className: "card-header" }, t("repl_install_status") + " — " + (tgt.name || tgt.address)));
+        const statusBody = h("div", { className: "card-body" });
+        if (status.installed) {
+            statusBody.appendChild(h("p", {}, [
+                h("span", { className: "badge badge-success" }, "\u2713 " + t("repl_installed")),
+                status.version ? h("span", { style: "margin-left:10px;color:var(--text-secondary);font-size:13px" }, status.version) : null,
+            ].filter(Boolean)));
+        } else {
+            statusBody.appendChild(h("p", {}, h("span", { className: "badge badge-warning" }, t("repl_not_installed"))));
+            statusBody.appendChild(h("p", { style: "margin-top:10px;font-size:13px;color:var(--text-secondary)" }, t("repl_install_hint")));
+            const installBtn = h("button", { className: "btn btn-primary", style: "margin-top:10px" }, t("repl_install_btn"));
+            installBtn.onclick = async () => {
+                if (!confirm(t("repl_install_confirm"))) return;
+                installBtn.disabled = true; installBtn.textContent = t("repl_installing");
+                try {
+                    const r = await API.post("/api/replication/install" + qs, {});
+                    if (r.success) { toast(t("repl_install_ok"), "success"); renderFor(targetAddr, sourceAddr); }
+                    else {
+                        openModal(t("repl_install_failed"), `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
+                        installBtn.disabled = false; installBtn.textContent = t("repl_install_btn");
+                    }
+                } catch (e) { toast(e.message || "Install failed", "error"); installBtn.disabled = false; installBtn.textContent = t("repl_install_btn"); }
+            };
+            statusBody.appendChild(installBtn);
+        }
+        statusCard.appendChild(statusBody);
+        host.appendChild(statusCard);
+
+        if (!status.installed) return;
+        if (!src) {
+            host.appendChild(h("div", { className: "card", style: "margin-top:16px" },
+                h("div", { className: "card-body" }, t("repl_choose_source"))));
+            return;
+        }
+        if (src.address === tgt.address) {
+            host.appendChild(h("div", { className: "card", style: "margin-top:16px" },
+                h("div", { className: "card-body" }, t("repl_same_host"))));
+            return;
+        }
+
+        // -- SSH Bootstrap card --------------------------------------------
+        const sshCard = h("div", { className: "card", style: "margin-top:16px" });
+        sshCard.appendChild(h("div", { className: "card-header" }, t("repl_ssh_bootstrap_title")));
+        const sshBody = h("div", { className: "card-body" });
+        sshBody.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin-bottom:10px" },
+            t("repl_ssh_bootstrap_desc").replace("{target}", tgt.name || tgt.address).replace("{source}", src.name || src.address)));
+        const sshBtn = h("button", { className: "btn btn-primary" }, t("repl_ssh_bootstrap_btn"));
+        const sshResult = h("div", { style: "margin-top:10px;font-size:12px" });
+        sshBtn.onclick = async () => {
+            sshBtn.disabled = true; sshBtn.textContent = t("repl_ssh_bootstrap_running");
+            sshResult.innerHTML = "";
+            try {
+                const r = await API.post("/api/replication/bootstrap-ssh", { target: tgt.address, source: src.address });
+                const rows = [
+                    [t("repl_ssh_step_key"),    r.target_pubkey ? "\u2713" : "\u2717", r.key_generated ? t("repl_ssh_generated") : t("repl_ssh_existing")],
+                    [t("repl_ssh_step_kh"),     r.known_hosts_updated ? "\u2713" : "\u2717", ""],
+                    [t("repl_ssh_step_ak"),     r.authorized_keys_updated ? "\u2713" : "\u2717", ""],
+                    [t("repl_ssh_step_probe"),  r.probe_ok ? "\u2713" : "\u2717", r.probe_output ? (r.probe_output.slice(0, 200)) : ""],
+                ];
+                const tbl = h("table", { className: "table", style: "font-size:12px" });
+                rows.forEach(row => {
+                    tbl.appendChild(h("tr", {}, row.map((c, i) => h("td", { style: i === 1 ? "width:30px;text-align:center;font-weight:bold;color:" + (c === "\u2713" ? "var(--success)" : "var(--danger)") : "" }, c))));
+                });
+                sshResult.appendChild(tbl);
+                if (r.success) toast(t("repl_ssh_bootstrap_ok"), "success");
+                else toast(r.error || t("repl_ssh_bootstrap_failed"), "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { sshBtn.disabled = false; sshBtn.textContent = t("repl_ssh_bootstrap_btn"); }
+        };
+        sshBody.appendChild(sshBtn);
+        sshBody.appendChild(sshResult);
+        sshCard.appendChild(sshBody);
+        host.appendChild(sshCard);
+
+        // -- Config editor -------------------------------------------------
+        const cfgCard = h("div", { className: "card", style: "margin-top:16px" });
+        cfgCard.appendChild(h("div", { className: "card-header" }, t("repl_config_title")));
+        const cfgBody = h("div", { className: "card-body" });
+        cfgCard.appendChild(cfgBody);
+        host.appendChild(cfgCard);
+
+        const v = status.config || {};
+        // Derived defaults: source computed from source host entry
+        const defSourceStr = (src.user || "root") + "@" + src.address;
+        const defSourcePort = String(src.port || 22);
+
+        // Target-dataset dropdown: load filesystems from target
+        let datasets = [];
+        try {
+            const ds = await API.get("/api/datasets" + qs);
+            datasets = (ds.filesystems || ds || []).map(d => d.name || d).filter(n => typeof n === "string");
+        } catch (_) { /* ignore */ }
+
+        const tgtSelect = h("select", { className: "form-input", style: "width:100%" }, [
+            h("option", { value: "" }, "— " + t("repl_choose") + " —"),
+            ...datasets.map(name => {
+                const opt = h("option", { value: name }, name);
+                if (name === v.target) opt.selected = true;
+                return opt;
+            }),
+            h("option", { value: "__new__" }, "+ " + t("repl_create_target")),
+        ]);
+        const tgtNewInput = h("input", { type: "text", className: "form-input", style: "margin-top:6px;display:none", placeholder: "backup/replica" });
+        const tgtCreateBtn = h("button", { className: "btn btn-sm btn-warning", style: "margin-top:6px;margin-left:6px;display:none" }, t("repl_create_target_btn"));
+        tgtSelect.onchange = () => {
+            const show = tgtSelect.value === "__new__";
+            tgtNewInput.style.display = show ? "inline-block" : "none";
+            tgtCreateBtn.style.display = show ? "inline-block" : "none";
+        };
+        tgtCreateBtn.onclick = async () => {
+            const name = tgtNewInput.value.trim();
+            if (!name) { toast(t("repl_create_target_missing"), "error"); return; }
+            if (!confirm(t("repl_create_target_confirm").replace("{ds}", name))) return;
+            tgtCreateBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/create-target" + qs, { dataset: name });
+                if (r.success) {
+                    toast(r.created ? t("repl_create_target_created") : t("repl_create_target_existed"), "success");
+                    // Add to dropdown + select
+                    const opt = h("option", { value: name }, name);
+                    opt.selected = true;
+                    tgtSelect.insertBefore(opt, tgtSelect.querySelector("option[value='__new__']"));
+                    tgtSelect.value = name;
+                    tgtNewInput.style.display = "none";
+                    tgtCreateBtn.style.display = "none";
+                } else {
+                    toast(r.error || r.stderr || t("failed"), "error");
+                }
+            } catch (e) { toast(e.message, "error"); }
+            finally { tgtCreateBtn.disabled = false; }
+        };
+
+        const inputs = {};
+        const form = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" });
+        // Target row (special: dropdown)
+        const tgtCell = h("div");
+        tgtCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_target")));
+        tgtCell.appendChild(tgtSelect);
+        const tgtRow2 = h("div", { style: "white-space:nowrap" }, [tgtNewInput, tgtCreateBtn]);
+        tgtCell.appendChild(tgtRow2);
+        tgtCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_target")));
+        form.appendChild(tgtCell);
+        inputs.target = { get: () => tgtSelect.value === "__new__" ? tgtNewInput.value.trim() : tgtSelect.value };
+
+        // Source (readonly, computed)
+        const srcCell = h("div");
+        srcCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_source")));
+        const srcInput = h("input", { type: "text", className: "form-input", value: defSourceStr, readonly: true, style: "background:var(--bg)" });
+        srcCell.appendChild(srcInput);
+        srcCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_source_auto")));
+        form.appendChild(srcCell);
+        inputs.source = { get: () => srcInput.value.trim() };
+
+        // Remaining editable fields
+        const simple = [
+            { key: "sshport",                      label: "repl_f_sshport",                      hint: "repl_h_sshport",                      placeholder: "22", def: defSourcePort },
+            { key: "tag",                          label: "repl_f_tag",                          hint: "repl_h_tag",                          placeholder: "bashclub:zsync", def: "bashclub:zsync" },
+            { key: "snapshot_filter",              label: "repl_f_snapshot_filter",              hint: "repl_h_snapshot_filter",              placeholder: "zfs-auto-snap_daily|zfs-auto-snap_weekly", def: "" },
+            { key: "min_keep",                     label: "repl_f_min_keep",                     hint: "repl_h_min_keep",                     placeholder: "2", def: "2" },
+            { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       placeholder: "zas", def: "" },
+            { key: "prefix",                       label: "repl_f_prefix",                       hint: "",                                    placeholder: "", def: "" },
+            { key: "suffix",                       label: "repl_f_suffix",                       hint: "",                                    placeholder: "", def: "" },
+        ];
+        simple.forEach(f => {
+            const cell = h("div");
+            cell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t(f.label)));
+            const input = h("input", { type: "text", className: "form-input", placeholder: f.placeholder, value: v[f.key] ?? f.def ?? "" });
+            inputs[f.key] = { get: () => input.value.trim() };
+            cell.appendChild(input);
+            if (f.hint) cell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t(f.hint)));
+            form.appendChild(cell);
+        });
+        cfgBody.appendChild(form);
+
+        const btnRow = h("div", { style: "margin-top:15px;display:flex;gap:8px;flex-wrap:wrap" });
+        const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
+        saveBtn.onclick = async () => {
+            const values = {};
+            Object.keys(inputs).forEach(k => { values[k] = inputs[k].get(); });
+            if (!values.target) { toast(t("repl_target_required"), "error"); return; }
+            if (!values.source) { toast(t("repl_source_required"), "error"); return; }
+            saveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/config" + qs, { values });
+                if (r.success) toast(t("repl_config_saved"), "success");
+                else toast(r.stderr || t("failed"), "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { saveBtn.disabled = false; }
+        };
+        btnRow.appendChild(saveBtn);
+
+        const runBtn = h("button", { className: "btn btn-warning" }, t("repl_run_now"));
+        runBtn.onclick = async () => {
+            if (!confirm(t("repl_run_confirm"))) return;
+            runBtn.disabled = true; runBtn.textContent = t("repl_running");
+            try {
+                const r = await API.post("/api/replication/run" + qs, {});
+                if (r.success) toast(t("repl_run_ok"), "success");
+                else toast(t("repl_run_failed") + " (exit=" + (r.exit_code ?? "?") + ")", "error");
+                refreshLog();
+            } catch (e) { toast(e.message, "error"); }
+            finally { runBtn.disabled = false; runBtn.textContent = t("repl_run_now"); }
+        };
+        btnRow.appendChild(runBtn);
+        cfgBody.appendChild(btnRow);
+
+        // -- Log viewer ----------------------------------------------------
+        const logCard = h("div", { className: "card", style: "margin-top:16px" });
+        const refreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
+        const logHeader = h("div", { className: "card-header" }, [h("span", {}, t("repl_log_title")), refreshBtn]);
+        logCard.appendChild(logHeader);
+        const logBody = h("div", { className: "card-body" });
+        const logPre = h("pre", { style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
+        logBody.appendChild(logPre);
+        logCard.appendChild(logBody);
+        host.appendChild(logCard);
+
+        async function refreshLog() {
+            try {
+                const r = await API.get("/api/replication/log" + qs + "&lines=300");
+                logPre.textContent = r.present ? r.content : t("repl_log_empty");
+            } catch (e) { logPre.textContent = e.message || ""; }
+        }
+        refreshBtn.onclick = refreshLog;
+        refreshLog();
+    }
 }
 
 
