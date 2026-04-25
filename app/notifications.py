@@ -370,11 +370,55 @@ def _send_email(cfg, subject, body_text, body_html=None, attachments=None):
 # Dispatcher
 # ---------------------------------------------------------------------------
 
-def send_notification(event_type, title, message, priority=5, pdf_attachment=None):
+def _summarize_ai_report(content: str, lang: str = "en"):
+    """Return (verdict, short_text) for an AI report body.
+
+    Heuristic: count critical / warning markers in the report. Returns one of
+    three verdicts ('ok', 'warn', 'crit') and a single-sentence summary that
+    fits a notification email body. The full report itself goes as PDF
+    attachment, so we don't repeat it here.
+    """
+    low = (content or "").lower()
+    crit_kw = ["critical", "kritisch", "sofort", "urgent", "🚨", "❌",
+               "action required", "handlung erforderlich",
+               "handlung zwingend", "immediate action"]
+    warn_kw = ["warning", "warnung", "achtung", "attention", "⚠"]
+    crit_hits = sum(low.count(k.lower()) for k in crit_kw)
+    warn_hits = sum(low.count(k.lower()) for k in warn_kw)
+    if crit_hits > 0:
+        verdict = "crit"
+    elif warn_hits > 0:
+        verdict = "warn"
+    else:
+        verdict = "ok"
+    de = (lang or "").lower().startswith("de")
+    if verdict == "crit":
+        txt = (f"🚨 Handlung zwingend nötig — {crit_hits} kritische Hinweise im Bericht."
+               if de else
+               f"🚨 Action required — {crit_hits} critical finding(s) in the report.")
+    elif verdict == "warn":
+        txt = (f"⚠️ Aufmerksamkeit empfohlen — {warn_hits} Warnung(en) im Bericht."
+               if de else
+               f"⚠️ Attention recommended — {warn_hits} warning(s) in the report.")
+    else:
+        txt = ("✅ Alles im grünen Bereich — keine kritischen Hinweise gefunden."
+               if de else
+               "✅ All clear — no critical findings.")
+    return verdict, txt
+
+
+def send_notification(event_type, title, message, priority=5, pdf_attachment=None,
+                      email_short=None, lang=None):
     """Send notification through all enabled channels if event type is active.
 
     pdf_attachment: optional tuple (filename, bytes) — sent as attachment for
     channels that support it (Email, Telegram, Matrix). Gotify remains text-only.
+
+    email_short: when set, the email body uses this short text instead of the
+    full ``message``. Useful for ai_report events where the PDF carries the
+    full content and the email should only show a verdict. If not set but
+    event_type=='ai_report' and a PDF is attached, a verdict is auto-derived
+    from the message via _summarize_ai_report().
     """
     config = load_config()
 
@@ -438,16 +482,43 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
         attachments = []
         if pdf_bytes and pdf_filename:
             attachments.append((pdf_filename, pdf_bytes, "application/pdf"))
+
+        # When a PDF is attached (or the caller passed an explicit short text)
+        # the email body should be a brief verdict, not a copy of the report.
+        verdict = "info"
+        short = (email_short or "").strip()
+        if not short and pdf_bytes and event_type == "ai_report":
+            verdict, short = _summarize_ai_report(message, lang=lang or "en")
+
         subject = f"[ZFS Tool] {title}"
-        body_text = f"{full_message}\n\n— ZFS Tool"
-        body_html = (
-            f"<html><body style='font-family:sans-serif'>"
-            f"<h3 style='color:#1a73a7'>ZFS Tool &ndash; {title}</h3>"
-            f"<pre style='background:#f5f5f5;padding:12px;border-radius:6px;"
-            f"white-space:pre-wrap'>{message}</pre>"
-            f"<p style='color:#888;font-size:12px'>{timestamp}</p>"
-            f"</body></html>"
-        )
+        if short:
+            # Concise body: verdict line + reference to the attached PDF.
+            de = (lang or "").lower().startswith("de")
+            attach_line = ("Der vollständige Bericht liegt als PDF im Anhang."
+                           if de else
+                           "The full report is attached as a PDF.")
+            body_text = f"{short}\n\n{attach_line}\n\n{timestamp}\n— ZFS Tool"
+            verdict_color = {"crit": "#c0392b", "warn": "#d4a017",
+                             "ok": "#1f8a4c"}.get(verdict, "#1a73a7")
+            body_html = (
+                f"<html><body style='font-family:sans-serif;color:#222'>"
+                f"<h3 style='color:#1a73a7;margin-bottom:8px'>ZFS Tool &ndash; {title}</h3>"
+                f"<p style='font-size:15px;color:{verdict_color};"
+                f"font-weight:600;margin:6px 0 12px 0'>{short}</p>"
+                f"<p style='font-size:13px;color:#444'>{attach_line}</p>"
+                f"<p style='color:#888;font-size:12px;margin-top:18px'>{timestamp}</p>"
+                f"</body></html>"
+            )
+        else:
+            body_text = f"{full_message}\n\n— ZFS Tool"
+            body_html = (
+                f"<html><body style='font-family:sans-serif'>"
+                f"<h3 style='color:#1a73a7'>ZFS Tool &ndash; {title}</h3>"
+                f"<pre style='background:#f5f5f5;padding:12px;border-radius:6px;"
+                f"white-space:pre-wrap'>{message}</pre>"
+                f"<p style='color:#888;font-size:12px'>{timestamp}</p>"
+                f"</body></html>"
+            )
         results["email"] = _send_email(em, subject, body_text, body_html, attachments)
 
     return results

@@ -1184,6 +1184,276 @@ def api_forecast():
 
 
 # ---------------------------------------------------------------------------
+# Replication (bashclub-zsync)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/replication/status")
+@login_required
+def api_replication_status():
+    from app.replication import get_status
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    return jsonify(get_status(host, source=source))
+
+
+@app.route("/api/replication/install", methods=["POST"])
+@login_required
+def api_replication_install():
+    from app.replication import install
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    result = install(host)
+    audit_log("replication.install", target=host["address"], host=host["address"],
+              success=result["success"],
+              details={"stderr_tail": (result.get("stderr") or "")[-500:]})
+    return jsonify(result)
+
+
+@app.route("/api/replication/config", methods=["GET"])
+@login_required
+def api_replication_config_get():
+    from app.replication import read_config
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    cfg = read_config(host, source=source)
+    return jsonify({
+        "exists": cfg["exists"],
+        "values": cfg["values"],
+        "raw": cfg.get("raw", ""),
+        "config_path": cfg.get("config_path"),
+    })
+
+
+@app.route("/api/replication/config", methods=["POST"])
+@login_required
+def api_replication_config_set():
+    from app.replication import write_config
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    values = data.get("values") or {}
+    if not isinstance(values, dict):
+        return jsonify({"error": "values must be an object"}), 400
+    # Coerce everything to string
+    values = {str(k): ("" if v is None else str(v)) for k, v in values.items()}
+    source = (data.get("source") or request.args.get("source") or values.get("source") or None)
+    result = write_config(host, values, source=source)
+    audit_log("replication.config.save", target=host["address"], host=host["address"],
+              success=result["success"],
+              details={"keys": sorted(values.keys()), "config_path": result.get("config_path")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/run", methods=["POST"])
+@login_required
+def api_replication_run():
+    from app.replication import run_now
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    source = (data.get("source") or request.args.get("source") or None)
+    result = run_now(host, source=source)
+    audit_log("replication.run", target=host["address"], host=host["address"],
+              success=result["success"],
+              details={"exit_code": result.get("exit_code")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/bootstrap-ssh", methods=["POST"])
+@login_required
+def api_replication_bootstrap_ssh():
+    from app.replication import bootstrap_ssh
+    data = request.get_json(silent=True) or {}
+    t_addr = (data.get("target") or "").strip()
+    s_addr = (data.get("source") or "").strip()
+    if not t_addr or not s_addr:
+        return jsonify({"error": "target and source are required"}), 400
+    if t_addr == s_addr:
+        return jsonify({"error": "target and source must differ"}), 400
+    target = _find_host(t_addr)
+    source = _find_host(s_addr)
+    if not target:
+        return jsonify({"error": "Target host not found"}), 404
+    if not source:
+        return jsonify({"error": "Source host not found"}), 404
+    result = bootstrap_ssh(target, source)
+    audit_log("replication.bootstrap_ssh",
+              target=f"{t_addr}<-{s_addr}", host=t_addr,
+              success=result.get("success", False),
+              details={"probe_ok": result.get("probe_ok"),
+                       "key_generated": result.get("key_generated"),
+                       "error": result.get("error")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/create-target", methods=["POST"])
+@login_required
+def api_replication_create_target():
+    from app.replication import create_target_dataset
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    dataset = (data.get("dataset") or "").strip()
+    if not dataset:
+        return jsonify({"error": "dataset is required"}), 400
+    result = create_target_dataset(host, dataset)
+    audit_log("replication.create_target", target=dataset, host=host["address"],
+              success=result.get("success", False),
+              details={"existed": result.get("existed"),
+                       "created": result.get("created")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/tagged-datasets")
+@login_required
+def api_replication_tagged_datasets():
+    from app.replication import list_tagged_datasets
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    tag = request.args.get("tag") or "bashclub:zsync"
+    return jsonify(list_tagged_datasets(host, tag))
+
+
+@app.route("/api/replication/set-tags", methods=["POST"])
+@login_required
+def api_replication_set_tags():
+    from app.replication import set_dataset_tags
+    data = request.get_json(silent=True) or {}
+    host_addr = (data.get("host") or "").strip()
+    if not host_addr:
+        return jsonify({"error": "host required"}), 400
+    host = _find_host(host_addr)
+    if not host:
+        return jsonify({"error": "host not found"}), 404
+    tag = (data.get("tag") or "bashclub:zsync").strip()
+    value = (data.get("value") or "all").strip()
+    enable = data.get("enable") or []
+    disable = data.get("disable") or []
+    if not isinstance(enable, list) or not isinstance(disable, list):
+        return jsonify({"error": "enable and disable must be arrays"}), 400
+    result = set_dataset_tags(host, tag, enable, disable, value)
+    audit_log("replication.set_tags", target=host_addr, host=host_addr,
+              success=result.get("success", False),
+              details={"tag": tag, "enable": enable, "disable": disable})
+    return jsonify(result)
+
+
+@app.route("/api/replication/log")
+@login_required
+def api_replication_log():
+    from app.replication import tail_log
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    try:
+        lines = int(request.args.get("lines", 200))
+    except (TypeError, ValueError):
+        lines = 200
+    return jsonify(tail_log(host, lines))
+
+
+@app.route("/api/replication/config", methods=["DELETE"])
+@login_required
+def api_replication_config_delete():
+    from app.replication import delete_config
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    purge = (request.args.get("purge") or "").lower() in ("1", "true", "yes")
+    result = delete_config(host, source=source, purge_snapshots=purge)
+    audit_log("replication.config.delete", target=host["address"], host=host["address"],
+              success=result.get("success", False),
+              details={"source": source, "purge_snapshots": purge,
+                       "config_path": result.get("config_path"),
+                       "target_dataset": result.get("target_dataset"),
+                       "snapshots_purged": result.get("snapshots_purged"),
+                       "error": result.get("error")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/cron", methods=["GET"])
+@login_required
+def api_replication_cron_get():
+    from app.replication import get_cron
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    return jsonify(get_cron(host, source=source))
+
+
+@app.route("/api/replication/cron", methods=["POST"])
+@login_required
+def api_replication_cron_set():
+    from app.replication import set_cron
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    schedule = (data.get("schedule") or "").strip()
+    source = (data.get("source") or request.args.get("source") or None)
+    log_path = (data.get("log_path") or "/var/log/bashclub-zsync.log").strip()
+    if not schedule:
+        return jsonify({"error": "schedule required"}), 400
+    result = set_cron(host, schedule, source=source, log_path=log_path)
+    audit_log("replication.cron.set", target=host["address"], host=host["address"],
+              success=result.get("success", False),
+              details={"schedule": schedule, "config_path": result.get("config_path")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/cron", methods=["DELETE"])
+@login_required
+def api_replication_cron_delete():
+    from app.replication import remove_cron
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    result = remove_cron(host, source=source)
+    audit_log("replication.cron.remove", target=host["address"], host=host["address"],
+              success=result.get("success", False))
+    return jsonify(result)
+
+
+@app.route("/api/replication/configs")
+@login_required
+def api_replication_configs():
+    from app.replication import list_configs
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(list_configs(host))
+
+
+@app.route("/api/replication/checkzfs")
+@login_required
+def api_replication_checkzfs():
+    from app.replication import run_checkzfs
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = (request.args.get("source") or "").strip()
+    if not source:
+        return jsonify({"error": "source required"}), 400
+    result = run_checkzfs(host, source)
+    audit_log("replication.checkzfs", target=source, host=host["address"],
+              success=result.get("success", False),
+              details={"summary": result.get("summary", {})})
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
 # Prometheus exporter — opt-in via PROMETHEUS_TOKEN env var
 # ---------------------------------------------------------------------------
 

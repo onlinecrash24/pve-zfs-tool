@@ -143,6 +143,7 @@ async function renderView() {
         datasets: viewDatasets,
         snapshots: viewSnapshots,
         "snapshot-check": viewSnapshotCheck,
+        replication: viewReplication,
         guests: viewGuests,
         health: viewHealth,
         metrics: viewMetrics,
@@ -2640,6 +2641,892 @@ async function viewAudit() {
         sessionStorage.removeItem("audit_host_filter");
         viewAudit();
     };
+}
+
+
+// -- Replication (bashclub-zsync) -----------------------------------------
+async function viewReplication() {
+    setContent(loading());
+    let hosts;
+    try { hosts = await API.get("/api/hosts"); }
+    catch (e) { setContent(h("p", { className: "muted" }, e.message || "Failed to load hosts")); return; }
+
+    if (!hosts || hosts.length < 2) {
+        setContent(h("div", { className: "card" },
+            h("div", { className: "card-body" }, t("repl_need_two_hosts"))));
+        return;
+    }
+
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("repl_title")),
+        h("p", {}, t("repl_subtitle")),
+    ]));
+
+    // -- Existing pairs overview (multi-config) ---------------------------
+    // Scans every known host for /etc/bashclub/*.conf so the user sees all
+    // replication pairs across the fleet at a glance and can jump to one
+    // with a single click — instead of guessing source/target dropdowns.
+    const pairsCard = h("div", { className: "card", style: "margin-bottom:16px" });
+    const pairsRefreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
+    const pairsHeader = h("div", { className: "card-header" }, [
+        h("span", {}, t("repl_pairs_title")),
+        pairsRefreshBtn,
+    ]);
+    pairsCard.appendChild(pairsHeader);
+    const pairsBody = h("div", { className: "card-body" }, h("p", { className: "muted", style: "margin:0" }, t("loading")));
+    pairsCard.appendChild(pairsBody);
+    container.appendChild(pairsCard);
+
+    async function refreshPairs() {
+        pairsBody.innerHTML = loading();
+        // Probe every host in parallel; treat failures (host offline, no
+        // bashclub installed, etc.) as "no pairs" rather than aborting.
+        const probes = await Promise.all(hosts.map(async (hst) => {
+            try {
+                const r = await API.get("/api/replication/configs?host=" + encodeURIComponent(hst.address));
+                return { host: hst, configs: r.configs || [] };
+            } catch (e) {
+                return { host: hst, configs: [] };
+            }
+        }));
+        const all = [];
+        probes.forEach(p => p.configs.forEach(c => {
+            // Hide the bashclub default template that ships with every install
+            // (/etc/bashclub/zsync.conf with placeholder source "user@host"
+            // and target "pool/dataset"). Only real per-source pairs are
+            // interesting in this overview.
+            if ((c.path || "").endsWith("/zsync.conf")) return;
+            const srcLow = (c.source || "").toLowerCase();
+            const tgtLow = (c.target || "").toLowerCase();
+            if (srcLow === "user@host" || tgtLow === "pool/dataset") return;
+            all.push({ targetHost: p.host, ...c });
+        }));
+
+        if (!all.length) {
+            pairsBody.innerHTML = "";
+            pairsBody.appendChild(h("p", { className: "muted", style: "margin:0" }, t("repl_pairs_empty")));
+            return;
+        }
+
+        const tbl = h("table", { className: "data-table", style: "margin:0;font-size:13px;width:100%" });
+        tbl.appendChild(h("thead", {}, h("tr", {}, [
+            h("th", {}, t("repl_pairs_source")),
+            h("th", {}, t("repl_pairs_target_host")),
+            h("th", {}, t("repl_pairs_target_ds")),
+            h("th", {}, t("repl_pairs_path")),
+            h("th", { style: "width:200px;text-align:right" }, ""),
+        ])));
+        const tb = h("tbody");
+        all.forEach(p => {
+            const sourceAddr = (p.source || "").includes("@") ? p.source.split("@")[1] : (p.source || "");
+            const openBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("repl_pairs_open"));
+            const delBtn  = h("button", { className: "btn btn-sm btn-danger" }, t("repl_pairs_delete"));
+            openBtn.onclick = () => {
+                // Locate matching source host in our hosts list (by address) and
+                // pre-select dropdowns so renderAll() loads this pair into the wizard.
+                const srcHst = hosts.find(x => x.address === sourceAddr);
+                if (!srcHst) {
+                    toast(t("repl_pairs_source_unknown"), "error");
+                    return;
+                }
+                sourceSel.value = srcHst.address;
+                targetSel.value = p.targetHost.address;
+                renderAll();
+                // scroll the wizard into view
+                setTimeout(() => selCard.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+            };
+            delBtn.onclick = () => openDeletePairModal(p);
+            tb.appendChild(h("tr", {}, [
+                h("td", { style: "font-family:monospace;font-size:12px" }, p.source || "—"),
+                h("td", {}, (p.targetHost.name || p.targetHost.address)),
+                h("td", { style: "font-family:monospace;font-size:12px" }, p.target || "—"),
+                h("td", { style: "font-family:monospace;font-size:11px;color:var(--text-secondary)" }, p.path || ""),
+                h("td", { style: "text-align:right" }, [openBtn, delBtn]),
+            ]));
+        });
+        tbl.appendChild(tb);
+        pairsBody.innerHTML = "";
+        pairsBody.appendChild(tbl);
+    }
+
+    function openDeletePairModal(p) {
+        // Two-stage delete: ask whether to also wipe the replica target dataset.
+        const targetLabel = p.target ? p.target : "—";
+        const purgeCb = h("input", { type: "checkbox", id: "repl-purge-cb" });
+        const body = h("div", {}, [
+            h("p", {}, t("repl_pairs_delete_intro").replace("{src}", p.source || "?").replace("{tgt}", (p.targetHost.name || p.targetHost.address))),
+            h("p", { style: "font-size:12px;color:var(--text-secondary)" }, t("repl_pairs_delete_what")),
+            h("ul", { style: "font-size:13px;margin:6px 0 12px 18px;color:var(--text-secondary)" }, [
+                h("li", {}, t("repl_pairs_delete_li_cron")),
+                h("li", {}, t("repl_pairs_delete_li_config").replace("{path}", p.path || "?")),
+            ]),
+            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer" }, [
+                purgeCb,
+                h("div", {}, [
+                    h("div", { style: "font-weight:600;color:var(--danger)" }, t("repl_pairs_purge_label")),
+                    h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" },
+                        t("repl_pairs_purge_hint").replace("{ds}", targetLabel)),
+                ]),
+            ]),
+        ]);
+        const confirmBtn = h("button", { className: "btn btn-danger" }, t("repl_pairs_delete"));
+        const cancelBtn = h("button", { className: "btn" }, t("cancel"));
+        cancelBtn.onclick = closeModal;
+        confirmBtn.onclick = async () => {
+            const purge = purgeCb.checked;
+            const phrase = purge ? t("repl_pairs_purge_confirm").replace("{ds}", targetLabel) : t("repl_pairs_delete_confirm");
+            if (!confirm(phrase)) return;
+            confirmBtn.disabled = true;
+            try {
+                const url = "/api/replication/config?host=" + encodeURIComponent(p.targetHost.address) +
+                            "&source=" + encodeURIComponent(p.source) +
+                            (purge ? "&purge=1" : "");
+                const r = await API.del(url, {});
+                if (r.success) {
+                    let msg = t("repl_pairs_delete_done");
+                    if (purge) {
+                        const n = r.snapshots_destroyed_count || 0;
+                        if (n > 0 || r.snapshots_purged) {
+                            msg += " — " + t("repl_pairs_purge_done").replace("{n}", String(n));
+                        } else {
+                            msg += " — " + t("repl_pairs_purge_none");
+                        }
+                        if (r.snapshots_failed_count) {
+                            msg += " (" + r.snapshots_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
+                        }
+                    }
+                    toast(msg, "success");
+                } else {
+                    toast(r.error || t("failed"), "error");
+                }
+                closeModal();
+                refreshPairs();
+            } catch (e) { toast(e.message, "error"); }
+            finally { confirmBtn.disabled = false; }
+        };
+        // openModal takes HTML strings; we want DOM nodes for the checkbox
+        // event-binding to survive. Open empty, then replace body+footer.
+        openModal(t("repl_pairs_delete_title"), "");
+        const mb = document.getElementById("modal-body");
+        const mf = document.getElementById("modal-footer");
+        mb.innerHTML = ""; mb.appendChild(body);
+        mf.innerHTML = "";
+        mf.appendChild(cancelBtn);
+        mf.appendChild(confirmBtn);
+    }
+
+    pairsRefreshBtn.onclick = refreshPairs;
+
+    // -- Step 1: Source + Target host selection ----------------------------
+    const selCard = h("div", { className: "card" });
+    selCard.appendChild(h("div", { className: "card-header" },
+        "1. " + t("repl_pair_title")));
+    const selBody = h("div", { className: "card-body" });
+
+    const mkOptions = (selectedAddr) => {
+        const opts = [h("option", { value: "" }, "— " + t("repl_choose") + " —")];
+        hosts.forEach(hst => {
+            const opt = h("option", { value: hst.address }, (hst.name || hst.address) + " (" + hst.address + ")");
+            if (selectedAddr === hst.address) opt.selected = true;
+            opts.push(opt);
+        });
+        return opts;
+    };
+
+    const sourceSel = h("select", { className: "form-input", style: "width:100%" }, mkOptions(""));
+    const targetSel = h("select", { className: "form-input", style: "width:100%" }, mkOptions(""));
+
+    const selGrid = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" }, [
+        h("div", {}, [
+            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_source_host")),
+            sourceSel,
+            h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_source_host_hint")),
+        ]),
+        h("div", {}, [
+            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_target_host")),
+            targetSel,
+            h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_target_host_hint")),
+        ]),
+    ]);
+    selBody.appendChild(selGrid);
+    selCard.appendChild(selBody);
+    container.appendChild(selCard);
+
+    // Mount points for dynamic sections (rendered after host pair is chosen)
+    const setupMount    = h("div");
+    const datasetsMount = h("div");
+    const configMount   = h("div");
+    const logMount      = h("div");
+    container.appendChild(setupMount);
+    container.appendChild(datasetsMount);
+    container.appendChild(configMount);
+    container.appendChild(logMount);
+
+    setContent(container);
+
+    sourceSel.onchange = () => renderAll();
+    targetSel.onchange = () => renderAll();
+
+    // Initial load of the existing-pairs overview
+    refreshPairs();
+
+    async function renderAll() {
+        setupMount.innerHTML = "";
+        datasetsMount.innerHTML = "";
+        configMount.innerHTML = "";
+        logMount.innerHTML = "";
+
+        const src = hosts.find(x => x.address === sourceSel.value);
+        const tgt = hosts.find(x => x.address === targetSel.value);
+        if (!src || !tgt) return;
+        if (src.address === tgt.address) {
+            setupMount.appendChild(h("div", { className: "card", style: "margin-top:16px" },
+                h("div", { className: "card-body" }, t("repl_same_host"))));
+            return;
+        }
+
+        // qs targets the (replication) target host; qsPair adds source so the
+        // backend resolves the per-source config file (/etc/bashclub/<src-ip>.conf).
+        const qs = "?host=" + encodeURIComponent(tgt.address);
+        const qsPair = qs + "&source=" + encodeURIComponent(src.address);
+        const qsSrc = "?host=" + encodeURIComponent(src.address);
+
+        // Load status for BOTH hosts — loading() returns an HTML string, not a node
+        setupMount.innerHTML = loading();
+        let status, srcStatus;
+        try {
+            [status, srcStatus] = await Promise.all([
+                API.get("/api/replication/status" + qsPair),
+                API.get("/api/replication/status" + qsSrc),
+            ]);
+        }
+        catch (e) { setupMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Failed")}</p>`; return; }
+        setupMount.innerHTML = "";
+
+        // -- Step 2: Setup (install + SSH bootstrap) --------------------
+        const setupCard = h("div", { className: "card", style: "margin-top:16px" });
+        setupCard.appendChild(h("div", { className: "card-header" },
+            "2. " + t("repl_setup_title")));
+        const setupBody = h("div", { className: "card-body" });
+        setupCard.appendChild(setupBody);
+        setupMount.appendChild(setupCard);
+
+        // Status badges — show PVE + zsync status for BOTH hosts
+        const mkPveBadge = (label, st) => {
+            const cls = st.is_pve ? "badge-success" : "badge-danger";
+            const txt = (st.is_pve ? "\u2713 " : "\u2717 ") + label + " PVE" + (st.pve_version ? " (" + (st.pve_version.split(/\s+/)[1] || "") + ")" : "");
+            return h("span", { className: "badge " + cls, title: st.pve_version || "" }, txt);
+        };
+        const mkZsyncBadge = (label, st) => {
+            const cls = st.installed ? "badge-success" : "badge-warning";
+            return h("span", { className: "badge " + cls },
+                (st.installed ? "\u2713 " : "") + label + " " + t("repl_setup_zsync") + ": " + (st.installed ? t("repl_installed") : t("repl_not_installed")));
+        };
+        const srcLabel = "[" + t("repl_source_short") + "]";
+        const tgtLabel = "[" + t("repl_target_short") + "]";
+        const badgeRow = h("div", { style: "display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap" });
+        badgeRow.appendChild(mkPveBadge(srcLabel, srcStatus));
+        badgeRow.appendChild(mkPveBadge(tgtLabel, status));
+        const zsyncBadgeSrc = mkZsyncBadge(srcLabel, srcStatus);
+        const zsyncBadge = mkZsyncBadge(tgtLabel, status);
+        badgeRow.appendChild(zsyncBadgeSrc);
+        badgeRow.appendChild(zsyncBadge);
+        const sshBadgeWrap = h("span", {}); // filled after probe
+        badgeRow.appendChild(sshBadgeWrap);
+        setupBody.appendChild(badgeRow);
+
+        // Warn if either host isn't PVE
+        if (!srcStatus.is_pve || !status.is_pve) {
+            setupBody.appendChild(h("div", { className: "alert alert-warning", style: "margin-bottom:10px;font-size:12px" },
+                t("repl_pve_warning")));
+        }
+
+        setupBody.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin-bottom:10px" },
+            t("repl_setup_desc").replace("{source}", src.name || src.address).replace("{target}", tgt.name || tgt.address)));
+
+        const setupBtn = h("button", { className: "btn btn-primary" }, t("repl_setup_btn"));
+        const setupResult = h("div", { style: "margin-top:10px;font-size:12px" });
+        setupBody.appendChild(setupBtn);
+        setupBody.appendChild(setupResult);
+
+        setupBtn.onclick = async () => {
+            if (!confirm(t("repl_setup_confirm"))) return;
+            setupBtn.disabled = true;
+            setupResult.innerHTML = "";
+            const steps = h("div");
+            setupResult.appendChild(steps);
+            const addStep = (label, state) => {
+                steps.appendChild(h("div", { style: "margin:3px 0" }, [
+                    h("span", { style: "display:inline-block;width:20px;text-align:center;color:" + (state === "ok" ? "var(--success)" : state === "fail" ? "var(--danger)" : "var(--text-secondary)") }, state === "ok" ? "\u2713" : state === "fail" ? "\u2717" : "\u22ef"),
+                    h("span", {}, " " + label),
+                ]));
+            };
+
+            // Step A: install on BOTH hosts (zsync needs to be on both ends)
+            const installOn = async (label, hostAddr, statusRef, badge) => {
+                if (statusRef.installed) return true;
+                setupBtn.textContent = t("repl_installing") + " " + label;
+                addStep(t("repl_setup_step_install") + " " + label, "pending");
+                try {
+                    const r = await API.post("/api/replication/install?host=" + encodeURIComponent(hostAddr), {});
+                    steps.lastChild.remove();
+                    addStep(t("repl_setup_step_install") + " " + label, r.success ? "ok" : "fail");
+                    if (!r.success) {
+                        openModal(t("repl_install_failed") + " — " + label, `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
+                        return false;
+                    }
+                    statusRef.installed = true;
+                    badge.className = "badge badge-success";
+                    badge.textContent = "\u2713 " + label + " " + t("repl_setup_zsync") + ": " + t("repl_installed");
+                    return true;
+                } catch (e) {
+                    steps.lastChild.remove();
+                    addStep(t("repl_setup_step_install") + " " + label + " — " + e.message, "fail");
+                    return false;
+                }
+            };
+            if (!(await installOn(srcLabel, src.address, srcStatus, zsyncBadgeSrc))) {
+                setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn"); return;
+            }
+            if (!(await installOn(tgtLabel, tgt.address, status, zsyncBadge))) {
+                setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn"); return;
+            }
+
+            // Step B: SSH bootstrap target → source
+            setupBtn.textContent = t("repl_setup_step_ssh");
+            addStep(t("repl_setup_step_ssh"), "pending");
+            try {
+                const r = await API.post("/api/replication/bootstrap-ssh", { target: tgt.address, source: src.address });
+                steps.lastChild.remove();
+                addStep(t("repl_ssh_step_key") + (r.key_generated ? " (" + t("repl_ssh_generated") + ")" : " (" + t("repl_ssh_existing") + ")"), r.target_pubkey ? "ok" : "fail");
+                addStep(t("repl_ssh_step_kh"), r.known_hosts_updated ? "ok" : "fail");
+                addStep(t("repl_ssh_step_ak"), r.authorized_keys_updated ? "ok" : "fail");
+                addStep(t("repl_ssh_step_probe"), r.probe_ok ? "ok" : "fail");
+                if (r.probe_output && !r.probe_ok) {
+                    setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
+                }
+                sshBadgeWrap.innerHTML = "";
+                sshBadgeWrap.appendChild(h("span", { className: "badge " + (r.success ? "badge-success" : "badge-warning") },
+                    (r.success ? "\u2713 " : "") + "SSH: " + (r.success ? t("repl_ssh_ok") : t("repl_ssh_not_ok"))));
+                if (r.success) {
+                    toast(t("repl_setup_ok"), "success");
+                    // re-render to unlock the following sections (status refresh)
+                    renderAll();
+                } else {
+                    toast(r.error || t("repl_ssh_bootstrap_failed"), "error");
+                }
+            } catch (e) { toast(e.message, "error"); }
+            finally {
+                setupBtn.disabled = false;
+                setupBtn.textContent = t("repl_setup_btn");
+            }
+        };
+
+        // Bail here if not installed — user must click Setup first
+        if (!status.installed) return;
+
+        // -- Step 3: Datasets to replicate (from SOURCE) ------------------
+        const dsCard = h("div", { className: "card", style: "margin-top:16px" });
+        dsCard.appendChild(h("div", { className: "card-header" },
+            "3. " + t("repl_datasets_title")));
+        const dsBody = h("div", { className: "card-body" });
+        dsCard.appendChild(dsBody);
+        datasetsMount.appendChild(dsCard);
+
+        dsBody.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin-bottom:8px" },
+            t("repl_datasets_desc").replace("{source}", src.name || src.address)));
+
+        const tagInputRow = h("div", { style: "display:flex;gap:8px;align-items:center;margin-bottom:10px" }, [
+            h("label", { style: "font-size:12px;color:var(--text-secondary)" }, t("repl_f_tag") + ":"),
+            h("input", { type: "text", className: "form-input", id: "repl-tag-input", value: (status.config && status.config.tag) || "bashclub:zsync", style: "max-width:220px" }),
+            h("button", { className: "btn btn-sm" }, t("refresh")),
+        ]);
+        const tagInput = tagInputRow.querySelector("input");
+        const tagRefreshBtn = tagInputRow.querySelector("button");
+        dsBody.appendChild(tagInputRow);
+
+        const dsListWrap = h("div", { style: "max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:8px;background:var(--bg)" }, t("loading"));
+        dsBody.appendChild(dsListWrap);
+
+        const dsActionRow = h("div", { style: "margin-top:10px;display:flex;gap:8px;flex-wrap:wrap" });
+        const dsSaveBtn = h("button", { className: "btn btn-primary" }, t("repl_datasets_apply"));
+        dsActionRow.appendChild(dsSaveBtn);
+        dsBody.appendChild(dsActionRow);
+
+        // Track initial state so we only send diffs on Apply
+        let initialTagged = new Set();
+        let currentChecks = new Map(); // name -> checkbox
+
+        async function loadDatasets() {
+            const srcQs = "?host=" + encodeURIComponent(src.address) + "&tag=" + encodeURIComponent(tagInput.value.trim() || "bashclub:zsync");
+            dsListWrap.textContent = t("loading");
+            try {
+                const r = await API.get("/api/replication/tagged-datasets" + srcQs);
+                dsListWrap.innerHTML = "";
+                currentChecks.clear();
+                initialTagged = new Set();
+                if (!r.datasets || !r.datasets.length) {
+                    dsListWrap.appendChild(h("p", { className: "muted" }, t("repl_datasets_none")));
+                    return;
+                }
+                r.datasets.forEach(d => {
+                    if (d.tagged) initialTagged.add(d.name);
+                    const row = h("label", { style: "display:flex;gap:8px;padding:4px 6px;align-items:center;cursor:pointer;border-radius:3px" });
+                    const cb = h("input", { type: "checkbox" });
+                    if (d.tagged) cb.checked = true;
+                    currentChecks.set(d.name, cb);
+                    row.appendChild(cb);
+                    row.appendChild(h("span", { style: "font-family:monospace;font-size:13px;flex:1" }, d.name));
+                    row.appendChild(h("span", { style: "font-size:11px;color:var(--text-secondary)" }, d.type));
+                    dsListWrap.appendChild(row);
+                });
+            } catch (e) { dsListWrap.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`; }
+        }
+        tagRefreshBtn.onclick = loadDatasets;
+        loadDatasets();
+
+        dsSaveBtn.onclick = async () => {
+            const tag = tagInput.value.trim() || "bashclub:zsync";
+            const enable = [], disable = [];
+            currentChecks.forEach((cb, name) => {
+                if (cb.checked && !initialTagged.has(name)) enable.push(name);
+                if (!cb.checked && initialTagged.has(name)) disable.push(name);
+            });
+            if (!enable.length && !disable.length) { toast(t("repl_datasets_nochange"), "info"); return; }
+            dsSaveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/set-tags", {
+                    host: src.address, tag, enable, disable,
+                });
+                if (r.success) {
+                    toast(t("repl_datasets_applied").replace("{n}", String(enable.length + disable.length)), "success");
+                    loadDatasets();
+                } else {
+                    const failed = (r.results || []).filter(x => !x.success).map(x => x.dataset + ": " + (x.stderr || "?"));
+                    openModal(t("repl_datasets_failed"), `<pre class="output">${escapeHtml(failed.join("\n"))}</pre>`);
+                }
+            } catch (e) { toast(e.message, "error"); }
+            finally { dsSaveBtn.disabled = false; }
+        };
+
+        // -- Step 4: Config -----------------------------------------------
+        const cfgCard = h("div", { className: "card", style: "margin-top:16px" });
+        cfgCard.appendChild(h("div", { className: "card-header" },
+            "4. " + t("repl_config_title")));
+        const cfgBody = h("div", { className: "card-body" });
+        cfgCard.appendChild(cfgBody);
+        configMount.appendChild(cfgCard);
+
+        const v = status.config || {};
+        const defSourceStr = (src.user || "root") + "@" + src.address;
+        const defSourcePort = String(src.port || 22);
+
+        // Target dataset dropdown
+        let datasets = [];
+        try {
+            const ds = await API.get("/api/datasets" + qs);
+            datasets = (ds.filesystems || ds || []).map(d => d.name || d).filter(n => typeof n === "string");
+        } catch (_) {}
+
+        const tgtSelect = h("select", { className: "form-input", style: "width:100%" }, [
+            h("option", { value: "" }, "— " + t("repl_choose") + " —"),
+            ...datasets.map(name => {
+                const opt = h("option", { value: name }, name);
+                if (name === v.target) opt.selected = true;
+                return opt;
+            }),
+            h("option", { value: "__new__" }, "+ " + t("repl_create_target")),
+        ]);
+        const tgtNewInput = h("input", { type: "text", className: "form-input", style: "margin-top:6px;display:none", placeholder: "rpool/repl", value: "rpool/repl" });
+        const tgtCreateBtn = h("button", { className: "btn btn-sm btn-warning", style: "margin-top:6px;margin-left:6px;display:none" }, t("repl_create_target_btn"));
+        tgtSelect.onchange = () => {
+            const show = tgtSelect.value === "__new__";
+            tgtNewInput.style.display = show ? "inline-block" : "none";
+            tgtCreateBtn.style.display = show ? "inline-block" : "none";
+        };
+        tgtCreateBtn.onclick = async () => {
+            const name = tgtNewInput.value.trim();
+            if (!name) { toast(t("repl_create_target_missing"), "error"); return; }
+            if (!confirm(t("repl_create_target_confirm").replace("{ds}", name))) return;
+            tgtCreateBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/create-target" + qs, { dataset: name });
+                if (r.success) {
+                    toast(r.created ? t("repl_create_target_created") : t("repl_create_target_existed"), "success");
+                    const opt = h("option", { value: name }, name);
+                    opt.selected = true;
+                    tgtSelect.insertBefore(opt, tgtSelect.querySelector("option[value='__new__']"));
+                    tgtSelect.value = name;
+                    tgtNewInput.style.display = "none";
+                    tgtCreateBtn.style.display = "none";
+                } else {
+                    toast(r.error || r.stderr || t("failed"), "error");
+                }
+            } catch (e) { toast(e.message, "error"); }
+            finally { tgtCreateBtn.disabled = false; }
+        };
+
+        const cfgInputs = {};
+        const form = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" });
+
+        const tgtCell = h("div");
+        tgtCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_target")));
+        tgtCell.appendChild(tgtSelect);
+        tgtCell.appendChild(h("div", { style: "white-space:nowrap" }, [tgtNewInput, tgtCreateBtn]));
+        tgtCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_target")));
+        form.appendChild(tgtCell);
+        cfgInputs.target = { get: () => tgtSelect.value === "__new__" ? tgtNewInput.value.trim() : tgtSelect.value };
+
+        const srcCell = h("div");
+        srcCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_source")));
+        const srcInput = h("input", { type: "text", className: "form-input", value: defSourceStr, readonly: true, style: "background:var(--bg)" });
+        srcCell.appendChild(srcInput);
+        srcCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_source_auto")));
+        form.appendChild(srcCell);
+        cfgInputs.source = { get: () => srcInput.value.trim() };
+
+        // Field list mirrors the upstream default /etc/bashclub/zsync.conf.
+        // ``def`` is the value applied when the field is left empty on save —
+        // the placeholder shows it, so the form looks clean but a save still
+        // produces a complete, ready-to-run config.
+        const simple = [
+            { key: "sshport",                      label: "repl_f_sshport",                      hint: "repl_h_sshport",                      def: String(defSourcePort || "22") },
+            { key: "tag",                          label: "repl_f_tag",                          hint: "repl_h_tag",                          def: "bashclub:zsync" },
+            { key: "snapshot_filter",              label: "repl_f_snapshot_filter",              hint: "repl_h_snapshot_filter",              def: "hourly|daily|weekly|monthly" },
+            { key: "min_keep",                     label: "repl_f_min_keep",                     hint: "repl_h_min_keep",                     def: "2" },
+            { key: "zfs_auto_snapshot_keep",       label: "repl_f_zas_keep",                     hint: "repl_h_zas_keep",                     def: "0" },
+            { key: "zfs_auto_snapshot_label",      label: "repl_f_zas_label",                    hint: "repl_h_zas_label",                    def: "backup" },
+            { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       def: "zas" },
+            { key: "prefix",                       label: "repl_f_prefix",                       hint: "",                                    def: "" },
+            { key: "suffix",                       label: "repl_f_suffix",                       hint: "",                                    def: "" },
+            { key: "checkzfs_disabled",            label: "repl_f_checkzfs_disabled",            hint: "repl_h_checkzfs_disabled",            def: "0" },
+            { key: "checkzfs_local",               label: "repl_f_checkzfs_local",               hint: "repl_h_checkzfs_local",               def: "0" },
+            { key: "checkzfs_prefix",              label: "repl_f_checkzfs_prefix",              hint: "repl_h_checkzfs_prefix",              def: "zsync" },
+            { key: "checkzfs_max_age",             label: "repl_f_checkzfs_max_age",             hint: "repl_h_checkzfs_max_age",             def: "1500,6000" },
+            { key: "checkzfs_max_snapshot_count",  label: "repl_f_checkzfs_max_count",           hint: "repl_h_checkzfs_max_count",           def: "150,165" },
+            { key: "checkzfs_spool",               label: "repl_f_checkzfs_spool",               hint: "repl_h_checkzfs_spool",               def: "0" },
+            { key: "checkzfs_spool_maxage",        label: "repl_f_checkzfs_spool_maxage",        hint: "repl_h_checkzfs_spool_maxage",        def: "87000" },
+        ];
+        simple.forEach(f => {
+            const cell = h("div");
+            cell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t(f.label)));
+            const input = h("input", { type: "text", className: "form-input", placeholder: f.def, value: v[f.key] ?? "" });
+            // Empty input -> apply the default. This keeps the form tidy but
+            // still produces a complete config on save.
+            cfgInputs[f.key] = { get: () => {
+                const val = input.value.trim();
+                return val === "" ? f.def : val;
+            } };
+            cell.appendChild(input);
+            if (f.hint) cell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t(f.hint)));
+            form.appendChild(cell);
+        });
+        cfgBody.appendChild(form);
+
+        const cfgBtnRow = h("div", { style: "margin-top:15px;display:flex;gap:8px;flex-wrap:wrap" });
+        const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
+        saveBtn.onclick = async () => {
+            const values = {};
+            Object.keys(cfgInputs).forEach(k => { values[k] = cfgInputs[k].get(); });
+            if (!values.target) { toast(t("repl_target_required"), "error"); return; }
+            if (!values.source) { toast(t("repl_source_required"), "error"); return; }
+            saveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/config" + qsPair, { values, source: src.address });
+                if (r.success) toast(t("repl_config_saved"), "success");
+                else toast(r.stderr || t("failed"), "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { saveBtn.disabled = false; }
+        };
+        cfgBtnRow.appendChild(saveBtn);
+
+        const runBtn = h("button", { className: "btn btn-warning" }, t("repl_run_now"));
+        runBtn.onclick = async () => {
+            if (!confirm(t("repl_run_confirm"))) return;
+            runBtn.disabled = true; runBtn.textContent = t("repl_running");
+            try {
+                const r = await API.post("/api/replication/run" + qsPair, { source: src.address });
+                if (r.success) toast(t("repl_run_ok"), "success");
+                else toast(t("repl_run_failed") + " (exit=" + (r.exit_code ?? "?") + ")", "error");
+                refreshLog();
+            } catch (e) { toast(e.message, "error"); }
+            finally { runBtn.disabled = false; runBtn.textContent = t("repl_run_now"); }
+        };
+        cfgBtnRow.appendChild(runBtn);
+        cfgBody.appendChild(cfgBtnRow);
+
+        // -- Step 5: Cron schedule ----------------------------------------
+        const cronCard = h("div", { className: "card", style: "margin-top:16px" });
+        cronCard.appendChild(h("div", { className: "card-header" }, "5. " + t("repl_cron_title")));
+        const cronBody = h("div", { className: "card-body" });
+        cronCard.appendChild(cronBody);
+        configMount.appendChild(cronCard);
+
+        cronBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:8px" },
+            t("repl_cron_desc")));
+
+        const cronStatusLine = h("div", { style: "margin-bottom:10px;font-size:13px" }, t("loading"));
+        cronBody.appendChild(cronStatusLine);
+
+        const cronPresetSel = h("select", { className: "form-input", style: "max-width:340px" });
+        const cronCustomInput = h("input", { type: "text", className: "form-input", style: "max-width:240px;font-family:monospace", placeholder: "20 0-22 * * *" });
+        const cronPreview = h("code", { style: "font-size:12px;color:var(--text-secondary)" }, "");
+
+        // Presets are loaded from the backend response; fallback list mirrors
+        // the bashclub default if the call fails.
+        const fallbackPresets = [
+            { id: "bashclub_default", label: "repl_cron_preset_default", schedule: "20 0-22 * * *" },
+            { id: "every_15min", label: "repl_cron_preset_15min", schedule: "*/15 * * * *" },
+            { id: "every_30min", label: "repl_cron_preset_30min", schedule: "*/30 * * * *" },
+            { id: "hourly", label: "repl_cron_preset_hourly", schedule: "0 * * * *" },
+            { id: "every_2h", label: "repl_cron_preset_2h", schedule: "0 */2 * * *" },
+            { id: "every_6h", label: "repl_cron_preset_6h", schedule: "0 */6 * * *" },
+            { id: "daily_0300", label: "repl_cron_preset_daily", schedule: "0 3 * * *" },
+        ];
+
+        const buildPresets = (presets) => {
+            cronPresetSel.innerHTML = "";
+            (presets || fallbackPresets).forEach(p => {
+                cronPresetSel.appendChild(h("option", { value: p.schedule, "data-id": p.id }, t(p.label) + " — " + p.schedule));
+            });
+            cronPresetSel.appendChild(h("option", { value: "__custom__" }, t("repl_cron_custom")));
+        };
+        buildPresets(fallbackPresets);
+
+        const cronRow1 = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [
+            h("label", { style: "font-size:12px;color:var(--text-secondary);min-width:90px" }, t("repl_cron_preset") + ":"),
+            cronPresetSel,
+        ]);
+        const cronRow2 = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [
+            h("label", { style: "font-size:12px;color:var(--text-secondary);min-width:90px" }, t("repl_cron_expr") + ":"),
+            cronCustomInput,
+            cronPreview,
+        ]);
+        cronBody.appendChild(cronRow1);
+        cronBody.appendChild(cronRow2);
+
+        const updatePreview = () => {
+            const expr = cronPresetSel.value === "__custom__" ? cronCustomInput.value.trim() : cronPresetSel.value;
+            cronPreview.textContent = expr ? ("→ " + expr + " bashclub-zsync -c " + (status.config_path || "/etc/bashclub/" + (src.address || "").replace(/[^A-Za-z0-9._-]/g, "_") + ".conf")) : "";
+        };
+        cronPresetSel.onchange = () => {
+            cronCustomInput.value = cronPresetSel.value === "__custom__" ? cronCustomInput.value : cronPresetSel.value;
+            updatePreview();
+        };
+        cronCustomInput.oninput = updatePreview;
+
+        const cronBtnRow = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" });
+        const cronSaveBtn = h("button", { className: "btn btn-primary" }, t("repl_cron_apply"));
+        const cronRemoveBtn = h("button", { className: "btn btn-danger" }, t("repl_cron_remove"));
+        cronBtnRow.appendChild(cronSaveBtn);
+        cronBtnRow.appendChild(cronRemoveBtn);
+        cronBody.appendChild(cronBtnRow);
+
+        async function refreshCron() {
+            cronStatusLine.textContent = t("loading");
+            try {
+                const r = await API.get("/api/replication/cron" + qsPair);
+                buildPresets(r.presets);
+                if (r.installed && r.entry) {
+                    cronStatusLine.innerHTML = "";
+                    cronStatusLine.appendChild(h("span", { className: "badge badge-success", style: "margin-right:8px" }, t("repl_cron_active")));
+                    cronStatusLine.appendChild(h("code", { style: "font-size:12px" }, r.entry.raw));
+                    // Pre-select matching preset, else custom
+                    let matched = false;
+                    for (const opt of cronPresetSel.options) {
+                        if (opt.value === r.entry.schedule) { opt.selected = true; matched = true; break; }
+                    }
+                    if (!matched) {
+                        cronPresetSel.value = "__custom__";
+                        cronCustomInput.value = r.entry.schedule;
+                    } else {
+                        cronCustomInput.value = r.entry.schedule;
+                    }
+                } else {
+                    cronStatusLine.innerHTML = "";
+                    cronStatusLine.appendChild(h("span", { className: "badge badge-warning" }, t("repl_cron_inactive")));
+                    cronCustomInput.value = cronPresetSel.value === "__custom__" ? "" : cronPresetSel.value;
+                }
+                updatePreview();
+            } catch (e) {
+                cronStatusLine.textContent = e.message || "";
+            }
+        }
+
+        cronSaveBtn.onclick = async () => {
+            const expr = cronPresetSel.value === "__custom__" ? cronCustomInput.value.trim() : cronPresetSel.value;
+            if (!expr || expr.split(/\s+/).length !== 5) {
+                toast(t("repl_cron_invalid"), "error"); return;
+            }
+            cronSaveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/cron" + qsPair, { schedule: expr, source: src.address });
+                if (r.success) { toast(t("repl_cron_saved"), "success"); refreshCron(); }
+                else toast(r.error || r.stderr || t("failed"), "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { cronSaveBtn.disabled = false; }
+        };
+
+        cronRemoveBtn.onclick = async () => {
+            if (!confirm(t("repl_cron_remove_confirm"))) return;
+            cronRemoveBtn.disabled = true;
+            try {
+                const r = await API.del("/api/replication/cron" + qsPair, {});
+                if (r.success) { toast(t("repl_cron_removed"), "success"); refreshCron(); }
+                else toast(r.stderr || t("failed"), "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { cronRemoveBtn.disabled = false; }
+        };
+
+        refreshCron();
+
+        // -- Step 6: checkzfs status (replication health overview) -------
+        const ckCard = h("div", { className: "card", style: "margin-top:16px" });
+        const ckRefreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
+        const ckHeader = h("div", { className: "card-header" }, [h("span", {}, "6. " + t("repl_checkzfs_title")), ckRefreshBtn]);
+        ckCard.appendChild(ckHeader);
+        const ckBody = h("div", { className: "card-body" });
+        ckBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:8px" },
+            t("repl_checkzfs_desc").replace("{src}", src.name || src.address).replace("{tgt}", tgt.name || tgt.address)));
+        const ckSummary = h("div", { style: "margin-bottom:8px;font-size:13px" });
+        const ckTableWrap = h("div", { style: "max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg)" }, t("loading"));
+        ckBody.appendChild(ckSummary);
+        ckBody.appendChild(ckTableWrap);
+        ckCard.appendChild(ckBody);
+        logMount.appendChild(ckCard);
+
+        // Filter toggle: show only datasets that actually have a replica
+        const ckFilterWrap = h("label", { style: "display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-left:8px" });
+        const ckFilterCb = h("input", { type: "checkbox", checked: true });
+        ckFilterWrap.appendChild(ckFilterCb);
+        ckFilterWrap.appendChild(h("span", {}, t("repl_ck_only_replicated")));
+        ckSummary.appendChild(ckFilterWrap);
+
+        let ckLastRows = [];
+
+        const stripSourcePrefix = (s) => {
+            // checkzfs prints "1.2.3.4#dataset". Drop the "<ip>#" prefix for readability.
+            const idx = (s || "").indexOf("#");
+            return idx >= 0 ? s.slice(idx + 1) : (s || "");
+        };
+
+        const renderCkTable = () => {
+            const onlyRepl = ckFilterCb.checked;
+            // Group rows by their full source spec ("<ip>#<dataset>"). When the
+            // filter is on, keep only groups that contain at least one row with
+            // a non-empty replica column. Within a group, render the row with
+            // a replica first (it carries the meaningful timestamp).
+            const groups = new Map();
+            (ckLastRows || []).forEach(row => {
+                const key = row.source || "";
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(row);
+            });
+            const filteredKeys = [];
+            groups.forEach((rows, key) => {
+                if (onlyRepl) {
+                    if (rows.some(r => r.replica && r.replica.length)) filteredKeys.push(key);
+                } else {
+                    filteredKeys.push(key);
+                }
+            });
+
+            if (!filteredKeys.length) {
+                ckTableWrap.innerHTML = `<p class="muted" style="padding:10px">${escapeHtml(onlyRepl ? t("repl_ck_no_replicas") : t("repl_checkzfs_empty"))}</p>`;
+                return;
+            }
+
+            const table = h("table", { className: "data-table", style: "margin:0;font-size:12px;width:100%" });
+            const thead = h("thead", {}, h("tr", {}, [
+                h("th", { style: "width:70px" }, t("repl_ck_status")),
+                h("th", {}, t("repl_ck_source")),
+                h("th", {}, t("repl_ck_replica")),
+                h("th", {}, t("repl_ck_snapshot")),
+                h("th", { style: "width:90px;text-align:right" }, t("repl_ck_age")),
+                h("th", { style: "width:60px;text-align:right" }, t("repl_ck_count")),
+                h("th", {}, t("repl_ck_message")),
+            ]));
+            table.appendChild(thead);
+            const tbody = h("tbody");
+
+            filteredKeys.forEach(key => {
+                const rows = groups.get(key);
+                // Sort: rows WITH replica first, source-only row second.
+                rows.sort((a, b) => (b.replica ? 1 : 0) - (a.replica ? 1 : 0));
+                rows.forEach((row, i) => {
+                    const stCls = row.status === "ok" ? "badge-success"
+                                : row.status === "warn" ? "badge-warning"
+                                : row.status === "crit" ? "badge-danger" : "badge-secondary";
+                    const stLabel = (row.status || "").toUpperCase();
+                    const trStyle = i === 0
+                        ? "border-top:1px solid var(--border)"
+                        : "background:var(--bg-secondary,rgba(255,255,255,0.02))";
+                    const dsCell = stripSourcePrefix(row.source);
+                    const tr = h("tr", { style: trStyle }, [
+                        h("td", {}, h("span", { className: "badge " + stCls, style: "min-width:48px;text-align:center;display:inline-block" }, stLabel)),
+                        h("td", { style: "font-family:monospace;font-size:11px;word-break:break-all" }, dsCell),
+                        h("td", { style: "font-family:monospace;font-size:11px;word-break:break-all;color:" + (row.replica ? "var(--success)" : "var(--text-secondary)") },
+                            row.replica || "—"),
+                        h("td", { style: "font-family:monospace;font-size:11px;word-break:break-all" }, row.snapshot || "—"),
+                        h("td", { style: "text-align:right;white-space:nowrap" }, row.age || "—"),
+                        h("td", { style: "text-align:right" }, row.count || "0"),
+                        h("td", { style: "font-size:11px;color:var(--text-secondary)" }, row.message || ""),
+                    ]);
+                    tbody.appendChild(tr);
+                });
+            });
+
+            table.appendChild(tbody);
+            ckTableWrap.innerHTML = "";
+            ckTableWrap.appendChild(table);
+        };
+
+        ckFilterCb.onchange = renderCkTable;
+
+        async function refreshCheckzfs() {
+            ckTableWrap.innerHTML = loading();
+            // Keep the toggle but reset the pill summary
+            const oldPills = ckSummary.querySelectorAll(".badge");
+            oldPills.forEach(n => n.remove());
+            try {
+                const r = await API.get("/api/replication/checkzfs" + qs + "&source=" + encodeURIComponent(src.address));
+                if (r.error) {
+                    ckTableWrap.innerHTML = `<p class="muted" style="padding:10px">${escapeHtml(r.error)}</p>`;
+                    return;
+                }
+                const s = r.summary || {};
+                const mkPill = (label, n, cls) => h("span", { className: "badge " + cls, style: "margin-right:6px" }, label + ": " + (n || 0));
+                ckSummary.insertBefore(mkPill("CRIT", s.crit, "badge-danger"), ckFilterWrap);
+                ckSummary.insertBefore(mkPill("WARN", s.warn, "badge-warning"), ckSummary.firstChild);
+                ckSummary.insertBefore(mkPill("OK",   s.ok,   "badge-success"), ckSummary.firstChild);
+                ckLastRows = r.rows || [];
+                renderCkTable();
+            } catch (e) { ckTableWrap.innerHTML = `<p class="muted" style="padding:10px">${escapeHtml(e.message || "")}</p>`; }
+        }
+        ckRefreshBtn.onclick = refreshCheckzfs;
+        refreshCheckzfs();
+
+        // -- Step 7: Log --------------------------------------------------
+        const logCard = h("div", { className: "card", style: "margin-top:16px" });
+        const refreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
+        const logHeader = h("div", { className: "card-header" }, [h("span", {}, "7. " + t("repl_log_title")), refreshBtn]);
+        logCard.appendChild(logHeader);
+        const logBody = h("div", { className: "card-body" });
+        const logPre = h("pre", { style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
+        logBody.appendChild(logPre);
+        logCard.appendChild(logBody);
+        logMount.appendChild(logCard);
+
+        async function refreshLog() {
+            try {
+                const r = await API.get("/api/replication/log" + qs + "&lines=300");
+                logPre.textContent = r.present ? r.content : t("repl_log_empty");
+            } catch (e) { logPre.textContent = e.message || ""; }
+        }
+        refreshBtn.onclick = refreshLog;
+        refreshLog();
+    }
 }
 
 
