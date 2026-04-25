@@ -3238,52 +3238,113 @@ async function viewReplication() {
         ckCard.appendChild(ckBody);
         logMount.appendChild(ckCard);
 
+        // Filter toggle: show only datasets that actually have a replica
+        const ckFilterWrap = h("label", { style: "display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-left:8px" });
+        const ckFilterCb = h("input", { type: "checkbox", checked: true });
+        ckFilterWrap.appendChild(ckFilterCb);
+        ckFilterWrap.appendChild(h("span", {}, t("repl_ck_only_replicated")));
+        ckSummary.appendChild(ckFilterWrap);
+
+        let ckLastRows = [];
+
+        const stripSourcePrefix = (s) => {
+            // checkzfs prints "1.2.3.4#dataset". Drop the "<ip>#" prefix for readability.
+            const idx = (s || "").indexOf("#");
+            return idx >= 0 ? s.slice(idx + 1) : (s || "");
+        };
+
+        const renderCkTable = () => {
+            const onlyRepl = ckFilterCb.checked;
+            // Group rows by their full source spec ("<ip>#<dataset>"). When the
+            // filter is on, keep only groups that contain at least one row with
+            // a non-empty replica column. Within a group, render the row with
+            // a replica first (it carries the meaningful timestamp).
+            const groups = new Map();
+            (ckLastRows || []).forEach(row => {
+                const key = row.source || "";
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(row);
+            });
+            const filteredKeys = [];
+            groups.forEach((rows, key) => {
+                if (onlyRepl) {
+                    if (rows.some(r => r.replica && r.replica.length)) filteredKeys.push(key);
+                } else {
+                    filteredKeys.push(key);
+                }
+            });
+
+            if (!filteredKeys.length) {
+                ckTableWrap.innerHTML = `<p class="muted" style="padding:10px">${escapeHtml(onlyRepl ? t("repl_ck_no_replicas") : t("repl_checkzfs_empty"))}</p>`;
+                return;
+            }
+
+            const table = h("table", { className: "data-table", style: "margin:0;font-size:12px;width:100%" });
+            const thead = h("thead", {}, h("tr", {}, [
+                h("th", { style: "width:70px" }, t("repl_ck_status")),
+                h("th", {}, t("repl_ck_source")),
+                h("th", {}, t("repl_ck_replica")),
+                h("th", {}, t("repl_ck_snapshot")),
+                h("th", { style: "width:90px;text-align:right" }, t("repl_ck_age")),
+                h("th", { style: "width:60px;text-align:right" }, t("repl_ck_count")),
+                h("th", {}, t("repl_ck_message")),
+            ]));
+            table.appendChild(thead);
+            const tbody = h("tbody");
+
+            filteredKeys.forEach(key => {
+                const rows = groups.get(key);
+                // Sort: rows WITH replica first, source-only row second.
+                rows.sort((a, b) => (b.replica ? 1 : 0) - (a.replica ? 1 : 0));
+                rows.forEach((row, i) => {
+                    const stCls = row.status === "ok" ? "badge-success"
+                                : row.status === "warn" ? "badge-warning"
+                                : row.status === "crit" ? "badge-danger" : "badge-secondary";
+                    const stLabel = (row.status || "").toUpperCase();
+                    const trStyle = i === 0
+                        ? "border-top:1px solid var(--border)"
+                        : "background:var(--bg-secondary,rgba(255,255,255,0.02))";
+                    const dsCell = stripSourcePrefix(row.source);
+                    const tr = h("tr", { style: trStyle }, [
+                        h("td", {}, h("span", { className: "badge " + stCls, style: "min-width:48px;text-align:center;display:inline-block" }, stLabel)),
+                        h("td", { style: "font-family:monospace;font-size:11px;word-break:break-all" }, dsCell),
+                        h("td", { style: "font-family:monospace;font-size:11px;word-break:break-all;color:" + (row.replica ? "var(--success)" : "var(--text-secondary)") },
+                            row.replica || "—"),
+                        h("td", { style: "font-family:monospace;font-size:11px;word-break:break-all" }, row.snapshot || "—"),
+                        h("td", { style: "text-align:right;white-space:nowrap" }, row.age || "—"),
+                        h("td", { style: "text-align:right" }, row.count || "0"),
+                        h("td", { style: "font-size:11px;color:var(--text-secondary)" }, row.message || ""),
+                    ]);
+                    tbody.appendChild(tr);
+                });
+            });
+
+            table.appendChild(tbody);
+            ckTableWrap.innerHTML = "";
+            ckTableWrap.appendChild(table);
+        };
+
+        ckFilterCb.onchange = renderCkTable;
+
         async function refreshCheckzfs() {
             ckTableWrap.innerHTML = loading();
-            ckSummary.innerHTML = "";
+            // Keep the toggle but reset the pill summary
+            const oldPills = ckSummary.querySelectorAll(".badge");
+            oldPills.forEach(n => n.remove());
             try {
                 const r = await API.get("/api/replication/checkzfs" + qs + "&source=" + encodeURIComponent(src.address));
                 if (r.error) {
-                    ckTableWrap.innerHTML = `<p class="muted" style="padding:8px">${escapeHtml(r.error)}</p>`;
+                    ckTableWrap.innerHTML = `<p class="muted" style="padding:10px">${escapeHtml(r.error)}</p>`;
                     return;
                 }
                 const s = r.summary || {};
                 const mkPill = (label, n, cls) => h("span", { className: "badge " + cls, style: "margin-right:6px" }, label + ": " + (n || 0));
-                ckSummary.appendChild(mkPill("OK", s.ok, "badge-success"));
-                ckSummary.appendChild(mkPill("WARN", s.warn, "badge-warning"));
-                ckSummary.appendChild(mkPill("CRIT", s.crit, "badge-danger"));
-                if (!r.rows || !r.rows.length) {
-                    ckTableWrap.innerHTML = `<p class="muted" style="padding:8px">${escapeHtml(t("repl_checkzfs_empty"))}</p>`;
-                    return;
-                }
-                const table = h("table", { className: "table", style: "margin:0;font-size:12px" });
-                const thead = h("thead", {}, h("tr", {}, [
-                    h("th", {}, t("repl_ck_status")),
-                    h("th", {}, t("repl_ck_source")),
-                    h("th", {}, t("repl_ck_replica")),
-                    h("th", {}, t("repl_ck_snapshot")),
-                    h("th", {}, t("repl_ck_age")),
-                    h("th", {}, t("repl_ck_count")),
-                    h("th", {}, t("repl_ck_message")),
-                ]));
-                table.appendChild(thead);
-                const tbody = h("tbody");
-                r.rows.forEach(row => {
-                    const stCls = row.status === "ok" ? "badge-success" : row.status === "warn" ? "badge-warning" : "badge-danger";
-                    tbody.appendChild(h("tr", {}, [
-                        h("td", {}, h("span", { className: "badge " + stCls }, row.status.toUpperCase())),
-                        h("td", { style: "font-family:monospace;font-size:11px" }, row.source),
-                        h("td", { style: "font-family:monospace;font-size:11px" }, row.replica || "—"),
-                        h("td", { style: "font-family:monospace;font-size:11px" }, row.snapshot || "—"),
-                        h("td", {}, row.age || ""),
-                        h("td", {}, row.count || ""),
-                        h("td", { style: "font-size:11px" }, row.message || ""),
-                    ]));
-                });
-                table.appendChild(tbody);
-                ckTableWrap.innerHTML = "";
-                ckTableWrap.appendChild(table);
-            } catch (e) { ckTableWrap.innerHTML = `<p class="muted" style="padding:8px">${escapeHtml(e.message || "")}</p>`; }
+                ckSummary.insertBefore(mkPill("CRIT", s.crit, "badge-danger"), ckFilterWrap);
+                ckSummary.insertBefore(mkPill("WARN", s.warn, "badge-warning"), ckSummary.firstChild);
+                ckSummary.insertBefore(mkPill("OK",   s.ok,   "badge-success"), ckSummary.firstChild);
+                ckLastRows = r.rows || [];
+                renderCkTable();
+            } catch (e) { ckTableWrap.innerHTML = `<p class="muted" style="padding:10px">${escapeHtml(e.message || "")}</p>`; }
         }
         ckRefreshBtn.onclick = refreshCheckzfs;
         refreshCheckzfs();

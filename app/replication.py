@@ -627,12 +627,19 @@ def set_cron(host: Dict[str, Any], schedule: str,
     import base64
     appended = base64.b64encode(new_line.encode("utf-8")).decode("ascii")
     marker_b64 = base64.b64encode(marker.encode("utf-8")).decode("ascii")
+    # IMPORTANT: cron requires a trailing newline on the last line, otherwise
+    # "crontab" rejects the file with "missing newline before EOF". base64 -d
+    # writes raw bytes without a trailing newline, so we explicitly append one.
+    # IMPORTANT: cron requires a trailing newline on the last line, otherwise
+    # "crontab" rejects the file with "missing newline before EOF". base64 -d
+    # writes raw bytes without a trailing newline, so we explicitly append one.
     script = (
         "set -e; "
         f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
         "TMP=$(mktemp); "
         "(crontab -l 2>/dev/null || true) | grep -vF \"$M\" > \"$TMP\" || true; "
         f"echo {shlex.quote(appended)} | base64 -d >> \"$TMP\"; "
+        "printf '\\n' >> \"$TMP\"; "
         "crontab \"$TMP\"; "
         "rm -f \"$TMP\"; "
         "echo __OK__"
@@ -673,13 +680,19 @@ def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
     ip = _extract_ip(source)
     if not ip or not re.match(r"^[A-Za-z0-9._:-]+$", ip):
         return {"success": False, "error": "invalid source", "raw": "", "rows": []}
-    cmd = f"{CHECKZFS_BINARY} --source {shlex.quote(ip)} --columns +message 2>&1"
+    # ``--no-color`` would be ideal but isn't supported by every checkzfs
+    # version. We force ``TERM=dumb`` and additionally strip ANSI escapes
+    # below, which covers both cases.
+    cmd = f"TERM=dumb {CHECKZFS_BINARY} --source {shlex.quote(ip)} --columns +message 2>&1"
     r = run_command(host, cmd, timeout=120)
     raw = r.get("stdout", "") or ""
+    # Strip ANSI escape sequences (CSI ... letter) and lone ESC chars.
+    ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b")
+    raw_clean = ansi_re.sub("", raw)
     rows: List[Dict[str, Any]] = []
     summary = {"ok": 0, "warn": 0, "crit": 0, "other": 0}
-    sep = "║"  # ║
-    for line in raw.splitlines():
+    sep = "║"  # box-drawing column separator
+    for line in raw_clean.splitlines():
         if sep not in line:
             continue
         parts = [p.strip() for p in line.split(sep)]
@@ -694,10 +707,11 @@ def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
             summary[status] += 1
         else:
             summary["other"] += 1
+        replica = parts[2]
         rows.append({
             "status": status,
             "source": parts[1],
-            "replica": parts[2],
+            "replica": "" if replica in ("", "—", "-") else replica,
             "snapshot": parts[3],
             "age": parts[4],
             "count": parts[5],
