@@ -2729,11 +2729,17 @@ async function viewReplication() {
         }
 
         const qs = "?host=" + encodeURIComponent(tgt.address);
+        const qsSrc = "?host=" + encodeURIComponent(src.address);
 
-        // Load target status — loading() returns an HTML string, not a node
+        // Load status for BOTH hosts — loading() returns an HTML string, not a node
         setupMount.innerHTML = loading();
-        let status;
-        try { status = await API.get("/api/replication/status" + qs); }
+        let status, srcStatus;
+        try {
+            [status, srcStatus] = await Promise.all([
+                API.get("/api/replication/status" + qs),
+                API.get("/api/replication/status" + qsSrc),
+            ]);
+        }
         catch (e) { setupMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Failed")}</p>`; return; }
         setupMount.innerHTML = "";
 
@@ -2745,14 +2751,35 @@ async function viewReplication() {
         setupCard.appendChild(setupBody);
         setupMount.appendChild(setupCard);
 
-        // Status badges
-        const badgeRow = h("div", { style: "display:flex;gap:12px;margin-bottom:10px;flex-wrap:wrap" });
-        const zsyncBadge = h("span", { className: "badge " + (status.installed ? "badge-success" : "badge-warning") },
-            (status.installed ? "\u2713 " : "") + t("repl_setup_zsync") + ": " + (status.installed ? t("repl_installed") : t("repl_not_installed")));
+        // Status badges — show PVE + zsync status for BOTH hosts
+        const mkPveBadge = (label, st) => {
+            const cls = st.is_pve ? "badge-success" : "badge-danger";
+            const txt = (st.is_pve ? "\u2713 " : "\u2717 ") + label + " PVE" + (st.pve_version ? " (" + (st.pve_version.split(/\s+/)[1] || "") + ")" : "");
+            return h("span", { className: "badge " + cls, title: st.pve_version || "" }, txt);
+        };
+        const mkZsyncBadge = (label, st) => {
+            const cls = st.installed ? "badge-success" : "badge-warning";
+            return h("span", { className: "badge " + cls },
+                (st.installed ? "\u2713 " : "") + label + " " + t("repl_setup_zsync") + ": " + (st.installed ? t("repl_installed") : t("repl_not_installed")));
+        };
+        const srcLabel = "[" + t("repl_source_short") + "]";
+        const tgtLabel = "[" + t("repl_target_short") + "]";
+        const badgeRow = h("div", { style: "display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap" });
+        badgeRow.appendChild(mkPveBadge(srcLabel, srcStatus));
+        badgeRow.appendChild(mkPveBadge(tgtLabel, status));
+        const zsyncBadgeSrc = mkZsyncBadge(srcLabel, srcStatus);
+        const zsyncBadge = mkZsyncBadge(tgtLabel, status);
+        badgeRow.appendChild(zsyncBadgeSrc);
         badgeRow.appendChild(zsyncBadge);
         const sshBadgeWrap = h("span", {}); // filled after probe
         badgeRow.appendChild(sshBadgeWrap);
         setupBody.appendChild(badgeRow);
+
+        // Warn if either host isn't PVE
+        if (!srcStatus.is_pve || !status.is_pve) {
+            setupBody.appendChild(h("div", { className: "alert alert-warning", style: "margin-bottom:10px;font-size:12px" },
+                t("repl_pve_warning")));
+        }
 
         setupBody.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin-bottom:10px" },
             t("repl_setup_desc").replace("{source}", src.name || src.address).replace("{target}", tgt.name || tgt.address)));
@@ -2775,28 +2802,34 @@ async function viewReplication() {
                 ]));
             };
 
-            // Step A: install if needed
-            if (!status.installed) {
-                setupBtn.textContent = t("repl_installing");
-                addStep(t("repl_setup_step_install"), "pending");
+            // Step A: install on BOTH hosts (zsync needs to be on both ends)
+            const installOn = async (label, hostAddr, statusRef, badge) => {
+                if (statusRef.installed) return true;
+                setupBtn.textContent = t("repl_installing") + " " + label;
+                addStep(t("repl_setup_step_install") + " " + label, "pending");
                 try {
-                    const r = await API.post("/api/replication/install" + qs, {});
+                    const r = await API.post("/api/replication/install?host=" + encodeURIComponent(hostAddr), {});
                     steps.lastChild.remove();
-                    addStep(t("repl_setup_step_install"), r.success ? "ok" : "fail");
+                    addStep(t("repl_setup_step_install") + " " + label, r.success ? "ok" : "fail");
                     if (!r.success) {
-                        openModal(t("repl_install_failed"), `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
-                        setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn");
-                        return;
+                        openModal(t("repl_install_failed") + " — " + label, `<pre class="output">${escapeHtml((r.stderr || "") + "\n\n" + (r.stdout || ""))}</pre>`);
+                        return false;
                     }
-                    status.installed = true;
-                    zsyncBadge.className = "badge badge-success";
-                    zsyncBadge.textContent = "\u2713 " + t("repl_setup_zsync") + ": " + t("repl_installed");
+                    statusRef.installed = true;
+                    badge.className = "badge badge-success";
+                    badge.textContent = "\u2713 " + label + " " + t("repl_setup_zsync") + ": " + t("repl_installed");
+                    return true;
                 } catch (e) {
                     steps.lastChild.remove();
-                    addStep(t("repl_setup_step_install") + " — " + e.message, "fail");
-                    setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn");
-                    return;
+                    addStep(t("repl_setup_step_install") + " " + label + " — " + e.message, "fail");
+                    return false;
                 }
+            };
+            if (!(await installOn(srcLabel, src.address, srcStatus, zsyncBadgeSrc))) {
+                setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn"); return;
+            }
+            if (!(await installOn(tgtLabel, tgt.address, status, zsyncBadge))) {
+                setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn"); return;
             }
 
             // Step B: SSH bootstrap target → source
@@ -2944,7 +2977,7 @@ async function viewReplication() {
             }),
             h("option", { value: "__new__" }, "+ " + t("repl_create_target")),
         ]);
-        const tgtNewInput = h("input", { type: "text", className: "form-input", style: "margin-top:6px;display:none", placeholder: "backup/replica" });
+        const tgtNewInput = h("input", { type: "text", className: "form-input", style: "margin-top:6px;display:none", placeholder: "rpool/repl", value: "rpool/repl" });
         const tgtCreateBtn = h("button", { className: "btn btn-sm btn-warning", style: "margin-top:6px;margin-left:6px;display:none" }, t("repl_create_target_btn"));
         tgtSelect.onchange = () => {
             const show = tgtSelect.value === "__new__";

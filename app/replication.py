@@ -109,16 +109,45 @@ def _escape(s: str) -> str:
 # Status / install
 # ---------------------------------------------------------------------------
 
+def is_pve_host(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Detect whether a host is a Proxmox VE server.
+
+    Checks for ``pveversion`` binary or ``/etc/pve`` directory. Returns
+    ``{is_pve: bool, version: str|None}``.
+    """
+    cmd = (
+        "if command -v pveversion >/dev/null 2>&1; then "
+        "  pveversion 2>/dev/null | head -n 1; "
+        "elif [ -d /etc/pve ]; then "
+        "  echo __PVE_DIR__; "
+        "fi"
+    )
+    r = run_command(host, cmd, timeout=10)
+    out = (r.get("stdout") or "").strip()
+    if not out:
+        return {"is_pve": False, "version": None}
+    if out == "__PVE_DIR__":
+        return {"is_pve": True, "version": None}
+    return {"is_pve": True, "version": out}
+
+
 def get_status(host: Dict[str, Any]) -> Dict[str, Any]:
     """Return install + config + last-run status for a host."""
     out: Dict[str, Any] = {
         "installed": False,
         "version": None,
+        "is_pve": False,
+        "pve_version": None,
         "config_exists": False,
         "config": None,
         "log_present": False,
         "last_log_lines": [],
     }
+
+    # PVE detection
+    pve = is_pve_host(host)
+    out["is_pve"] = pve["is_pve"]
+    out["pve_version"] = pve["version"]
 
     # Installed?
     r = run_command(host, f"command -v {BINARY_NAME} 2>/dev/null && {BINARY_NAME} -v 2>/dev/null | head -n 1", timeout=10)
@@ -401,7 +430,7 @@ def list_tagged_datasets(host: Dict[str, Any], tag: str = "bashclub:zsync") -> D
 
 def set_dataset_tags(host: Dict[str, Any], tag: str,
                      enable: List[str], disable: List[str],
-                     value: str = "1") -> Dict[str, Any]:
+                     value: str = "all") -> Dict[str, Any]:
     """Apply ``zfs set <tag>=<value>`` / ``zfs inherit <tag>`` to a list of datasets.
 
     The call is idempotent — running it twice is safe. Operates on filesystems
