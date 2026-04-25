@@ -22,8 +22,37 @@ from typing import Any, Dict, List, Optional
 from app.ssh_manager import run_command
 
 CONFIG_PATH = "/etc/bashclub/zsync.conf"
+CONFIG_DIR = "/etc/bashclub"
 LOG_PATH = "/var/log/bashclub-zsync/zsync.log"
 BINARY_NAME = "bashclub-zsync"
+CHECKZFS_BINARY = "checkzfs"
+
+
+def _extract_ip(source: str) -> str:
+    """Extract bare host/IP from a source spec like ``root@1.2.3.4`` or ``1.2.3.4``."""
+    s = (source or "").strip()
+    if "@" in s:
+        s = s.split("@", 1)[1]
+    return s
+
+
+def _safe_filename(name: str) -> str:
+    """Sanitize a string for use as a config-file basename."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name or "")
+
+
+def config_path_for(source: Optional[str] = None) -> str:
+    """Return the per-source config path, or the legacy default if no source.
+
+    The bashclub convention used in the wild is ``/etc/bashclub/<source-ip>.conf``
+    so multiple replication pairs can coexist on a single target host.
+    """
+    if not source:
+        return CONFIG_PATH
+    ip = _extract_ip(source)
+    if not ip:
+        return CONFIG_PATH
+    return f"{CONFIG_DIR}/{_safe_filename(ip)}.conf"
 
 # Keys we surface in the UI — everything else is preserved verbatim on write.
 KNOWN_KEYS = [
@@ -131,8 +160,14 @@ def is_pve_host(host: Dict[str, Any]) -> Dict[str, Any]:
     return {"is_pve": True, "version": out}
 
 
-def get_status(host: Dict[str, Any]) -> Dict[str, Any]:
-    """Return install + config + last-run status for a host."""
+def get_status(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
+    """Return install + config + last-run status for a host.
+
+    If ``source`` is given, the per-source config file
+    ``/etc/bashclub/<source-ip>.conf`` is inspected; otherwise the legacy
+    default ``/etc/bashclub/zsync.conf``.
+    """
+    cfg_path = config_path_for(source)
     out: Dict[str, Any] = {
         "installed": False,
         "version": None,
@@ -140,6 +175,7 @@ def get_status(host: Dict[str, Any]) -> Dict[str, Any]:
         "pve_version": None,
         "config_exists": False,
         "config": None,
+        "config_path": cfg_path,
         "log_present": False,
         "last_log_lines": [],
     }
@@ -161,7 +197,7 @@ def get_status(host: Dict[str, Any]) -> Dict[str, Any]:
             out["version"] = lines[0].strip()
 
     # Config
-    r = run_command(host, f"cat {shlex.quote(CONFIG_PATH)} 2>/dev/null", timeout=10)
+    r = run_command(host, f"cat {shlex.quote(cfg_path)} 2>/dev/null", timeout=10)
     if r["success"] and r["stdout"]:
         out["config_exists"] = True
         parsed = _parse_config(r["stdout"])
@@ -212,22 +248,29 @@ command -v bashclub-zsync
 # Config write
 # ---------------------------------------------------------------------------
 
-def read_config(host: Dict[str, Any]) -> Dict[str, Any]:
-    r = run_command(host, f"cat {shlex.quote(CONFIG_PATH)} 2>/dev/null", timeout=10)
+def read_config(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
+    cfg_path = config_path_for(source)
+    r = run_command(host, f"cat {shlex.quote(cfg_path)} 2>/dev/null", timeout=10)
     if not r["success"] or not r["stdout"]:
-        return {"exists": False, "values": {}, "raw": ""}
+        return {"exists": False, "values": {}, "raw": "", "config_path": cfg_path}
     parsed = _parse_config(r["stdout"])
-    return {"exists": True, "values": parsed["values"], "raw": r["stdout"], "_lines": parsed["lines"]}
+    return {"exists": True, "values": parsed["values"], "raw": r["stdout"],
+            "_lines": parsed["lines"], "config_path": cfg_path}
 
 
-def write_config(host: Dict[str, Any], values: Dict[str, str]) -> Dict[str, Any]:
+def write_config(host: Dict[str, Any], values: Dict[str, str],
+                 source: Optional[str] = None) -> Dict[str, Any]:
     """Write config preserving comments/order from existing file.
 
     Strategy: read current file, parse, replace values in place, write back.
-    A timestamped backup is created alongside.
+    A timestamped backup is created alongside. The path is derived from the
+    ``source`` argument (per-source config) or the source value embedded in
+    ``values["source"]``; otherwise the legacy default is used.
     """
+    cfg_path = config_path_for(source or values.get("source"))
+
     # Read existing to preserve layout
-    r_read = run_command(host, f"cat {shlex.quote(CONFIG_PATH)} 2>/dev/null", timeout=10)
+    r_read = run_command(host, f"cat {shlex.quote(cfg_path)} 2>/dev/null", timeout=10)
     existing_lines = None
     if r_read["success"] and r_read["stdout"]:
         existing_lines = _parse_config(r_read["stdout"])["lines"]
@@ -240,30 +283,65 @@ def write_config(host: Dict[str, Any], values: Dict[str, str]) -> Dict[str, Any]
     import base64
     b64 = base64.b64encode(new_text.encode("utf-8")).decode("ascii")
     script = (
-        f"mkdir -p /etc/bashclub && "
-        f"if [ -f {shlex.quote(CONFIG_PATH)} ]; then "
-        f"cp -a {shlex.quote(CONFIG_PATH)} {shlex.quote(CONFIG_PATH)}.bak.$(date +%Y%m%d%H%M%S); "
+        f"mkdir -p {shlex.quote(CONFIG_DIR)} && "
+        f"if [ -f {shlex.quote(cfg_path)} ]; then "
+        f"cp -a {shlex.quote(cfg_path)} {shlex.quote(cfg_path)}.bak.$(date +%Y%m%d%H%M%S); "
         f"fi && "
-        f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(CONFIG_PATH)} && "
-        f"chmod 0640 {shlex.quote(CONFIG_PATH)}"
+        f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(cfg_path)} && "
+        f"chmod 0640 {shlex.quote(cfg_path)}"
     )
     r = run_command(host, script, timeout=15)
-    return {"success": r["success"], "stderr": r["stderr"]}
+    return {"success": r["success"], "stderr": r["stderr"], "config_path": cfg_path}
+
+
+def list_configs(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Enumerate per-source config files in /etc/bashclub.
+
+    Returns ``{configs: [{path, source, target, exists}], default_exists: bool}``.
+    """
+    cmd = (
+        f"for f in {shlex.quote(CONFIG_DIR)}/*.conf; do "
+        f"  [ -f \"$f\" ] || continue; "
+        f"  echo __FILE__ $f; cat $f; echo __END__; "
+        f"done 2>/dev/null"
+    )
+    r = run_command(host, cmd, timeout=15)
+    out: List[Dict[str, Any]] = []
+    if r["success"] and r["stdout"]:
+        cur = None
+        buf: List[str] = []
+        for line in r["stdout"].splitlines():
+            if line.startswith("__FILE__ "):
+                cur = line[len("__FILE__ "):].strip()
+                buf = []
+            elif line == "__END__":
+                if cur:
+                    parsed = _parse_config("\n".join(buf))
+                    out.append({
+                        "path": cur,
+                        "source": parsed["values"].get("source", ""),
+                        "target": parsed["values"].get("target", ""),
+                    })
+                cur = None
+            elif cur is not None:
+                buf.append(line)
+    return {"configs": out}
 
 
 # ---------------------------------------------------------------------------
 # Run + log
 # ---------------------------------------------------------------------------
 
-def run_now(host: Dict[str, Any]) -> Dict[str, Any]:
-    """Trigger bashclub-zsync manually with the default config path.
+def run_now(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
+    """Trigger bashclub-zsync manually for the given source's config.
 
     Output is captured into the standard log so the UI can read it back.
     A short timeout is used for the SSH channel; the log is authoritative.
     """
+    cfg_path = config_path_for(source)
     cmd = (
         f"mkdir -p /var/log/bashclub-zsync && "
-        f"{BINARY_NAME} -c {shlex.quote(CONFIG_PATH)} "
+        f"{BINARY_NAME} -c {shlex.quote(cfg_path)} "
         f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
     )
     r = run_command(host, cmd, timeout=600)
@@ -467,6 +545,54 @@ def set_dataset_tags(host: Dict[str, Any], tag: str,
         results.append({"dataset": n, "op": "inherit", "success": ok,
                         "stderr": r.get("stderr", "").strip()})
     return {"success": all_ok, "results": results}
+
+
+def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
+    """Run ``checkzfs --source <ip> --columns +message`` on the given (target)
+    host and parse the box-drawing table output into structured rows.
+
+    Returns ``{success, raw, rows: [{status, source, replica, snapshot, age,
+    count, message}], summary: {ok, warn, crit}}``.
+    """
+    ip = _extract_ip(source)
+    if not ip or not re.match(r"^[A-Za-z0-9._:-]+$", ip):
+        return {"success": False, "error": "invalid source", "raw": "", "rows": []}
+    cmd = f"{CHECKZFS_BINARY} --source {shlex.quote(ip)} --columns +message 2>&1"
+    r = run_command(host, cmd, timeout=120)
+    raw = r.get("stdout", "") or ""
+    rows: List[Dict[str, Any]] = []
+    summary = {"ok": 0, "warn": 0, "crit": 0, "other": 0}
+    sep = "║"  # ║
+    for line in raw.splitlines():
+        if sep not in line:
+            continue
+        parts = [p.strip() for p in line.split(sep)]
+        # Header row: starts with "status"
+        if parts and parts[0].lower().startswith("status"):
+            continue
+        # Need at least: status, source, replica, snapshot, age, count, message
+        if len(parts) < 7:
+            continue
+        status = parts[0].lower()
+        if status in summary:
+            summary[status] += 1
+        else:
+            summary["other"] += 1
+        rows.append({
+            "status": status,
+            "source": parts[1],
+            "replica": parts[2],
+            "snapshot": parts[3],
+            "age": parts[4],
+            "count": parts[5],
+            "message": parts[6],
+        })
+    return {
+        "success": r.get("success", False),
+        "raw": raw[-8000:],  # cap
+        "rows": rows,
+        "summary": summary,
+    }
 
 
 def tail_log(host: Dict[str, Any], lines: int = 200) -> Dict[str, Any]:

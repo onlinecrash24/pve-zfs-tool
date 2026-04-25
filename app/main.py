@@ -1194,7 +1194,8 @@ def api_replication_status():
     host, err, code = _require_host()
     if err:
         return jsonify(err), code
-    return jsonify(get_status(host))
+    source = request.args.get("source") or None
+    return jsonify(get_status(host, source=source))
 
 
 @app.route("/api/replication/install", methods=["POST"])
@@ -1218,11 +1219,13 @@ def api_replication_config_get():
     host, err, code = _require_host()
     if err:
         return jsonify(err), code
-    cfg = read_config(host)
+    source = request.args.get("source") or None
+    cfg = read_config(host, source=source)
     return jsonify({
         "exists": cfg["exists"],
         "values": cfg["values"],
         "raw": cfg.get("raw", ""),
+        "config_path": cfg.get("config_path"),
     })
 
 
@@ -1239,10 +1242,11 @@ def api_replication_config_set():
         return jsonify({"error": "values must be an object"}), 400
     # Coerce everything to string
     values = {str(k): ("" if v is None else str(v)) for k, v in values.items()}
-    result = write_config(host, values)
+    source = (data.get("source") or request.args.get("source") or values.get("source") or None)
+    result = write_config(host, values, source=source)
     audit_log("replication.config.save", target=host["address"], host=host["address"],
               success=result["success"],
-              details={"keys": sorted(values.keys())})
+              details={"keys": sorted(values.keys()), "config_path": result.get("config_path")})
     return jsonify(result)
 
 
@@ -1253,7 +1257,9 @@ def api_replication_run():
     host, err, code = _require_host()
     if err:
         return jsonify(err), code
-    result = run_now(host)
+    data = request.get_json(silent=True) or {}
+    source = (data.get("source") or request.args.get("source") or None)
+    result = run_now(host, source=source)
     audit_log("replication.run", target=host["address"], host=host["address"],
               success=result["success"],
               details={"exit_code": result.get("exit_code")})
@@ -1329,7 +1335,7 @@ def api_replication_set_tags():
     if not host:
         return jsonify({"error": "host not found"}), 404
     tag = (data.get("tag") or "bashclub:zsync").strip()
-    value = (data.get("value") or "1").strip()
+    value = (data.get("value") or "all").strip()
     enable = data.get("enable") or []
     disable = data.get("disable") or []
     if not isinstance(enable, list) or not isinstance(disable, list):
@@ -1353,6 +1359,33 @@ def api_replication_log():
     except (TypeError, ValueError):
         lines = 200
     return jsonify(tail_log(host, lines))
+
+
+@app.route("/api/replication/configs")
+@login_required
+def api_replication_configs():
+    from app.replication import list_configs
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(list_configs(host))
+
+
+@app.route("/api/replication/checkzfs")
+@login_required
+def api_replication_checkzfs():
+    from app.replication import run_checkzfs
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = (request.args.get("source") or "").strip()
+    if not source:
+        return jsonify({"error": "source required"}), 400
+    result = run_checkzfs(host, source)
+    audit_log("replication.checkzfs", target=source, host=host["address"],
+              success=result.get("success", False),
+              details={"summary": result.get("summary", {})})
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

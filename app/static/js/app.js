@@ -2728,7 +2728,10 @@ async function viewReplication() {
             return;
         }
 
+        // qs targets the (replication) target host; qsPair adds source so the
+        // backend resolves the per-source config file (/etc/bashclub/<src-ip>.conf).
         const qs = "?host=" + encodeURIComponent(tgt.address);
+        const qsPair = qs + "&source=" + encodeURIComponent(src.address);
         const qsSrc = "?host=" + encodeURIComponent(src.address);
 
         // Load status for BOTH hosts — loading() returns an HTML string, not a node
@@ -2736,7 +2739,7 @@ async function viewReplication() {
         let status, srcStatus;
         try {
             [status, srcStatus] = await Promise.all([
-                API.get("/api/replication/status" + qs),
+                API.get("/api/replication/status" + qsPair),
                 API.get("/api/replication/status" + qsSrc),
             ]);
         }
@@ -3054,7 +3057,7 @@ async function viewReplication() {
             if (!values.source) { toast(t("repl_source_required"), "error"); return; }
             saveBtn.disabled = true;
             try {
-                const r = await API.post("/api/replication/config" + qs, { values });
+                const r = await API.post("/api/replication/config" + qsPair, { values, source: src.address });
                 if (r.success) toast(t("repl_config_saved"), "success");
                 else toast(r.stderr || t("failed"), "error");
             } catch (e) { toast(e.message, "error"); }
@@ -3067,7 +3070,7 @@ async function viewReplication() {
             if (!confirm(t("repl_run_confirm"))) return;
             runBtn.disabled = true; runBtn.textContent = t("repl_running");
             try {
-                const r = await API.post("/api/replication/run" + qs, {});
+                const r = await API.post("/api/replication/run" + qsPair, { source: src.address });
                 if (r.success) toast(t("repl_run_ok"), "success");
                 else toast(t("repl_run_failed") + " (exit=" + (r.exit_code ?? "?") + ")", "error");
                 refreshLog();
@@ -3077,10 +3080,75 @@ async function viewReplication() {
         cfgBtnRow.appendChild(runBtn);
         cfgBody.appendChild(cfgBtnRow);
 
-        // -- Step 5: Log --------------------------------------------------
+        // -- Step 5: checkzfs status (replication health overview) -------
+        const ckCard = h("div", { className: "card", style: "margin-top:16px" });
+        const ckRefreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
+        const ckHeader = h("div", { className: "card-header" }, [h("span", {}, "5. " + t("repl_checkzfs_title")), ckRefreshBtn]);
+        ckCard.appendChild(ckHeader);
+        const ckBody = h("div", { className: "card-body" });
+        ckBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:8px" },
+            t("repl_checkzfs_desc").replace("{src}", src.name || src.address).replace("{tgt}", tgt.name || tgt.address)));
+        const ckSummary = h("div", { style: "margin-bottom:8px;font-size:13px" });
+        const ckTableWrap = h("div", { style: "max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg)" }, t("loading"));
+        ckBody.appendChild(ckSummary);
+        ckBody.appendChild(ckTableWrap);
+        ckCard.appendChild(ckBody);
+        logMount.appendChild(ckCard);
+
+        async function refreshCheckzfs() {
+            ckTableWrap.innerHTML = loading();
+            ckSummary.innerHTML = "";
+            try {
+                const r = await API.get("/api/replication/checkzfs" + qs + "&source=" + encodeURIComponent(src.address));
+                if (r.error) {
+                    ckTableWrap.innerHTML = `<p class="muted" style="padding:8px">${escapeHtml(r.error)}</p>`;
+                    return;
+                }
+                const s = r.summary || {};
+                const mkPill = (label, n, cls) => h("span", { className: "badge " + cls, style: "margin-right:6px" }, label + ": " + (n || 0));
+                ckSummary.appendChild(mkPill("OK", s.ok, "badge-success"));
+                ckSummary.appendChild(mkPill("WARN", s.warn, "badge-warning"));
+                ckSummary.appendChild(mkPill("CRIT", s.crit, "badge-danger"));
+                if (!r.rows || !r.rows.length) {
+                    ckTableWrap.innerHTML = `<p class="muted" style="padding:8px">${escapeHtml(t("repl_checkzfs_empty"))}</p>`;
+                    return;
+                }
+                const table = h("table", { className: "table", style: "margin:0;font-size:12px" });
+                const thead = h("thead", {}, h("tr", {}, [
+                    h("th", {}, t("repl_ck_status")),
+                    h("th", {}, t("repl_ck_source")),
+                    h("th", {}, t("repl_ck_replica")),
+                    h("th", {}, t("repl_ck_snapshot")),
+                    h("th", {}, t("repl_ck_age")),
+                    h("th", {}, t("repl_ck_count")),
+                    h("th", {}, t("repl_ck_message")),
+                ]));
+                table.appendChild(thead);
+                const tbody = h("tbody");
+                r.rows.forEach(row => {
+                    const stCls = row.status === "ok" ? "badge-success" : row.status === "warn" ? "badge-warning" : "badge-danger";
+                    tbody.appendChild(h("tr", {}, [
+                        h("td", {}, h("span", { className: "badge " + stCls }, row.status.toUpperCase())),
+                        h("td", { style: "font-family:monospace;font-size:11px" }, row.source),
+                        h("td", { style: "font-family:monospace;font-size:11px" }, row.replica || "—"),
+                        h("td", { style: "font-family:monospace;font-size:11px" }, row.snapshot || "—"),
+                        h("td", {}, row.age || ""),
+                        h("td", {}, row.count || ""),
+                        h("td", { style: "font-size:11px" }, row.message || ""),
+                    ]));
+                });
+                table.appendChild(tbody);
+                ckTableWrap.innerHTML = "";
+                ckTableWrap.appendChild(table);
+            } catch (e) { ckTableWrap.innerHTML = `<p class="muted" style="padding:8px">${escapeHtml(e.message || "")}</p>`; }
+        }
+        ckRefreshBtn.onclick = refreshCheckzfs;
+        refreshCheckzfs();
+
+        // -- Step 6: Log --------------------------------------------------
         const logCard = h("div", { className: "card", style: "margin-top:16px" });
         const refreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
-        const logHeader = h("div", { className: "card-header" }, [h("span", {}, "5. " + t("repl_log_title")), refreshBtn]);
+        const logHeader = h("div", { className: "card-header" }, [h("span", {}, "6. " + t("repl_log_title")), refreshBtn]);
         logCard.appendChild(logHeader);
         const logBody = h("div", { className: "card-body" });
         const logPre = h("pre", { style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
