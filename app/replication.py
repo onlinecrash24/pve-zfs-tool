@@ -320,16 +320,16 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
 
 def delete_config(host: Dict[str, Any], source: Optional[str] = None,
                   purge_snapshots: bool = False) -> Dict[str, Any]:
-    """Delete a per-source replication config and (optionally) its replica
-    target dataset.
+    """Delete a per-source replication config and (optionally) the
+    zfs-auto-snapshots underneath the replica target.
 
     Steps:
       1. Read the config to discover ``target=...``.
       2. Remove the cron entry for this config (if any).
       3. Backup + delete the config file itself.
-      4. If ``purge_snapshots`` is True: ``zfs destroy -r <target>``
-         (after refusing if the target looks like a system root such as
-         ``rpool`` or ``rpool/ROOT``).
+      4. If ``purge_snapshots`` is True: enumerate snapshots under
+         ``<target>`` matching ``@zfs-auto-snap_*`` and destroy each one
+         individually. Datasets and non-auto snapshots are left intact.
 
     Returns a structured result so the UI can show what happened.
     """
@@ -345,6 +345,9 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
         "cron_removed": False,
         "config_removed": False,
         "snapshots_purged": False,
+        "snapshots_destroyed_count": 0,
+        "snapshots_failed_count": 0,
+        "snapshots_examples": [],
         "destroy_output": "",
         "error": "",
     }
@@ -371,20 +374,50 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
             out["error"] = (out["error"] + " | " if out["error"] else "") + \
                            "config remove failed: " + (rm.get("stderr") or "").strip()
 
-    # 3. snapshot/replica purge — DESTRUCTIVE, so guard against system roots.
+    # 3. ZFS-auto-snapshot purge under the replica target.
+    # Only snapshots matching "@zfs-auto-snap_*" are destroyed -- the datasets
+    # themselves and any non-auto snapshots (e.g. zsync_* baselines) stay
+    # intact. We list first, then destroy one by one so a single failure
+    # doesn't abort the rest.
     if purge_snapshots and target_ds:
-        forbidden = {"", "rpool", "rpool/ROOT", "rpool/data", "tank", "tankhdd"}
-        # Allow nested paths like "rpool/repl" but refuse top-level pools.
-        if target_ds in forbidden or "/" not in target_ds:
-            out["error"] = (out["error"] + " | " if out["error"] else "") + \
-                           f"refusing to destroy system-root dataset: {target_ds}"
-        elif not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds):
+        if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds):
             out["error"] = (out["error"] + " | " if out["error"] else "") + \
                            "target dataset has invalid characters"
+        elif "/" not in target_ds:
+            # Refuse top-level pools as a safety net even though we never
+            # destroy the dataset itself; an accidental purge on rpool would
+            # still wipe a huge amount of auto-snapshots.
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           f"refusing to operate on top-level pool: {target_ds}"
         else:
-            r = run_command(host, f"zfs destroy -r {shlex.quote(target_ds)} 2>&1", timeout=120)
-            out["snapshots_purged"] = bool(r.get("success"))
-            out["destroy_output"] = (r.get("stdout") or r.get("stderr") or "")[-2000:]
+            list_cmd = (
+                f"zfs list -H -t snapshot -o name -r {shlex.quote(target_ds)} 2>/dev/null "
+                f"| grep '@zfs-auto-snap_' || true"
+            )
+            r_list = run_command(host, list_cmd, timeout=60)
+            snap_names = [s for s in (r_list.get("stdout") or "").splitlines() if s.strip()]
+            destroyed = 0
+            failed = 0
+            failures: List[str] = []
+            for snap in snap_names:
+                # Defence in depth: re-validate every name before passing to destroy.
+                if "@" not in snap or not re.match(r"^[A-Za-z0-9._:/@-]+$", snap):
+                    failed += 1
+                    failures.append(snap + ": invalid name")
+                    continue
+                rd = run_command(host, f"zfs destroy {shlex.quote(snap)} 2>&1", timeout=30)
+                if rd.get("success"):
+                    destroyed += 1
+                else:
+                    failed += 1
+                    if len(failures) < 5:
+                        failures.append(f"{snap}: {(rd.get('stderr') or rd.get('stdout') or '').strip()[:120]}")
+            out["snapshots_destroyed_count"] = destroyed
+            out["snapshots_failed_count"] = failed
+            out["snapshots_examples"] = snap_names[:5]
+            out["snapshots_purged"] = (failed == 0)
+            if failures:
+                out["destroy_output"] = "\n".join(failures)[-2000:]
 
     out["success"] = out["config_removed"] or not out["config_existed"]
     return out

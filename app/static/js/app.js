@@ -2775,9 +2775,18 @@ async function viewReplication() {
                 const r = await API.del(url, {});
                 if (r.success) {
                     let msg = t("repl_pairs_delete_done");
-                    if (r.snapshots_purged) msg += " — " + t("repl_pairs_purge_done").replace("{ds}", r.target_dataset || "");
-                    else if (purge && !r.snapshots_purged) msg += " — " + (r.error || t("repl_pairs_purge_failed"));
-                    toast(msg, r.snapshots_purged || !purge ? "success" : "warning");
+                    if (purge) {
+                        const n = r.snapshots_destroyed_count || 0;
+                        if (n > 0 || r.snapshots_purged) {
+                            msg += " — " + t("repl_pairs_purge_done").replace("{n}", String(n));
+                        } else {
+                            msg += " — " + t("repl_pairs_purge_none");
+                        }
+                        if (r.snapshots_failed_count) {
+                            msg += " (" + r.snapshots_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
+                        }
+                    }
+                    toast(msg, "success");
                 } else {
                     toast(r.error || t("failed"), "error");
                 }
