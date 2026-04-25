@@ -2730,8 +2730,8 @@ async function viewReplication() {
 
         const qs = "?host=" + encodeURIComponent(tgt.address);
 
-        // Load target status
-        setupMount.appendChild(loading());
+        // Load target status — loading() returns an HTML string, not a node
+        setupMount.innerHTML = loading();
         let status;
         try { status = await API.get("/api/replication/status" + qs); }
         catch (e) { setupMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Failed")}</p>`; return; }
