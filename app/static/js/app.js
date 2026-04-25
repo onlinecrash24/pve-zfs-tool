@@ -2663,6 +2663,142 @@ async function viewReplication() {
         h("p", {}, t("repl_subtitle")),
     ]));
 
+    // -- Existing pairs overview (multi-config) ---------------------------
+    // Scans every known host for /etc/bashclub/*.conf so the user sees all
+    // replication pairs across the fleet at a glance and can jump to one
+    // with a single click — instead of guessing source/target dropdowns.
+    const pairsCard = h("div", { className: "card", style: "margin-bottom:16px" });
+    const pairsRefreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
+    const pairsHeader = h("div", { className: "card-header" }, [
+        h("span", {}, t("repl_pairs_title")),
+        pairsRefreshBtn,
+    ]);
+    pairsCard.appendChild(pairsHeader);
+    const pairsBody = h("div", { className: "card-body" }, h("p", { className: "muted", style: "margin:0" }, t("loading")));
+    pairsCard.appendChild(pairsBody);
+    container.appendChild(pairsCard);
+
+    async function refreshPairs() {
+        pairsBody.innerHTML = loading();
+        // Probe every host in parallel; treat failures (host offline, no
+        // bashclub installed, etc.) as "no pairs" rather than aborting.
+        const probes = await Promise.all(hosts.map(async (hst) => {
+            try {
+                const r = await API.get("/api/replication/configs?host=" + encodeURIComponent(hst.address));
+                return { host: hst, configs: r.configs || [] };
+            } catch (e) {
+                return { host: hst, configs: [] };
+            }
+        }));
+        const all = [];
+        probes.forEach(p => p.configs.forEach(c => all.push({ targetHost: p.host, ...c })));
+
+        if (!all.length) {
+            pairsBody.innerHTML = "";
+            pairsBody.appendChild(h("p", { className: "muted", style: "margin:0" }, t("repl_pairs_empty")));
+            return;
+        }
+
+        const tbl = h("table", { className: "data-table", style: "margin:0;font-size:13px;width:100%" });
+        tbl.appendChild(h("thead", {}, h("tr", {}, [
+            h("th", {}, t("repl_pairs_source")),
+            h("th", {}, t("repl_pairs_target_host")),
+            h("th", {}, t("repl_pairs_target_ds")),
+            h("th", {}, t("repl_pairs_path")),
+            h("th", { style: "width:200px;text-align:right" }, ""),
+        ])));
+        const tb = h("tbody");
+        all.forEach(p => {
+            const sourceAddr = (p.source || "").includes("@") ? p.source.split("@")[1] : (p.source || "");
+            const editBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("repl_pairs_open"));
+            const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("repl_pairs_delete"));
+            editBtn.onclick = () => {
+                // Locate matching source host in our hosts list (by address) and
+                // pre-select dropdowns so renderAll() loads this pair into the wizard.
+                const srcHst = hosts.find(x => x.address === sourceAddr);
+                if (!srcHst) {
+                    toast(t("repl_pairs_source_unknown"), "error");
+                    return;
+                }
+                sourceSel.value = srcHst.address;
+                targetSel.value = p.targetHost.address;
+                renderAll();
+                // scroll the wizard into view
+                setTimeout(() => selCard.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+            };
+            delBtn.onclick = () => openDeletePairModal(p);
+            tb.appendChild(h("tr", {}, [
+                h("td", { style: "font-family:monospace;font-size:12px" }, p.source || "—"),
+                h("td", {}, (p.targetHost.name || p.targetHost.address)),
+                h("td", { style: "font-family:monospace;font-size:12px" }, p.target || "—"),
+                h("td", { style: "font-family:monospace;font-size:11px;color:var(--text-secondary)" }, p.path || ""),
+                h("td", { style: "text-align:right" }, [editBtn, delBtn]),
+            ]));
+        });
+        tbl.appendChild(tb);
+        pairsBody.innerHTML = "";
+        pairsBody.appendChild(tbl);
+    }
+
+    function openDeletePairModal(p) {
+        // Two-stage delete: ask whether to also wipe the replica target dataset.
+        const targetLabel = p.target ? p.target : "—";
+        const purgeCb = h("input", { type: "checkbox", id: "repl-purge-cb" });
+        const body = h("div", {}, [
+            h("p", {}, t("repl_pairs_delete_intro").replace("{src}", p.source || "?").replace("{tgt}", (p.targetHost.name || p.targetHost.address))),
+            h("p", { style: "font-size:12px;color:var(--text-secondary)" }, t("repl_pairs_delete_what")),
+            h("ul", { style: "font-size:13px;margin:6px 0 12px 18px;color:var(--text-secondary)" }, [
+                h("li", {}, t("repl_pairs_delete_li_cron")),
+                h("li", {}, t("repl_pairs_delete_li_config").replace("{path}", p.path || "?")),
+            ]),
+            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer" }, [
+                purgeCb,
+                h("div", {}, [
+                    h("div", { style: "font-weight:600;color:var(--danger)" }, t("repl_pairs_purge_label")),
+                    h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" },
+                        t("repl_pairs_purge_hint").replace("{ds}", targetLabel)),
+                ]),
+            ]),
+        ]);
+        const confirmBtn = h("button", { className: "btn btn-danger" }, t("repl_pairs_delete"));
+        const cancelBtn = h("button", { className: "btn" }, t("cancel"));
+        cancelBtn.onclick = closeModal;
+        confirmBtn.onclick = async () => {
+            const purge = purgeCb.checked;
+            const phrase = purge ? t("repl_pairs_purge_confirm").replace("{ds}", targetLabel) : t("repl_pairs_delete_confirm");
+            if (!confirm(phrase)) return;
+            confirmBtn.disabled = true;
+            try {
+                const url = "/api/replication/config?host=" + encodeURIComponent(p.targetHost.address) +
+                            "&source=" + encodeURIComponent(p.source) +
+                            (purge ? "&purge=1" : "");
+                const r = await API.del(url, {});
+                if (r.success) {
+                    let msg = t("repl_pairs_delete_done");
+                    if (r.snapshots_purged) msg += " — " + t("repl_pairs_purge_done").replace("{ds}", r.target_dataset || "");
+                    else if (purge && !r.snapshots_purged) msg += " — " + (r.error || t("repl_pairs_purge_failed"));
+                    toast(msg, r.snapshots_purged || !purge ? "success" : "warning");
+                } else {
+                    toast(r.error || t("failed"), "error");
+                }
+                closeModal();
+                refreshPairs();
+            } catch (e) { toast(e.message, "error"); }
+            finally { confirmBtn.disabled = false; }
+        };
+        // openModal takes HTML strings; we want DOM nodes for the checkbox
+        // event-binding to survive. Open empty, then replace body+footer.
+        openModal(t("repl_pairs_delete_title"), "");
+        const mb = document.getElementById("modal-body");
+        const mf = document.getElementById("modal-footer");
+        mb.innerHTML = ""; mb.appendChild(body);
+        mf.innerHTML = "";
+        mf.appendChild(cancelBtn);
+        mf.appendChild(confirmBtn);
+    }
+
+    pairsRefreshBtn.onclick = refreshPairs;
+
     // -- Step 1: Source + Target host selection ----------------------------
     const selCard = h("div", { className: "card" });
     selCard.appendChild(h("div", { className: "card-header" },
@@ -2712,6 +2848,9 @@ async function viewReplication() {
 
     sourceSel.onchange = () => renderAll();
     targetSel.onchange = () => renderAll();
+
+    // Initial load of the existing-pairs overview
+    refreshPairs();
 
     async function renderAll() {
         setupMount.innerHTML = "";

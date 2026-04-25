@@ -318,6 +318,78 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
     return {"success": r["success"], "stderr": r["stderr"], "config_path": cfg_path}
 
 
+def delete_config(host: Dict[str, Any], source: Optional[str] = None,
+                  purge_snapshots: bool = False) -> Dict[str, Any]:
+    """Delete a per-source replication config and (optionally) its replica
+    target dataset.
+
+    Steps:
+      1. Read the config to discover ``target=...``.
+      2. Remove the cron entry for this config (if any).
+      3. Backup + delete the config file itself.
+      4. If ``purge_snapshots`` is True: ``zfs destroy -r <target>``
+         (after refusing if the target looks like a system root such as
+         ``rpool`` or ``rpool/ROOT``).
+
+    Returns a structured result so the UI can show what happened.
+    """
+    cfg_path = config_path_for(source)
+    cfg = read_config(host, source=source)
+    target_ds = (cfg.get("values") or {}).get("target", "").strip()
+
+    out: Dict[str, Any] = {
+        "success": False,
+        "config_path": cfg_path,
+        "config_existed": cfg.get("exists", False),
+        "target_dataset": target_ds,
+        "cron_removed": False,
+        "config_removed": False,
+        "snapshots_purged": False,
+        "destroy_output": "",
+        "error": "",
+    }
+
+    # 1. cron entry
+    try:
+        cron_res = remove_cron(host, source=source)
+        out["cron_removed"] = bool(cron_res.get("success"))
+    except Exception as e:
+        out["error"] = f"cron remove failed: {e}"
+
+    # 2. config file (with backup)
+    if cfg.get("exists"):
+        rm = run_command(
+            host,
+            f"if [ -f {shlex.quote(cfg_path)} ]; then "
+            f"cp -a {shlex.quote(cfg_path)} {shlex.quote(cfg_path)}.bak.$(date +%Y%m%d%H%M%S) && "
+            f"rm -f {shlex.quote(cfg_path)} && echo __CFG_OK__; "
+            f"fi",
+            timeout=15,
+        )
+        out["config_removed"] = "__CFG_OK__" in (rm.get("stdout") or "")
+        if not out["config_removed"]:
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           "config remove failed: " + (rm.get("stderr") or "").strip()
+
+    # 3. snapshot/replica purge — DESTRUCTIVE, so guard against system roots.
+    if purge_snapshots and target_ds:
+        forbidden = {"", "rpool", "rpool/ROOT", "rpool/data", "tank", "tankhdd"}
+        # Allow nested paths like "rpool/repl" but refuse top-level pools.
+        if target_ds in forbidden or "/" not in target_ds:
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           f"refusing to destroy system-root dataset: {target_ds}"
+        elif not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds):
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           "target dataset has invalid characters"
+        else:
+            r = run_command(host, f"zfs destroy -r {shlex.quote(target_ds)} 2>&1", timeout=120)
+            out["snapshots_purged"] = bool(r.get("success"))
+            out["destroy_output"] = (r.get("stdout") or r.get("stderr") or "")[-2000:]
+
+    out["success"] = out["config_removed"] or not out["config_existed"]
+    return out
+
+
 def list_configs(host: Dict[str, Any]) -> Dict[str, Any]:
     """Enumerate per-source config files in /etc/bashclub.
 

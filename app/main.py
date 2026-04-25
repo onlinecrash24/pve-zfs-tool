@@ -1361,6 +1361,26 @@ def api_replication_log():
     return jsonify(tail_log(host, lines))
 
 
+@app.route("/api/replication/config", methods=["DELETE"])
+@login_required
+def api_replication_config_delete():
+    from app.replication import delete_config
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    purge = (request.args.get("purge") or "").lower() in ("1", "true", "yes")
+    result = delete_config(host, source=source, purge_snapshots=purge)
+    audit_log("replication.config.delete", target=host["address"], host=host["address"],
+              success=result.get("success", False),
+              details={"source": source, "purge_snapshots": purge,
+                       "config_path": result.get("config_path"),
+                       "target_dataset": result.get("target_dataset"),
+                       "snapshots_purged": result.get("snapshots_purged"),
+                       "error": result.get("error")})
+    return jsonify(result)
+
+
 @app.route("/api/replication/cron", methods=["GET"])
 @login_required
 def api_replication_cron_get():

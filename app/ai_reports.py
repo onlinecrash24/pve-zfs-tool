@@ -674,6 +674,7 @@ def generate_report(host_address=None, lang_override=None):
                 f"{title}{host_tag}",
                 f"Provider: {provider} ({model})\n\n{report_text}",
                 pdf_attachment=pdf_attachment,
+                lang=lang,
             )
         except Exception as e:
             log.warning("Failed to send report notification: %s", e)
