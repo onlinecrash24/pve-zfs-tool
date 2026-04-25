@@ -51,6 +51,19 @@
   - Robust cleanup: kpartx mappings, dmsetup fallback, snapdev reset
   - Cleanup on modal close, tab close (sendBeacon), and via Health page
 
+### Replication (bashclub-zsync)
+- **5-Step Wizard** -- Source/target host pair → setup → datasets → config → log, with progressive disclosure
+- **One-Click Setup** -- Installs `bashclub-zsync` on **both** hosts via the official deb822 APT repo (`apt.bashclub.org/release/`) and bootstraps passwordless SSH from target to source (key generation, `ssh-keyscan` for `known_hosts`, `authorized_keys` append, BatchMode probe)
+- **PVE Detection** -- Per-host PVE-version badge (warns if a host is not Proxmox VE)
+- **Per-Source Config Files** -- Each replication pair lives in its own `/etc/bashclub/<source-ip>.conf` so multiple pairs coexist on a single target host (matches the upstream bashclub convention)
+- **Dataset Tagging** -- Checkbox list of all source datasets/zvols; sets/clears the `bashclub:zsync` user property (value `all`) so the upstream filter actually picks them up
+- **Target Dataset Helper** -- Dropdown of existing datasets on the target plus a "+ create new" option (`zfs create -p -o com.sun:auto-snapshot=false`, defaults to `rpool/repl`)
+- **Complete Config Form** -- 16 fields mirroring the upstream `/etc/bashclub/zsync.conf` (sshport, tag, snapshot_filter, min_keep, zfs_auto_snapshot_*, checkzfs_*); empty fields fall back to upstream defaults so the saved file is always production-ready
+- **Cron Schedule Manager** -- Preset dropdown (bashclub default `20 0-22 * * *`, every 15/30 min, hourly, 2h, 6h, daily 03:00, custom) with live preview, idempotent install/replace/remove, explicit reload across cron / cronie / systemd-cron
+- **checkzfs Health Panel** -- Runs `checkzfs --source <ip>` on the target and renders an OK/WARN/CRIT summary plus a grouped table; ANSI-stripped, replicated-only filter on by default
+- **Multi-Pair Overview** -- Lists every configured pair across the fleet (scans `/etc/bashclub/*.conf` on every registered host); per-row "Open" loads it into the wizard
+- **Safe Delete** -- Removes cron entry + config (with timestamped backup); optional checkbox additionally destroys all `zfs-auto-snap_*` snapshots under the replica target -- datasets and zsync baseline snapshots are kept, top-level pools refused
+
 ### Snapshot Check
 - **Retention Policy Overview** -- Displays configured `--keep=N` values per label from cron
 - **Per-Label Analysis** -- Total snapshots, dataset count, per-dataset average, newest age
@@ -352,6 +365,7 @@ pve-zfs-tool/
     ├── snapshot_analysis.py # Shared snapshot health analysis (UI + AI)
     ├── timezone.py          # Timezone helper (TZ environment variable)
     ├── notifications.py     # Telegram, Gotify, Matrix & Email notifications
+    ├── replication.py       # bashclub-zsync integration (install, config, cron, checkzfs)
     ├── templates/
     │   ├── index.html       # Single-page application
     │   └── login.html       # Login page
