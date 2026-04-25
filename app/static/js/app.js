@@ -2763,6 +2763,7 @@ async function viewReplication() {
         // Two-stage delete: ask whether to also wipe the replica target dataset.
         const targetLabel = p.target ? p.target : "—";
         const purgeCb = h("input", { type: "checkbox", id: "repl-purge-cb" });
+        const childrenCb = h("input", { type: "checkbox", id: "repl-purge-children-cb" });
         const body = h("div", {}, [
             h("p", {}, t("repl_pairs_delete_intro").replace("{src}", p.source || "?").replace("{tgt}", (p.targetHost.name || p.targetHost.address))),
             h("p", { style: "font-size:12px;color:var(--text-secondary)" }, t("repl_pairs_delete_what")),
@@ -2770,12 +2771,20 @@ async function viewReplication() {
                 h("li", {}, t("repl_pairs_delete_li_cron")),
                 h("li", {}, t("repl_pairs_delete_li_config").replace("{path}", p.path || "?")),
             ]),
-            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer" }, [
+            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer;margin-bottom:8px" }, [
                 purgeCb,
                 h("div", {}, [
                     h("div", { style: "font-weight:600;color:var(--danger)" }, t("repl_pairs_purge_label")),
                     h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" },
                         t("repl_pairs_purge_hint").replace("{ds}", targetLabel)),
+                ]),
+            ]),
+            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer" }, [
+                childrenCb,
+                h("div", {}, [
+                    h("div", { style: "font-weight:600;color:var(--danger)" }, t("repl_pairs_purge_children_label")),
+                    h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" },
+                        t("repl_pairs_purge_children_hint").replace("{ds}", targetLabel)),
                 ]),
             ]),
         ]);
@@ -2784,31 +2793,36 @@ async function viewReplication() {
         cancelBtn.onclick = closeModal;
         confirmBtn.onclick = async () => {
             const purge = purgeCb.checked;
-            const phrase = purge ? t("repl_pairs_purge_confirm").replace("{ds}", targetLabel) : t("repl_pairs_delete_confirm");
+            const purgeChildren = childrenCb.checked;
+            // Strongest warning wins on the OS-level confirm dialog
+            const phrase = purgeChildren ? t("repl_pairs_purge_children_confirm").replace("{ds}", targetLabel)
+                          : purge ? t("repl_pairs_purge_confirm").replace("{ds}", targetLabel)
+                          : t("repl_pairs_delete_confirm");
             if (!confirm(phrase)) return;
             confirmBtn.disabled = true;
             try {
                 const url = "/api/replication/config?host=" + encodeURIComponent(p.targetHost.address) +
                             "&source=" + encodeURIComponent(p.source) +
-                            (purge ? "&purge=1" : "");
+                            (purge ? "&purge=1" : "") +
+                            (purgeChildren ? "&purge_children=1" : "");
                 const r = await API.del(url, {});
                 if (!r.success) {
                     toast(r.error || t("failed"), "error");
                     closeModal(); refreshPairs(); return;
                 }
                 // Cron + config removal already happened synchronously above.
-                // The auto-snapshot purge runs as a background task — poll it
-                // so the user sees progress instead of a hung UI.
+                // Optional purge tasks run in the background — close the modal
+                // immediately and surface their final tally via toasts.
+                closeModal(); refreshPairs();
+                toast(t("repl_pairs_delete_done"), "success");
                 if (purge && r.purge_task_id) {
                     toast(t("repl_pairs_purge_started"), "info");
-                    closeModal(); refreshPairs();
                     pollReplicationTask(r.purge_task_id, {
                         onDone: (rec) => {
                             const res = rec.result || {};
                             const n = res.snapshots_destroyed_count || 0;
-                            let msg = t("repl_pairs_delete_done") + " — " +
-                                      (n > 0 ? t("repl_pairs_purge_done").replace("{n}", String(n))
-                                             : t("repl_pairs_purge_none"));
+                            let msg = n > 0 ? t("repl_pairs_purge_done").replace("{n}", String(n))
+                                            : t("repl_pairs_purge_none");
                             if (res.snapshots_failed_count) {
                                 msg += " (" + res.snapshots_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
                             }
@@ -2816,9 +2830,22 @@ async function viewReplication() {
                         },
                         onError: (msg) => toast(msg || t("failed"), "error"),
                     });
-                } else {
-                    toast(t("repl_pairs_delete_done"), "success");
-                    closeModal(); refreshPairs();
+                }
+                if (purgeChildren && r.purge_children_task_id) {
+                    toast(t("repl_pairs_purge_children_started"), "info");
+                    pollReplicationTask(r.purge_children_task_id, {
+                        onDone: (rec) => {
+                            const res = rec.result || {};
+                            const n = res.children_destroyed_count || 0;
+                            let msg = n > 0 ? t("repl_pairs_purge_children_done").replace("{n}", String(n))
+                                            : t("repl_pairs_purge_children_none");
+                            if (res.children_failed_count) {
+                                msg += " (" + res.children_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
+                            }
+                            toast(msg, "success");
+                        },
+                        onError: (msg) => toast(msg || t("failed"), "error"),
+                    });
                 }
             } catch (e) { toast(e.message, "error"); }
             finally { confirmBtn.disabled = false; }
@@ -3303,11 +3330,25 @@ async function viewReplication() {
                 // the user sees zsync progress even before the run is done.
                 pollReplicationTask(r.task_id, {
                     onTick: () => refreshLog(),
-                    onDone: (rec) => {
+                    onDone: async (rec) => {
                         const ok = rec.result && rec.result.success;
                         const exit = rec.result ? rec.result.exit_code : "?";
-                        toast(ok ? t("repl_run_ok") : t("repl_run_failed") + " (exit=" + exit + ")",
-                              ok ? "success" : "error");
+                        if (ok) {
+                            toast(t("repl_run_ok"), "success");
+                        } else {
+                            // Pull the last log lines so the user sees WHY it
+                            // failed (typically zfs recv refusing because the
+                            // target dataset already exists).
+                            let tail = "";
+                            try {
+                                const lr = await API.get("/api/replication/log" + qs + "&lines=20");
+                                if (lr && lr.content) tail = lr.content;
+                            } catch (_) { /* ignore */ }
+                            const html = `<p><b>${escapeHtml(t("repl_run_failed"))}</b> (exit=${escapeHtml(String(exit))})</p>` +
+                                         (tail ? `<pre class="output" style="max-height:300px">${escapeHtml(tail.split("\n").slice(-20).join("\n"))}</pre>` : "") +
+                                         `<p style="font-size:12px;color:var(--text-secondary)">${escapeHtml(t("repl_run_failed_hint"))}</p>`;
+                            openModal(t("repl_run_failed"), html);
+                        }
                         refreshLog();
                         runBtn.disabled = false; runBtn.textContent = t("repl_run_now");
                     },

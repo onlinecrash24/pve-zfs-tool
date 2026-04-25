@@ -1399,10 +1399,13 @@ def api_replication_config_delete():
         return jsonify(err), code
     source = request.args.get("source") or None
     purge = (request.args.get("purge") or "").lower() in ("1", "true", "yes")
-    result = delete_config(host, source=source, purge_snapshots=purge)
+    purge_children = (request.args.get("purge_children") or "").lower() in ("1", "true", "yes")
+    result = delete_config(host, source=source, purge_snapshots=purge,
+                           purge_children=purge_children)
     audit_log("replication.config.delete", target=host["address"], host=host["address"],
               success=result.get("success", False),
               details={"source": source, "purge_snapshots": purge,
+                       "purge_children": purge_children,
                        "config_path": result.get("config_path"),
                        "target_dataset": result.get("target_dataset"),
                        "snapshots_purged": result.get("snapshots_purged"),

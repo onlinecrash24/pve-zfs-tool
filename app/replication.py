@@ -112,7 +112,7 @@ def get_task(task_id: str) -> Optional[Dict[str, Any]]:
 
 CONFIG_PATH = "/etc/bashclub/zsync.conf"
 CONFIG_DIR = "/etc/bashclub"
-LOG_PATH = "/var/log/bashclub-zsync/zsync.log"
+LOG_PATH = "/var/log/bashclub-zsync.log"
 BINARY_NAME = "bashclub-zsync"
 CHECKZFS_BINARY = "checkzfs"
 
@@ -409,6 +409,7 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
 
 def delete_config(host: Dict[str, Any], source: Optional[str] = None,
                   purge_snapshots: bool = False,
+                  purge_children: bool = False,
                   purge_async: bool = True) -> Dict[str, Any]:
     """Delete a per-source replication config and (optionally) the
     zfs-auto-snapshots underneath the replica target.
@@ -440,6 +441,7 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
         "snapshots_examples": [],
         "destroy_output": "",
         "purge_task_id": None,
+        "purge_children_task_id": None,
         "error": "",
     }
 
@@ -516,6 +518,24 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
             if failures:
                 out["destroy_output"] = "\n".join(failures)[-2000:]
 
+    # 4. Optional: destroy the replica child datasets so a fresh sync into
+    # the same target works (zsync's recv refuses to overwrite existing
+    # filesystems without a matching baseline). Always async because a
+    # subtree of dozens of zvols can take a while.
+    if purge_children and target_ds:
+        if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds):
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           "target dataset has invalid characters"
+        elif "/" not in target_ds:
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           f"refusing to operate on top-level pool: {target_ds}"
+        else:
+            try:
+                out["purge_children_task_id"] = purge_replica_children_async(host, target_ds)
+            except Exception as e:
+                out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                               f"children purge launch failed: {e}"
+
     out["success"] = out["config_removed"] or not out["config_existed"]
     return out
 
@@ -566,7 +586,7 @@ def run_now(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any
     """
     cfg_path = config_path_for(source)
     cmd = (
-        f"mkdir -p /var/log/bashclub-zsync && "
+        f"touch /var/log/bashclub-zsync.log && "
         f"{BINARY_NAME} -c {shlex.quote(cfg_path)} "
         f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
     )
@@ -597,7 +617,7 @@ def run_now_async(host: Dict[str, Any], source: Optional[str] = None) -> str:
     def _job(progress, _host, _cfg_path):
         progress(f"Starting bashclub-zsync with {_cfg_path} …")
         cmd = (
-            f"mkdir -p /var/log/bashclub-zsync && "
+            f"touch /var/log/bashclub-zsync.log && "
             f"{BINARY_NAME} -c {shlex.quote(_cfg_path)} "
             f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
         )
@@ -670,6 +690,64 @@ def purge_auto_snapshots_async(host: Dict[str, Any], target_ds: str) -> str:
         }
 
     return start_task("purge_auto_snapshots", _job, host, target_ds)
+
+
+def purge_replica_children_async(host: Dict[str, Any], target_ds: str) -> str:
+    """Destroy every direct child of the replica target dataset.
+
+    After a previous replication pair was deleted, the child datasets such as
+    ``rpool/repl/rpool/ROOT/pve-1`` stay behind. A fresh sync into the same
+    target then fails with ``cannot receive new filesystem stream: dataset
+    already exists`` because zsync's recv refuses to overwrite an existing
+    filesystem without a matching baseline. This wipes the children (one by
+    one, recursive) so the next zsync run starts clean. The target itself
+    (e.g. ``rpool/repl``) is preserved.
+    """
+    if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds or "") or "/" not in (target_ds or ""):
+        raise ValueError("invalid or top-level dataset")
+
+    def _job(progress, _host, _ds):
+        progress(f"Listing direct children of {_ds} …")
+        # ``zfs list -d 1`` enumerates the dataset itself plus its direct
+        # children; we drop the parent so the target dataset survives.
+        list_cmd = (
+            f"zfs list -H -o name -t filesystem,volume -r -d 1 {shlex.quote(_ds)} 2>/dev/null"
+        )
+        r_list = run_command(_host, list_cmd, timeout=60)
+        all_names = [s for s in (r_list.get("stdout") or "").splitlines() if s.strip()]
+        children = [n for n in all_names if n != _ds]
+        total = len(children)
+        progress(f"Found {total} child dataset(s) under {_ds}", total=total)
+        destroyed = 0
+        failed = 0
+        failures: List[str] = []
+        for i, name in enumerate(children, start=1):
+            if not re.match(r"^[A-Za-z0-9._:/-]+$", name) or "/" not in name:
+                failed += 1
+                failures.append(name + ": invalid name")
+                continue
+            # zfs destroy -r removes the child plus everything under it,
+            # including any leftover snapshots. Generous timeout; large
+            # subtrees can take a while.
+            rd = run_command(_host, f"zfs destroy -r {shlex.quote(name)} 2>&1", timeout=300)
+            if rd.get("success"):
+                destroyed += 1
+            else:
+                failed += 1
+                if len(failures) < 10:
+                    failures.append(f"{name}: {(rd.get('stderr') or rd.get('stdout') or '').strip()[:160]}")
+            progress(f"Destroyed {destroyed}/{total} child(ren) (failed={failed})",
+                     destroyed=destroyed, failed=failed, total=total)
+        return {
+            "success": failed == 0,
+            "children_destroyed_count": destroyed,
+            "children_failed_count": failed,
+            "children_examples": children[:5],
+            "destroy_output": "\n".join(failures)[-2000:] if failures else "",
+            "target_dataset": _ds,
+        }
+
+    return start_task("purge_replica_children", _job, host, target_ds)
 
 
 def bootstrap_ssh(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> Dict[str, Any]:
