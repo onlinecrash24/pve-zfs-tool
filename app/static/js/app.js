@@ -3028,20 +3028,38 @@ async function viewReplication() {
         form.appendChild(srcCell);
         cfgInputs.source = { get: () => srcInput.value.trim() };
 
+        // Field list mirrors the upstream default /etc/bashclub/zsync.conf.
+        // ``def`` is the value applied when the field is left empty on save —
+        // the placeholder shows it, so the form looks clean but a save still
+        // produces a complete, ready-to-run config.
         const simple = [
-            { key: "sshport",                      label: "repl_f_sshport",                      hint: "repl_h_sshport",                      placeholder: "22", def: defSourcePort },
-            { key: "tag",                          label: "repl_f_tag",                          hint: "repl_h_tag",                          placeholder: "bashclub:zsync", def: "bashclub:zsync" },
-            { key: "snapshot_filter",              label: "repl_f_snapshot_filter",              hint: "repl_h_snapshot_filter",              placeholder: "zfs-auto-snap_daily|zfs-auto-snap_weekly", def: "" },
-            { key: "min_keep",                     label: "repl_f_min_keep",                     hint: "repl_h_min_keep",                     placeholder: "2", def: "2" },
-            { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       placeholder: "zas", def: "" },
-            { key: "prefix",                       label: "repl_f_prefix",                       hint: "",                                    placeholder: "", def: "" },
-            { key: "suffix",                       label: "repl_f_suffix",                       hint: "",                                    placeholder: "", def: "" },
+            { key: "sshport",                      label: "repl_f_sshport",                      hint: "repl_h_sshport",                      def: String(defSourcePort || "22") },
+            { key: "tag",                          label: "repl_f_tag",                          hint: "repl_h_tag",                          def: "bashclub:zsync" },
+            { key: "snapshot_filter",              label: "repl_f_snapshot_filter",              hint: "repl_h_snapshot_filter",              def: "hourly|daily|weekly|monthly" },
+            { key: "min_keep",                     label: "repl_f_min_keep",                     hint: "repl_h_min_keep",                     def: "2" },
+            { key: "zfs_auto_snapshot_keep",       label: "repl_f_zas_keep",                     hint: "repl_h_zas_keep",                     def: "0" },
+            { key: "zfs_auto_snapshot_label",      label: "repl_f_zas_label",                    hint: "repl_h_zas_label",                    def: "backup" },
+            { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       def: "zas" },
+            { key: "prefix",                       label: "repl_f_prefix",                       hint: "",                                    def: "" },
+            { key: "suffix",                       label: "repl_f_suffix",                       hint: "",                                    def: "" },
+            { key: "checkzfs_disabled",            label: "repl_f_checkzfs_disabled",            hint: "repl_h_checkzfs_disabled",            def: "0" },
+            { key: "checkzfs_local",               label: "repl_f_checkzfs_local",               hint: "repl_h_checkzfs_local",               def: "0" },
+            { key: "checkzfs_prefix",              label: "repl_f_checkzfs_prefix",              hint: "repl_h_checkzfs_prefix",              def: "zsync" },
+            { key: "checkzfs_max_age",             label: "repl_f_checkzfs_max_age",             hint: "repl_h_checkzfs_max_age",             def: "1500,6000" },
+            { key: "checkzfs_max_snapshot_count",  label: "repl_f_checkzfs_max_count",           hint: "repl_h_checkzfs_max_count",           def: "150,165" },
+            { key: "checkzfs_spool",               label: "repl_f_checkzfs_spool",               hint: "repl_h_checkzfs_spool",               def: "0" },
+            { key: "checkzfs_spool_maxage",        label: "repl_f_checkzfs_spool_maxage",        hint: "repl_h_checkzfs_spool_maxage",        def: "87000" },
         ];
         simple.forEach(f => {
             const cell = h("div");
             cell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t(f.label)));
-            const input = h("input", { type: "text", className: "form-input", placeholder: f.placeholder, value: v[f.key] ?? f.def ?? "" });
-            cfgInputs[f.key] = { get: () => input.value.trim() };
+            const input = h("input", { type: "text", className: "form-input", placeholder: f.def, value: v[f.key] ?? "" });
+            // Empty input -> apply the default. This keeps the form tidy but
+            // still produces a complete config on save.
+            cfgInputs[f.key] = { get: () => {
+                const val = input.value.trim();
+                return val === "" ? f.def : val;
+            } };
             cell.appendChild(input);
             if (f.hint) cell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t(f.hint)));
             form.appendChild(cell);
