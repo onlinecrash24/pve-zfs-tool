@@ -1253,17 +1253,46 @@ def api_replication_config_set():
 @app.route("/api/replication/run", methods=["POST"])
 @login_required
 def api_replication_run():
-    from app.replication import run_now
+    """Trigger bashclub-zsync. Returns a task id; the client polls
+    /api/replication/task?id=... for progress. The first sync of a large pool
+    can run for hours, which would otherwise time out the HTTP request."""
+    from app.replication import run_now_async
     host, err, code = _require_host()
     if err:
         return jsonify(err), code
     data = request.get_json(silent=True) or {}
     source = (data.get("source") or request.args.get("source") or None)
-    result = run_now(host, source=source)
+    task_id = run_now_async(host, source=source)
     audit_log("replication.run", target=host["address"], host=host["address"],
-              success=result["success"],
-              details={"exit_code": result.get("exit_code")})
-    return jsonify(result)
+              success=True,
+              details={"task_id": task_id, "source": source})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/replication/task")
+@login_required
+def api_replication_task():
+    from app.replication import get_task
+    tid = (request.args.get("id") or "").strip()
+    if not tid:
+        return jsonify({"error": "id required"}), 400
+    rec = get_task(tid)
+    if not rec:
+        return jsonify({"error": "task not found"}), 404
+    # Strip the full log for the regular polling response; only return last few
+    # entries so the wire size stays small.
+    log_tail = (rec.get("log") or [])[-20:]
+    return jsonify({
+        "id": rec["id"],
+        "name": rec.get("name"),
+        "status": rec.get("status"),
+        "progress": rec.get("progress"),
+        "started_at": rec.get("started_at"),
+        "finished_at": rec.get("finished_at"),
+        "result": rec.get("result"),
+        "error": rec.get("error"),
+        "log_tail": log_tail,
+    })
 
 
 @app.route("/api/replication/bootstrap-ssh", methods=["POST"])

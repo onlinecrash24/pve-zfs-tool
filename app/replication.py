@@ -17,9 +17,98 @@ from __future__ import annotations
 
 import re
 import shlex
+import threading
+import time
+import traceback
+import uuid
 from typing import Any, Dict, List, Optional
 
 from app.ssh_manager import run_command
+
+
+# ---------------------------------------------------------------------------
+# Async task registry
+# ---------------------------------------------------------------------------
+# Long-running replication operations (first zsync, mass auto-snapshot purge)
+# regularly outlast a normal HTTP request. Instead of blocking until the SSH
+# command returns, we start a background thread that publishes its progress
+# into an in-memory registry and return a task id immediately. The UI polls
+# /api/replication/task?id=... at its leisure.
+
+_TASKS: Dict[str, Dict[str, Any]] = {}
+_TASKS_LOCK = threading.Lock()
+_TASK_TTL_SECONDS = 6 * 3600  # finished tasks linger for six hours
+
+
+def _gc_tasks() -> None:
+    cutoff = time.time() - _TASK_TTL_SECONDS
+    with _TASKS_LOCK:
+        for tid in [k for k, v in _TASKS.items()
+                    if v.get("finished_at") and v["finished_at"] < cutoff]:
+            _TASKS.pop(tid, None)
+
+
+def start_task(name: str, fn, *args, **kwargs) -> str:
+    """Run ``fn(progress_cb, *args, **kwargs)`` in a background thread.
+
+    ``progress_cb(message, **fields)`` lets the worker push status updates to
+    the registry. Returns a task id the caller hands to the client.
+    """
+    _gc_tasks()
+    tid = uuid.uuid4().hex[:12]
+    record: Dict[str, Any] = {
+        "id": tid,
+        "name": name,
+        "status": "running",
+        "progress": "",
+        "started_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "error": "",
+        "log": [],
+    }
+    with _TASKS_LOCK:
+        _TASKS[tid] = record
+
+    def _progress(msg: str, **fields):
+        with _TASKS_LOCK:
+            r = _TASKS.get(tid)
+            if not r:
+                return
+            r["progress"] = msg
+            r["log"].append({"t": time.time(), "msg": msg, **fields})
+            # Cap log so a runaway task doesn't eat memory.
+            if len(r["log"]) > 500:
+                r["log"] = r["log"][-500:]
+
+    def _runner():
+        try:
+            result = fn(_progress, *args, **kwargs)
+            with _TASKS_LOCK:
+                r = _TASKS.get(tid)
+                if r:
+                    r["status"] = "done"
+                    r["result"] = result
+                    r["finished_at"] = time.time()
+        except Exception as e:
+            with _TASKS_LOCK:
+                r = _TASKS.get(tid)
+                if r:
+                    r["status"] = "error"
+                    r["error"] = f"{e}\n{traceback.format_exc()[-1500:]}"
+                    r["finished_at"] = time.time()
+
+    threading.Thread(target=_runner, daemon=True, name=f"repl-{name}-{tid}").start()
+    return tid
+
+
+def get_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with _TASKS_LOCK:
+        r = _TASKS.get(task_id)
+        if not r:
+            return None
+        # Return a shallow copy so callers can't mutate the live record.
+        return dict(r)
 
 CONFIG_PATH = "/etc/bashclub/zsync.conf"
 CONFIG_DIR = "/etc/bashclub"
@@ -319,7 +408,8 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
 
 
 def delete_config(host: Dict[str, Any], source: Optional[str] = None,
-                  purge_snapshots: bool = False) -> Dict[str, Any]:
+                  purge_snapshots: bool = False,
+                  purge_async: bool = True) -> Dict[str, Any]:
     """Delete a per-source replication config and (optionally) the
     zfs-auto-snapshots underneath the replica target.
 
@@ -349,6 +439,7 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
         "snapshots_failed_count": 0,
         "snapshots_examples": [],
         "destroy_output": "",
+        "purge_task_id": None,
         "error": "",
     }
 
@@ -377,8 +468,8 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
     # 3. ZFS-auto-snapshot purge under the replica target.
     # Only snapshots matching "@zfs-auto-snap_*" are destroyed -- the datasets
     # themselves and any non-auto snapshots (e.g. zsync_* baselines) stay
-    # intact. We list first, then destroy one by one so a single failure
-    # doesn't abort the rest.
+    # intact. With purge_async=True (the default) the purge runs as a
+    # background task so the HTTP request returns immediately.
     if purge_snapshots and target_ds:
         if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds):
             out["error"] = (out["error"] + " | " if out["error"] else "") + \
@@ -389,6 +480,12 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
             # still wipe a huge amount of auto-snapshots.
             out["error"] = (out["error"] + " | " if out["error"] else "") + \
                            f"refusing to operate on top-level pool: {target_ds}"
+        elif purge_async:
+            try:
+                out["purge_task_id"] = purge_auto_snapshots_async(host, target_ds)
+            except Exception as e:
+                out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                               f"purge task launch failed: {e}"
         else:
             list_cmd = (
                 f"zfs list -H -t snapshot -o name -r {shlex.quote(target_ds)} 2>/dev/null "
@@ -485,6 +582,94 @@ def run_now(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any
         "exit_code": exit_code,
         "stderr": r["stderr"],
     }
+
+
+def run_now_async(host: Dict[str, Any], source: Optional[str] = None) -> str:
+    """Async variant of run_now() for first-sync / large transfers.
+
+    The first zsync run easily exceeds 10 minutes (full baseline transfer),
+    which would time out the foreground HTTP request and leave the UI hanging.
+    This launches the run in a background thread and returns a task id; the
+    UI then polls /api/replication/task?id=... for progress.
+    """
+    cfg_path = config_path_for(source)
+
+    def _job(progress, _host, _cfg_path):
+        progress(f"Starting bashclub-zsync with {_cfg_path} …")
+        cmd = (
+            f"mkdir -p /var/log/bashclub-zsync && "
+            f"{BINARY_NAME} -c {shlex.quote(_cfg_path)} "
+            f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
+        )
+        # Generous timeout — initial replication of a multi-TB pool can take
+        # hours. The thread sits patiently; nothing else blocks.
+        r = run_command(_host, cmd, timeout=6 * 3600)
+        exit_code = None
+        if r.get("stdout"):
+            m = re.search(r"__exit=(\d+)\s*$", r["stdout"].strip())
+            if m:
+                exit_code = int(m.group(1))
+        ok = r.get("success", False) and (exit_code == 0)
+        progress(f"Finished (exit={exit_code})", exit_code=exit_code, ok=ok)
+        return {
+            "success": ok,
+            "exit_code": exit_code,
+            "stderr": r.get("stderr", ""),
+        }
+
+    return start_task("run_now", _job, host, cfg_path)
+
+
+def purge_auto_snapshots_async(host: Dict[str, Any], target_ds: str) -> str:
+    """Async variant of the auto-snapshot purge inside delete_config().
+
+    A multi-VM Proxmox host typically carries hundreds of zfs-auto-snap_*
+    snapshots under the replica target — destroying each one synchronously
+    inside an HTTP request reliably times out. The same job runs as a
+    background task here, with per-snapshot progress.
+    """
+    if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds or "") or "/" not in (target_ds or ""):
+        raise ValueError("invalid or top-level dataset")
+
+    def _job(progress, _host, _ds):
+        progress(f"Listing zfs-auto-snapshots under {_ds} …")
+        list_cmd = (
+            f"zfs list -H -t snapshot -o name -r {shlex.quote(_ds)} 2>/dev/null "
+            f"| grep '@zfs-auto-snap_' || true"
+        )
+        r_list = run_command(_host, list_cmd, timeout=120)
+        names = [s for s in (r_list.get("stdout") or "").splitlines() if s.strip()]
+        total = len(names)
+        progress(f"Found {total} auto-snapshot(s) to destroy", total=total)
+        destroyed = 0
+        failed = 0
+        failures: List[str] = []
+        for i, snap in enumerate(names, start=1):
+            if "@" not in snap or not re.match(r"^[A-Za-z0-9._:/@-]+$", snap):
+                failed += 1
+                failures.append(snap + ": invalid name")
+                continue
+            rd = run_command(_host, f"zfs destroy {shlex.quote(snap)} 2>&1", timeout=60)
+            if rd.get("success"):
+                destroyed += 1
+            else:
+                failed += 1
+                if len(failures) < 10:
+                    failures.append(f"{snap}: {(rd.get('stderr') or rd.get('stdout') or '').strip()[:120]}")
+            # Heartbeat every 5 destroys (or on the last one) so polling sees life.
+            if i == total or i % 5 == 0:
+                progress(f"Destroyed {destroyed}/{total} (failed={failed})",
+                         destroyed=destroyed, failed=failed, total=total)
+        return {
+            "success": failed == 0,
+            "snapshots_destroyed_count": destroyed,
+            "snapshots_failed_count": failed,
+            "snapshots_examples": names[:5],
+            "destroy_output": "\n".join(failures)[-2000:] if failures else "",
+            "target_dataset": _ds,
+        }
+
+    return start_task("purge_auto_snapshots", _job, host, target_ds)
 
 
 def bootstrap_ssh(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> Dict[str, Any]:

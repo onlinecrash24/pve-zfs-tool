@@ -2792,25 +2792,34 @@ async function viewReplication() {
                             "&source=" + encodeURIComponent(p.source) +
                             (purge ? "&purge=1" : "");
                 const r = await API.del(url, {});
-                if (r.success) {
-                    let msg = t("repl_pairs_delete_done");
-                    if (purge) {
-                        const n = r.snapshots_destroyed_count || 0;
-                        if (n > 0 || r.snapshots_purged) {
-                            msg += " — " + t("repl_pairs_purge_done").replace("{n}", String(n));
-                        } else {
-                            msg += " — " + t("repl_pairs_purge_none");
-                        }
-                        if (r.snapshots_failed_count) {
-                            msg += " (" + r.snapshots_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
-                        }
-                    }
-                    toast(msg, "success");
-                } else {
+                if (!r.success) {
                     toast(r.error || t("failed"), "error");
+                    closeModal(); refreshPairs(); return;
                 }
-                closeModal();
-                refreshPairs();
+                // Cron + config removal already happened synchronously above.
+                // The auto-snapshot purge runs as a background task — poll it
+                // so the user sees progress instead of a hung UI.
+                if (purge && r.purge_task_id) {
+                    toast(t("repl_pairs_purge_started"), "info");
+                    closeModal(); refreshPairs();
+                    pollReplicationTask(r.purge_task_id, {
+                        onDone: (rec) => {
+                            const res = rec.result || {};
+                            const n = res.snapshots_destroyed_count || 0;
+                            let msg = t("repl_pairs_delete_done") + " — " +
+                                      (n > 0 ? t("repl_pairs_purge_done").replace("{n}", String(n))
+                                             : t("repl_pairs_purge_none"));
+                            if (res.snapshots_failed_count) {
+                                msg += " (" + res.snapshots_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
+                            }
+                            toast(msg, "success");
+                        },
+                        onError: (msg) => toast(msg || t("failed"), "error"),
+                    });
+                } else {
+                    toast(t("repl_pairs_delete_done"), "success");
+                    closeModal(); refreshPairs();
+                }
             } catch (e) { toast(e.message, "error"); }
             finally { confirmBtn.disabled = false; }
         };
@@ -2826,6 +2835,35 @@ async function viewReplication() {
     }
 
     pairsRefreshBtn.onclick = refreshPairs;
+
+    // Poll a long-running replication task. Calls onTick() on every update,
+    // onDone(record) when it finishes successfully, onError(msg) on failure
+    // or timeout. Polling backs off from 2s → 5s after the first minute so
+    // a multi-hour first-sync doesn't hammer the server.
+    function pollReplicationTask(taskId, { onTick, onDone, onError, maxSeconds = 8 * 3600 } = {}) {
+        const started = Date.now();
+        let interval = 2000;
+        let lastProgress = "";
+        const tick = async () => {
+            try {
+                const rec = await API.get("/api/replication/task?id=" + encodeURIComponent(taskId));
+                if (rec.progress && rec.progress !== lastProgress) {
+                    lastProgress = rec.progress;
+                    if (onTick) onTick(rec);
+                }
+                if (rec.status === "done") { if (onDone) onDone(rec); return; }
+                if (rec.status === "error") { if (onError) onError(rec.error || "task error"); return; }
+                if ((Date.now() - started) > maxSeconds * 1000) {
+                    if (onError) onError("task polling timed out"); return;
+                }
+                if ((Date.now() - started) > 60 * 1000) interval = 5000;
+                setTimeout(tick, interval);
+            } catch (e) {
+                if (onError) onError(e.message || "task poll failed");
+            }
+        };
+        tick();
+    }
 
     // -- Step 1: Source + Target host selection ----------------------------
     const selCard = h("div", { className: "card" });
@@ -3256,11 +3294,32 @@ async function viewReplication() {
             runBtn.disabled = true; runBtn.textContent = t("repl_running");
             try {
                 const r = await API.post("/api/replication/run" + qsPair, { source: src.address });
-                if (r.success) toast(t("repl_run_ok"), "success");
-                else toast(t("repl_run_failed") + " (exit=" + (r.exit_code ?? "?") + ")", "error");
-                refreshLog();
-            } catch (e) { toast(e.message, "error"); }
-            finally { runBtn.disabled = false; runBtn.textContent = t("repl_run_now"); }
+                if (!r.success || !r.task_id) {
+                    toast(r.error || t("repl_run_failed"), "error");
+                    return;
+                }
+                toast(t("repl_run_started"), "info");
+                // Poll the task until it finishes; refresh log along the way so
+                // the user sees zsync progress even before the run is done.
+                pollReplicationTask(r.task_id, {
+                    onTick: () => refreshLog(),
+                    onDone: (rec) => {
+                        const ok = rec.result && rec.result.success;
+                        const exit = rec.result ? rec.result.exit_code : "?";
+                        toast(ok ? t("repl_run_ok") : t("repl_run_failed") + " (exit=" + exit + ")",
+                              ok ? "success" : "error");
+                        refreshLog();
+                        runBtn.disabled = false; runBtn.textContent = t("repl_run_now");
+                    },
+                    onError: (msg) => {
+                        toast(msg || t("repl_run_failed"), "error");
+                        runBtn.disabled = false; runBtn.textContent = t("repl_run_now");
+                    },
+                });
+            } catch (e) {
+                toast(e.message, "error");
+                runBtn.disabled = false; runBtn.textContent = t("repl_run_now");
+            }
         };
         cfgBtnRow.appendChild(runBtn);
         cfgBody.appendChild(cfgBtnRow);
