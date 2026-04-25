@@ -2710,9 +2710,10 @@ async function viewReplication() {
         const tb = h("tbody");
         all.forEach(p => {
             const sourceAddr = (p.source || "").includes("@") ? p.source.split("@")[1] : (p.source || "");
-            const editBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("repl_pairs_open"));
-            const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("repl_pairs_delete"));
-            editBtn.onclick = () => {
+            const openBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("repl_pairs_open"));
+            const editBtn = h("button", { className: "btn btn-sm", style: "margin-right:6px" }, t("repl_pairs_edit"));
+            const delBtn  = h("button", { className: "btn btn-sm btn-danger" }, t("repl_pairs_delete"));
+            openBtn.onclick = () => {
                 // Locate matching source host in our hosts list (by address) and
                 // pre-select dropdowns so renderAll() loads this pair into the wizard.
                 const srcHst = hosts.find(x => x.address === sourceAddr);
@@ -2726,18 +2727,116 @@ async function viewReplication() {
                 // scroll the wizard into view
                 setTimeout(() => selCard.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
             };
+            editBtn.onclick = () => openEditConfigModal(p);
             delBtn.onclick = () => openDeletePairModal(p);
             tb.appendChild(h("tr", {}, [
                 h("td", { style: "font-family:monospace;font-size:12px" }, p.source || "—"),
                 h("td", {}, (p.targetHost.name || p.targetHost.address)),
                 h("td", { style: "font-family:monospace;font-size:12px" }, p.target || "—"),
                 h("td", { style: "font-family:monospace;font-size:11px;color:var(--text-secondary)" }, p.path || ""),
-                h("td", { style: "text-align:right" }, [editBtn, delBtn]),
+                h("td", { style: "text-align:right" }, [openBtn, editBtn, delBtn]),
             ]));
         });
         tbl.appendChild(tb);
         pairsBody.innerHTML = "";
         pairsBody.appendChild(tbl);
+    }
+
+    async function openEditConfigModal(p) {
+        // Load the config straight from the TARGET host's per-source file
+        // (/etc/bashclub/<source-ip>.conf). The source host is not touched.
+        const qs = "?host=" + encodeURIComponent(p.targetHost.address) +
+                   "&source=" + encodeURIComponent(p.source || "");
+        let cfg;
+        try { cfg = await API.get("/api/replication/config" + qs); }
+        catch (e) { toast(e.message || "Failed", "error"); return; }
+        const v = cfg.values || {};
+
+        // Same field list / defaults as the wizard step 4 — but rendered as a
+        // modal because the user only wants to edit, not walk through the
+        // whole wizard again. Empty input → upstream default applied on save.
+        const fields = [
+            { key: "target",                       label: "repl_f_target",                       def: "", required: true },
+            { key: "source",                       label: "repl_f_source",                       def: "", required: true },
+            { key: "sshport",                      label: "repl_f_sshport",                      def: "22" },
+            { key: "tag",                          label: "repl_f_tag",                          def: "bashclub:zsync" },
+            { key: "snapshot_filter",              label: "repl_f_snapshot_filter",              def: "hourly|daily|weekly|monthly" },
+            { key: "min_keep",                     label: "repl_f_min_keep",                     def: "2" },
+            { key: "zfs_auto_snapshot_keep",       label: "repl_f_zas_keep",                     def: "0" },
+            { key: "zfs_auto_snapshot_label",      label: "repl_f_zas_label",                    def: "backup" },
+            { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       def: "zas" },
+            { key: "checkzfs_disabled",            label: "repl_f_checkzfs_disabled",            def: "0" },
+            { key: "checkzfs_local",               label: "repl_f_checkzfs_local",               def: "0" },
+            { key: "checkzfs_prefix",              label: "repl_f_checkzfs_prefix",              def: "zsync" },
+            { key: "checkzfs_max_age",             label: "repl_f_checkzfs_max_age",             def: "1500,6000" },
+            { key: "checkzfs_max_snapshot_count",  label: "repl_f_checkzfs_max_count",           def: "150,165" },
+            { key: "checkzfs_spool",               label: "repl_f_checkzfs_spool",               def: "0" },
+            { key: "checkzfs_spool_maxage",        label: "repl_f_checkzfs_spool_maxage",        def: "87000" },
+        ];
+
+        const inputs = {};
+        const grid = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px" });
+        fields.forEach(f => {
+            const cell = h("div");
+            cell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t(f.label)));
+            const input = h("input", { type: "text", className: "form-input",
+                placeholder: f.def,
+                value: (v[f.key] != null ? String(v[f.key]) : "") });
+            cell.appendChild(input);
+            inputs[f.key] = { el: input, def: f.def, required: !!f.required };
+            grid.appendChild(cell);
+        });
+
+        const body = h("div", {}, [
+            h("p", { style: "font-size:12px;color:var(--text-secondary);margin:0 0 4px 0" },
+                t("repl_pairs_edit_intro").replace("{tgt}", p.targetHost.name || p.targetHost.address)),
+            h("p", { style: "font-size:11px;color:var(--text-secondary);margin:0 0 12px 0;font-family:monospace" },
+                cfg.config_path || p.path || ""),
+            grid,
+            h("p", { style: "font-size:11px;color:var(--text-secondary);margin-top:10px" },
+                t("repl_pairs_edit_hint")),
+        ]);
+
+        const cancelBtn = h("button", { className: "btn" }, t("cancel"));
+        const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
+        cancelBtn.onclick = closeModal;
+        saveBtn.onclick = async () => {
+            const values = {};
+            for (const k of Object.keys(inputs)) {
+                const slot = inputs[k];
+                const raw = slot.el.value.trim();
+                values[k] = raw === "" ? slot.def : raw;
+            }
+            if (!values.target) { toast(t("repl_target_required"), "error"); return; }
+            if (!values.source) { toast(t("repl_source_required"), "error"); return; }
+            saveBtn.disabled = true;
+            try {
+                // Pass the original source so the backend writes the same file
+                // even if the user edited the source field.
+                const r = await API.post("/api/replication/config" + qs, {
+                    values, source: p.source,
+                });
+                if (r.success) {
+                    toast(t("repl_config_saved"), "success");
+                    closeModal();
+                    refreshPairs();
+                } else {
+                    toast(r.stderr || t("failed"), "error");
+                }
+            } catch (e) { toast(e.message, "error"); }
+            finally { saveBtn.disabled = false; }
+        };
+
+        openModal(t("repl_pairs_edit_title"), "");
+        const mb = document.getElementById("modal-body");
+        const mf = document.getElementById("modal-footer");
+        mb.innerHTML = ""; mb.appendChild(body);
+        mf.innerHTML = "";
+        mf.appendChild(cancelBtn);
+        mf.appendChild(saveBtn);
+        // The modal is a bit wider than usual to fit the 2-col grid
+        const modal = document.querySelector("#modal-overlay .modal");
+        if (modal) modal.style.maxWidth = "780px";
     }
 
     function openDeletePairModal(p) {
