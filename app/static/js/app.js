@@ -3098,10 +3098,135 @@ async function viewReplication() {
         cfgBtnRow.appendChild(runBtn);
         cfgBody.appendChild(cfgBtnRow);
 
-        // -- Step 5: checkzfs status (replication health overview) -------
+        // -- Step 5: Cron schedule ----------------------------------------
+        const cronCard = h("div", { className: "card", style: "margin-top:16px" });
+        cronCard.appendChild(h("div", { className: "card-header" }, "5. " + t("repl_cron_title")));
+        const cronBody = h("div", { className: "card-body" });
+        cronCard.appendChild(cronBody);
+        configMount.appendChild(cronCard);
+
+        cronBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:8px" },
+            t("repl_cron_desc")));
+
+        const cronStatusLine = h("div", { style: "margin-bottom:10px;font-size:13px" }, t("loading"));
+        cronBody.appendChild(cronStatusLine);
+
+        const cronPresetSel = h("select", { className: "form-input", style: "max-width:340px" });
+        const cronCustomInput = h("input", { type: "text", className: "form-input", style: "max-width:240px;font-family:monospace", placeholder: "20 0-22 * * *" });
+        const cronPreview = h("code", { style: "font-size:12px;color:var(--text-secondary)" }, "");
+
+        // Presets are loaded from the backend response; fallback list mirrors
+        // the bashclub default if the call fails.
+        const fallbackPresets = [
+            { id: "bashclub_default", label: "repl_cron_preset_default", schedule: "20 0-22 * * *" },
+            { id: "every_15min", label: "repl_cron_preset_15min", schedule: "*/15 * * * *" },
+            { id: "every_30min", label: "repl_cron_preset_30min", schedule: "*/30 * * * *" },
+            { id: "hourly", label: "repl_cron_preset_hourly", schedule: "0 * * * *" },
+            { id: "every_2h", label: "repl_cron_preset_2h", schedule: "0 */2 * * *" },
+            { id: "every_6h", label: "repl_cron_preset_6h", schedule: "0 */6 * * *" },
+            { id: "daily_0300", label: "repl_cron_preset_daily", schedule: "0 3 * * *" },
+        ];
+
+        const buildPresets = (presets) => {
+            cronPresetSel.innerHTML = "";
+            (presets || fallbackPresets).forEach(p => {
+                cronPresetSel.appendChild(h("option", { value: p.schedule, "data-id": p.id }, t(p.label) + " — " + p.schedule));
+            });
+            cronPresetSel.appendChild(h("option", { value: "__custom__" }, t("repl_cron_custom")));
+        };
+        buildPresets(fallbackPresets);
+
+        const cronRow1 = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [
+            h("label", { style: "font-size:12px;color:var(--text-secondary);min-width:90px" }, t("repl_cron_preset") + ":"),
+            cronPresetSel,
+        ]);
+        const cronRow2 = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" }, [
+            h("label", { style: "font-size:12px;color:var(--text-secondary);min-width:90px" }, t("repl_cron_expr") + ":"),
+            cronCustomInput,
+            cronPreview,
+        ]);
+        cronBody.appendChild(cronRow1);
+        cronBody.appendChild(cronRow2);
+
+        const updatePreview = () => {
+            const expr = cronPresetSel.value === "__custom__" ? cronCustomInput.value.trim() : cronPresetSel.value;
+            cronPreview.textContent = expr ? ("→ " + expr + " bashclub-zsync -c " + (status.config_path || "/etc/bashclub/" + (src.address || "").replace(/[^A-Za-z0-9._-]/g, "_") + ".conf")) : "";
+        };
+        cronPresetSel.onchange = () => {
+            cronCustomInput.value = cronPresetSel.value === "__custom__" ? cronCustomInput.value : cronPresetSel.value;
+            updatePreview();
+        };
+        cronCustomInput.oninput = updatePreview;
+
+        const cronBtnRow = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" });
+        const cronSaveBtn = h("button", { className: "btn btn-primary" }, t("repl_cron_apply"));
+        const cronRemoveBtn = h("button", { className: "btn btn-danger" }, t("repl_cron_remove"));
+        cronBtnRow.appendChild(cronSaveBtn);
+        cronBtnRow.appendChild(cronRemoveBtn);
+        cronBody.appendChild(cronBtnRow);
+
+        async function refreshCron() {
+            cronStatusLine.textContent = t("loading");
+            try {
+                const r = await API.get("/api/replication/cron" + qsPair);
+                buildPresets(r.presets);
+                if (r.installed && r.entry) {
+                    cronStatusLine.innerHTML = "";
+                    cronStatusLine.appendChild(h("span", { className: "badge badge-success", style: "margin-right:8px" }, t("repl_cron_active")));
+                    cronStatusLine.appendChild(h("code", { style: "font-size:12px" }, r.entry.raw));
+                    // Pre-select matching preset, else custom
+                    let matched = false;
+                    for (const opt of cronPresetSel.options) {
+                        if (opt.value === r.entry.schedule) { opt.selected = true; matched = true; break; }
+                    }
+                    if (!matched) {
+                        cronPresetSel.value = "__custom__";
+                        cronCustomInput.value = r.entry.schedule;
+                    } else {
+                        cronCustomInput.value = r.entry.schedule;
+                    }
+                } else {
+                    cronStatusLine.innerHTML = "";
+                    cronStatusLine.appendChild(h("span", { className: "badge badge-warning" }, t("repl_cron_inactive")));
+                    cronCustomInput.value = cronPresetSel.value === "__custom__" ? "" : cronPresetSel.value;
+                }
+                updatePreview();
+            } catch (e) {
+                cronStatusLine.textContent = e.message || "";
+            }
+        }
+
+        cronSaveBtn.onclick = async () => {
+            const expr = cronPresetSel.value === "__custom__" ? cronCustomInput.value.trim() : cronPresetSel.value;
+            if (!expr || expr.split(/\s+/).length !== 5) {
+                toast(t("repl_cron_invalid"), "error"); return;
+            }
+            cronSaveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/replication/cron" + qsPair, { schedule: expr, source: src.address });
+                if (r.success) { toast(t("repl_cron_saved"), "success"); refreshCron(); }
+                else toast(r.error || r.stderr || t("failed"), "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { cronSaveBtn.disabled = false; }
+        };
+
+        cronRemoveBtn.onclick = async () => {
+            if (!confirm(t("repl_cron_remove_confirm"))) return;
+            cronRemoveBtn.disabled = true;
+            try {
+                const r = await API.del("/api/replication/cron" + qsPair, {});
+                if (r.success) { toast(t("repl_cron_removed"), "success"); refreshCron(); }
+                else toast(r.stderr || t("failed"), "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { cronRemoveBtn.disabled = false; }
+        };
+
+        refreshCron();
+
+        // -- Step 6: checkzfs status (replication health overview) -------
         const ckCard = h("div", { className: "card", style: "margin-top:16px" });
         const ckRefreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
-        const ckHeader = h("div", { className: "card-header" }, [h("span", {}, "5. " + t("repl_checkzfs_title")), ckRefreshBtn]);
+        const ckHeader = h("div", { className: "card-header" }, [h("span", {}, "6. " + t("repl_checkzfs_title")), ckRefreshBtn]);
         ckCard.appendChild(ckHeader);
         const ckBody = h("div", { className: "card-body" });
         ckBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:8px" },
@@ -3163,10 +3288,10 @@ async function viewReplication() {
         ckRefreshBtn.onclick = refreshCheckzfs;
         refreshCheckzfs();
 
-        // -- Step 6: Log --------------------------------------------------
+        // -- Step 7: Log --------------------------------------------------
         const logCard = h("div", { className: "card", style: "margin-top:16px" });
         const refreshBtn = h("button", { className: "btn btn-sm" }, t("refresh"));
-        const logHeader = h("div", { className: "card-header" }, [h("span", {}, "6. " + t("repl_log_title")), refreshBtn]);
+        const logHeader = h("div", { className: "card-header" }, [h("span", {}, "7. " + t("repl_log_title")), refreshBtn]);
         logCard.appendChild(logHeader);
         const logBody = h("div", { className: "card-body" });
         const logPre = h("pre", { style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));

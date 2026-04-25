@@ -1361,6 +1361,51 @@ def api_replication_log():
     return jsonify(tail_log(host, lines))
 
 
+@app.route("/api/replication/cron", methods=["GET"])
+@login_required
+def api_replication_cron_get():
+    from app.replication import get_cron
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    return jsonify(get_cron(host, source=source))
+
+
+@app.route("/api/replication/cron", methods=["POST"])
+@login_required
+def api_replication_cron_set():
+    from app.replication import set_cron
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    schedule = (data.get("schedule") or "").strip()
+    source = (data.get("source") or request.args.get("source") or None)
+    log_path = (data.get("log_path") or "/var/log/bashclub-zsync.log").strip()
+    if not schedule:
+        return jsonify({"error": "schedule required"}), 400
+    result = set_cron(host, schedule, source=source, log_path=log_path)
+    audit_log("replication.cron.set", target=host["address"], host=host["address"],
+              success=result.get("success", False),
+              details={"schedule": schedule, "config_path": result.get("config_path")})
+    return jsonify(result)
+
+
+@app.route("/api/replication/cron", methods=["DELETE"])
+@login_required
+def api_replication_cron_delete():
+    from app.replication import remove_cron
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    source = request.args.get("source") or None
+    result = remove_cron(host, source=source)
+    audit_log("replication.cron.remove", target=host["address"], host=host["address"],
+              success=result.get("success", False))
+    return jsonify(result)
+
+
 @app.route("/api/replication/configs")
 @login_required
 def api_replication_configs():

@@ -547,6 +547,122 @@ def set_dataset_tags(host: Dict[str, Any], tag: str,
     return {"success": all_ok, "results": results}
 
 
+def _cron_marker(cfg_path: str) -> str:
+    """Stable, grep-able marker that uniquely identifies a zsync cron line for
+    a specific config file. Used to find/replace/remove the entry without
+    touching unrelated user cron jobs."""
+    return f"{BINARY_NAME} -c {cfg_path}"
+
+
+# Common cron presets surfaced to the UI. ``label`` is i18n-key; ``schedule``
+# is a literal cron expression. The bashclub default is "20 0-22 * * *"
+# (twenty past every hour, leaving the 23:00 slot free for housekeeping).
+CRON_PRESETS = [
+    {"id": "bashclub_default", "label": "repl_cron_preset_default", "schedule": "20 0-22 * * *"},
+    {"id": "every_15min",      "label": "repl_cron_preset_15min",   "schedule": "*/15 * * * *"},
+    {"id": "every_30min",      "label": "repl_cron_preset_30min",   "schedule": "*/30 * * * *"},
+    {"id": "hourly",           "label": "repl_cron_preset_hourly",  "schedule": "0 * * * *"},
+    {"id": "every_2h",         "label": "repl_cron_preset_2h",      "schedule": "0 */2 * * *"},
+    {"id": "every_6h",         "label": "repl_cron_preset_6h",      "schedule": "0 */6 * * *"},
+    {"id": "daily_0300",       "label": "repl_cron_preset_daily",   "schedule": "0 3 * * *"},
+]
+
+# Cron expression: 5 fields of *, digits, /, -, ,. Reject anything else to
+# avoid command injection through the schedule.
+_CRON_RE = re.compile(r"^[\s\d\*/,\-]+$")
+
+
+def _validate_cron(schedule: str) -> bool:
+    schedule = (schedule or "").strip()
+    if not _CRON_RE.match(schedule):
+        return False
+    fields = schedule.split()
+    return len(fields) == 5
+
+
+def get_cron(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
+    """Read root's crontab and return the current zsync entry (if any) for
+    the per-source config file."""
+    cfg_path = config_path_for(source)
+    marker = _cron_marker(cfg_path)
+    r = run_command(host, "crontab -l 2>/dev/null", timeout=10)
+    raw = r.get("stdout", "") or ""
+    entry = None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if marker in stripped:
+            # Split off the schedule (first 5 whitespace-separated fields)
+            parts = stripped.split(None, 5)
+            if len(parts) >= 6:
+                entry = {
+                    "schedule": " ".join(parts[:5]),
+                    "command": parts[5],
+                    "raw": stripped,
+                }
+            break
+    return {"installed": entry is not None, "entry": entry,
+            "config_path": cfg_path, "presets": CRON_PRESETS}
+
+
+def set_cron(host: Dict[str, Any], schedule: str,
+             source: Optional[str] = None,
+             log_path: str = "/var/log/bashclub-zsync.log") -> Dict[str, Any]:
+    """Install or replace the zsync cron entry for the per-source config.
+
+    Idempotent: existing zsync lines for this config are removed first, then
+    the new one is appended. All other cron lines are preserved verbatim.
+    """
+    cfg_path = config_path_for(source)
+    if not _validate_cron(schedule):
+        return {"success": False, "error": "invalid cron schedule (expected 5 fields, digits / * - , /)"}
+    if not re.match(r"^[A-Za-z0-9._/-]+$", log_path or ""):
+        return {"success": False, "error": "invalid log path"}
+
+    marker = _cron_marker(cfg_path)
+    new_line = f"{schedule.strip()} {BINARY_NAME} -c {cfg_path} >> {log_path} 2>&1"
+    # Build a small awk filter that drops existing zsync lines for THIS config
+    # but keeps everything else. Then append the new line.
+    import base64
+    appended = base64.b64encode(new_line.encode("utf-8")).decode("ascii")
+    marker_b64 = base64.b64encode(marker.encode("utf-8")).decode("ascii")
+    script = (
+        "set -e; "
+        f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
+        "TMP=$(mktemp); "
+        "(crontab -l 2>/dev/null || true) | grep -vF \"$M\" > \"$TMP\" || true; "
+        f"echo {shlex.quote(appended)} | base64 -d >> \"$TMP\"; "
+        "crontab \"$TMP\"; "
+        "rm -f \"$TMP\"; "
+        "echo __OK__"
+    )
+    r = run_command(host, script, timeout=15)
+    ok = r.get("success", False) and "__OK__" in (r.get("stdout") or "")
+    return {"success": ok, "schedule": schedule.strip(), "command": new_line,
+            "config_path": cfg_path,
+            "stderr": r.get("stderr", "")}
+
+
+def remove_cron(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
+    """Remove the zsync cron entry for the given config file."""
+    cfg_path = config_path_for(source)
+    marker = _cron_marker(cfg_path)
+    import base64
+    marker_b64 = base64.b64encode(marker.encode("utf-8")).decode("ascii")
+    script = (
+        f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
+        "TMP=$(mktemp); "
+        "(crontab -l 2>/dev/null || true) | grep -vF \"$M\" > \"$TMP\" || true; "
+        "crontab \"$TMP\"; "
+        "rm -f \"$TMP\"; "
+        "echo __OK__"
+    )
+    r = run_command(host, script, timeout=15)
+    ok = r.get("success", False) and "__OK__" in (r.get("stdout") or "")
+    return {"success": ok, "stderr": r.get("stderr", "")}
+
+
 def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
     """Run ``checkzfs --source <ip> --columns +message`` on the given (target)
     host and parse the box-drawing table output into structured rows.
