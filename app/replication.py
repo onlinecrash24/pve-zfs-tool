@@ -213,23 +213,47 @@ def get_status(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, 
 
 
 def install(host: Dict[str, Any]) -> Dict[str, Any]:
-    """Install bashclub-zsync via the bashclub APT repository.
+    """Install bashclub-zsync via the official bashclub APT repository.
 
-    Uses the modern signed-by pattern instead of apt-key (which is deprecated).
-    Idempotent — re-running is safe.
+    Writes the deb822 ``.sources`` stanza that bashclub publishes
+    (https://apt.bashclub.org/release/) and the keyring at
+    ``/usr/share/keyrings/bashclub-archive-keyring.gpg``. Cleans up the
+    legacy ``bashclub.list`` + ``/etc/apt/keyrings/bashclub.gpg`` files
+    we previously installed, so re-running upgrades the layout in place.
+    Idempotent.
     """
     script = r"""
 set -e
-KEY=/etc/apt/keyrings/bashclub.gpg
-LIST=/etc/apt/sources.list.d/bashclub.list
-mkdir -p /etc/apt/keyrings
+KEY=/usr/share/keyrings/bashclub-archive-keyring.gpg
+SRC=/etc/apt/sources.list.d/bashclub.sources
+LEGACY_LIST=/etc/apt/sources.list.d/bashclub.list
+LEGACY_KEY=/etc/apt/keyrings/bashclub.gpg
+
+# Drop the old layout if present (we previously installed bashclub.list
+# pointing at /bashclub bookworm main with a key under /etc/apt/keyrings)
+[ -f "$LEGACY_LIST" ] && rm -f "$LEGACY_LIST" || true
+[ -f "$LEGACY_KEY"  ] && rm -f "$LEGACY_KEY"  || true
+
+# Fetch the release key into the modern location
+mkdir -p /usr/share/keyrings
 if [ ! -s "$KEY" ]; then
   curl -fsSL https://apt.bashclub.org/gpg.key | gpg --dearmor -o "$KEY"
   chmod 0644 "$KEY"
 fi
-if [ ! -s "$LIST" ]; then
-  echo "deb [signed-by=$KEY] https://apt.bashclub.org/bashclub bookworm main" > "$LIST"
+
+# Write the deb822 .sources stanza (matches bashclub's published layout)
+if [ ! -s "$SRC" ]; then
+  cat > "$SRC" <<EOSRC
+Types: deb
+URIs: https://apt.bashclub.org/release/
+Suites: bookworm
+Components: main
+Signed-By: $KEY
+Enabled: true
+EOSRC
+  chmod 0644 "$SRC"
 fi
+
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y bashclub-zsync
 command -v bashclub-zsync
@@ -633,6 +657,10 @@ def set_cron(host: Dict[str, Any], schedule: str,
     # IMPORTANT: cron requires a trailing newline on the last line, otherwise
     # "crontab" rejects the file with "missing newline before EOF". base64 -d
     # writes raw bytes without a trailing newline, so we explicitly append one.
+    # The "crontab" utility itself signals cron via the spool file's mtime,
+    # but we additionally trigger an explicit reload so the new schedule is
+    # picked up deterministically (covers both Debian's cron and any setup
+    # that uses cronie / systemd-cron).
     script = (
         "set -e; "
         f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
@@ -642,6 +670,7 @@ def set_cron(host: Dict[str, Any], schedule: str,
         "printf '\\n' >> \"$TMP\"; "
         "crontab \"$TMP\"; "
         "rm -f \"$TMP\"; "
+        + _cron_reload_snippet() +
         "echo __OK__"
     )
     r = run_command(host, script, timeout=15)
@@ -663,11 +692,26 @@ def remove_cron(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str,
         "(crontab -l 2>/dev/null || true) | grep -vF \"$M\" > \"$TMP\" || true; "
         "crontab \"$TMP\"; "
         "rm -f \"$TMP\"; "
+        + _cron_reload_snippet() +
         "echo __OK__"
     )
     r = run_command(host, script, timeout=15)
     ok = r.get("success", False) and "__OK__" in (r.get("stdout") or "")
     return {"success": ok, "stderr": r.get("stderr", "")}
+
+
+def _cron_reload_snippet() -> str:
+    """Return a shell snippet that reloads whichever cron implementation is
+    active. All branches are best-effort — never fail the outer command."""
+    return (
+        "if command -v systemctl >/dev/null 2>&1; then "
+        "  systemctl reload cron 2>/dev/null || "
+        "  systemctl reload crond 2>/dev/null || "
+        "  systemctl reload-or-restart cron 2>/dev/null || true; "
+        "elif command -v service >/dev/null 2>&1; then "
+        "  service cron reload 2>/dev/null || service cron restart 2>/dev/null || true; "
+        "fi; "
+    )
 
 
 def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
