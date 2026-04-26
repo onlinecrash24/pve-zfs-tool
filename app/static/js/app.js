@@ -3746,11 +3746,11 @@ async function viewReplication() {
 
 // -- Disaster Recovery -----------------------------------------------------
 //
-// Two flows wrapped into one view:
-//   (1) Browse & restore individual files from any replica snapshot
-//       -- reuses /api/restore/* (snapshot mount + browse + restore)
-//   (2) Reverse sync: send a replica back to a (rebuilt) source host
-//       via "zfs send -R | ssh source zfs recv"
+// Single-purpose view: send a replica back to a (rebuilt) source host
+// via "zfs send -R | ssh source zfs recv". File-level browsing of a
+// replica snapshot is intentionally left out -- the existing Snapshots
+// view can mount and browse any snapshot, including replica ones, so
+// duplicating that here would only fragment the UX.
 //
 async function viewDR() {
     setContent(loading());
@@ -3835,156 +3835,29 @@ async function viewDR() {
         }
         const datasets = dsResp.datasets || [];
 
-        // -- Card 2: pick action ----------------------------------------
+        // -- Card 2: pick replicated dataset ----------------------------
         const actCard = h("div", { className: "card", style: "margin-top:16px" });
-        actCard.appendChild(h("div", { className: "card-header" }, "2. " + t("dr_pick_action")));
+        actCard.appendChild(h("div", { className: "card-header" }, "2. " + t("dr_dataset")));
         const actBody = h("div", { className: "card-body" });
         actCard.appendChild(actBody);
         flowMount.appendChild(actCard);
 
-        const actSel = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:14px" }, [
-            mkActionTile("browse", "📂", t("dr_action_browse_title"), t("dr_action_browse_desc")),
-            mkActionTile("reverse", "🔄", t("dr_action_reverse_title"), t("dr_action_reverse_desc")),
-        ]);
-        actBody.appendChild(actSel);
-
-        // Dataset picker (shared by both flows)
-        const dsRow = h("div", { style: "margin-top:14px" });
-        dsRow.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_dataset")));
         const dsSel = h("select", { className: "form-input", style: "width:100%" }, [
             h("option", { value: "" }, "— " + t("repl_choose") + " —"),
             ...datasets.map(d => h("option", { value: d.name },
                 d.name + "  (" + d.type + ", " + d.used + ")")),
         ]);
-        dsRow.appendChild(dsSel);
-        dsRow.appendChild(h("p", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("dr_dataset_hint")));
-        actBody.appendChild(dsRow);
+        actBody.appendChild(dsSel);
+        actBody.appendChild(h("p", { style: "font-size:11px;color:var(--text-secondary);margin-top:6px" }, t("dr_dataset_hint")));
 
-        // Mount points for each flow body
-        const browseMount = h("div");
+        // Mount point for the reverse-sync card (re-rendered when dataset changes)
         const reverseMount = h("div");
-        flowMount.appendChild(browseMount);
         flowMount.appendChild(reverseMount);
 
-        let activeAction = null;
-
-        function mkActionTile(id, icon, title, desc) {
-            const tile = h("div", {
-                className: "dr-action-tile",
-                style: "border:2px solid var(--border);border-radius:8px;padding:12px;cursor:pointer;transition:all 0.15s",
-                onmouseover: function() { this.style.borderColor = "var(--accent)"; },
-                onmouseout: function() {
-                    this.style.borderColor = activeAction === id ? "var(--accent)" : "var(--border)";
-                },
-            }, [
-                h("div", { style: "font-size:32px;text-align:center;margin-bottom:6px" }, icon),
-                h("div", { style: "font-weight:600;text-align:center;margin-bottom:4px" }, title),
-                h("div", { style: "font-size:12px;color:var(--text-secondary);text-align:center" }, desc),
-            ]);
-            tile.onclick = () => {
-                activeAction = id;
-                actSel.querySelectorAll(".dr-action-tile").forEach(el => {
-                    el.style.borderColor = "var(--border)";
-                    el.style.background = "";
-                });
-                tile.style.borderColor = "var(--accent)";
-                tile.style.background = "rgba(0, 153, 204, 0.08)";
-                browseMount.innerHTML = "";
-                reverseMount.innerHTML = "";
-                if (id === "browse") renderBrowse();
-                else if (id === "reverse") renderReverse();
-            };
-            return tile;
-        }
-
-        function renderBrowse() {
-            const ds = dsSel.value;
-            if (!ds) { toast(t("dr_pick_dataset_first"), "warning"); return; }
-
-            const card = h("div", { className: "card", style: "margin-top:16px" });
-            card.appendChild(h("div", { className: "card-header" }, "3. " + t("dr_browse_title")));
-            const body = h("div", { className: "card-body" });
-            card.appendChild(body);
-            browseMount.appendChild(card);
-
-            body.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:10px" },
-                t("dr_browse_intro").replace("{ds}", ds)));
-
-            // Snapshot picker
-            const snapRow = h("div", { style: "display:flex;gap:8px;align-items:end;margin-bottom:10px;flex-wrap:wrap" });
-            const snapSel = h("select", { className: "form-input", style: "min-width:380px" },
-                h("option", { value: "" }, t("loading")));
-            const mountBtn = h("button", { className: "btn btn-primary" }, t("dr_browse_mount"));
-            mountBtn.disabled = true;
-            snapRow.appendChild(h("div", {}, [
-                h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_snapshot")),
-                snapSel,
-            ]));
-            snapRow.appendChild(mountBtn);
-            body.appendChild(snapRow);
-
-            const browseInfo = h("div", { style: "margin-top:10px" });
-            body.appendChild(browseInfo);
-
-            // Load snapshots
-            (async () => {
-                try {
-                    const sr = await API.get("/api/dr/snapshots?host=" + encodeURIComponent(pair.host_address) +
-                                             "&dataset=" + encodeURIComponent(ds));
-                    const snaps = sr.snapshots || [];
-                    snapSel.innerHTML = "";
-                    if (!snaps.length) {
-                        snapSel.appendChild(h("option", { value: "" }, t("dr_no_snapshots")));
-                        return;
-                    }
-                    snapSel.appendChild(h("option", { value: "" }, "— " + t("repl_choose") + " —"));
-                    snaps.forEach(s => {
-                        const dt = new Date(s.creation_ts * 1000).toLocaleString();
-                        const opt = h("option", { value: s.name }, s.name.split("@")[1] + "  ·  " + dt);
-                        snapSel.appendChild(opt);
-                    });
-                    snapSel.onchange = () => { mountBtn.disabled = !snapSel.value; };
-                } catch (e) {
-                    snapSel.innerHTML = "";
-                    snapSel.appendChild(h("option", { value: "" }, e.message || ""));
-                }
-            })();
-
-            mountBtn.onclick = async () => {
-                const snap = snapSel.value;
-                if (!snap) return;
-                mountBtn.disabled = true;
-                browseInfo.innerHTML = loading();
-                try {
-                    // Reuse the existing snapshot mount endpoint -- it works
-                    // on any snapshot regardless of how the dataset was made.
-                    // Note: this endpoint expects ``host`` in the JSON body
-                    // (not as a query string like /api/replication/* does).
-                    const r = await API.post("/api/restore/mount",
-                                             { host: pair.host_address, snapshot: snap });
-                    if (!r.success) {
-                        browseInfo.innerHTML = "";
-                        browseInfo.appendChild(h("p", { className: "muted" }, r.error || t("failed")));
-                        return;
-                    }
-                    browseInfo.innerHTML = "";
-                    browseInfo.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary)" },
-                        t("dr_browse_mounted").replace("{path}", r.mount_path || r.clone || "?")));
-                    browseInfo.appendChild(h("p", { style: "font-size:13px;margin-top:6px" }, [
-                        t("dr_browse_open_health") + " ",
-                        h("a", { href: "#", onclick: (e) => {
-                            e.preventDefault();
-                            navigate("health");
-                        }}, t("nav_health")),
-                    ]));
-                } catch (e) {
-                    browseInfo.innerHTML = "";
-                    browseInfo.appendChild(h("p", { className: "muted" }, e.message || ""));
-                } finally {
-                    mountBtn.disabled = false;
-                }
-            };
-        }
+        dsSel.onchange = () => {
+            reverseMount.innerHTML = "";
+            if (dsSel.value) renderReverse();
+        };
 
         function renderReverse() {
             const ds = dsSel.value;
@@ -3992,6 +3865,8 @@ async function viewDR() {
 
             const card = h("div", { className: "card", style: "margin-top:16px" });
             card.appendChild(h("div", { className: "card-header" }, "3. " + t("dr_reverse_title")));
+            // (action picker was removed -- reverse-sync is the only DR
+            // flow now; file browsing happens via the Snapshots view.)
             const body = h("div", { className: "card-body" });
             card.appendChild(body);
             reverseMount.appendChild(card);
