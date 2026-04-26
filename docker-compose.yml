@@ -14,7 +14,81 @@ services:
       - ADMIN_PASSWORD=password
       - FORCE_HTTPS=true  # HTTPS behind reverse proxy
       - TZ=Europe/Berlin  # Timezone (e.g. Europe/Berlin, UTC, America/New_York)
+      # Set the Prometheus token to enable the /metrics endpoint. The same
+      # value is read by the optional Prometheus container below via .env.
+      - PROMETHEUS_TOKEN=${PROMETHEUS_TOKEN:-}
+    networks:
+      - default
+      - monitoring
+
+  # ---------------------------------------------------------------------------
+  # Optional monitoring stack (Prometheus + Grafana with auto-provisioned
+  # dashboard). Enabled only when launched with the "monitoring" profile:
+  #
+  #   echo "PROMETHEUS_TOKEN=$(openssl rand -hex 32)" > .env
+  #   docker compose --profile monitoring up -d
+  #
+  # Grafana then comes up at http://<docker-host>:3000 with the
+  # "PVE ZFS Tool" dashboard already loaded under "ZFS / PVE ZFS Tool".
+  # Default Grafana login admin/admin (override via GRAFANA_ADMIN_PASSWORD).
+  # ---------------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: zfs-tool-prometheus
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    depends_on:
+      - zfs-tool
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # The bearer token is materialised into a small file on the fly so the
+    # scrape config can reference it via credentials_file. Keeps the token
+    # out of the static config and out of `ps` output.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        printf '%s' "$$PROM_TOKEN" > /etc/prometheus/token && \
+        exec /bin/prometheus \
+             --config.file=/etc/prometheus/prometheus.yml \
+             --storage.tsdb.path=/prometheus \
+             --storage.tsdb.retention.time=30d \
+             --web.enable-lifecycle
+    environment:
+      - PROM_TOKEN=${PROMETHEUS_TOKEN:-}
+    ports:
+      - "9090:9090"
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: zfs-tool-grafana
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - TZ=Europe/Berlin
+    ports:
+      - "3000:3000"
+    networks:
+      - monitoring
 
 volumes:
   ssh-keys:
   zfs-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  monitoring:

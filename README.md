@@ -315,6 +315,34 @@ scrape_configs:
 
 Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`, `pvezfs_pool_size_bytes`, `pvezfs_pool_alloc_bytes`, `pvezfs_pool_free_bytes`, `pvezfs_pool_fragmentation_percent`, `pvezfs_pool_health{state="…"}`, `pvezfs_pool_error_total_sum`, `pvezfs_pool_forecast_days_until_full`, and a scrape timestamp.
 
+### One-shot monitoring stack (Prometheus + Grafana, optional)
+
+The repo ships a ready-made Prometheus + Grafana setup as opt-in
+profiles in the same `docker-compose.yml`. Grafana auto-loads a
+"PVE ZFS Tool" dashboard with all of the above metrics pre-wired.
+
+```bash
+# Generate a token and write it to .env (read by both containers)
+echo "PROMETHEUS_TOKEN=$(openssl rand -hex 32)" > .env
+
+# Optionally override the Grafana admin password
+echo "GRAFANA_ADMIN_PASSWORD=please-change-me" >> .env
+
+# Start zfs-tool + prometheus + grafana
+docker compose --profile monitoring up -d
+```
+
+Then open:
+
+- Grafana: <http://DOCKER-HOST:3000> (login `admin` / your password) — the
+  dashboard lives under **Dashboards → ZFS → PVE ZFS Tool**
+- Prometheus: <http://DOCKER-HOST:9090> (only if you want to inspect raw
+  series; the `--web.enable-lifecycle` flag also lets you reload config
+  via `curl -XPOST http://DOCKER-HOST:9090/-/reload`).
+
+Provisioning files live under `docker/prometheus/` and
+`docker/grafana/` — copy and edit if you want to extend the dashboard.
+
 ## Configuration
 
 ### Environment Variables
