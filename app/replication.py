@@ -17,13 +17,102 @@ from __future__ import annotations
 
 import re
 import shlex
+import threading
+import time
+import traceback
+import uuid
 from typing import Any, Dict, List, Optional
 
 from app.ssh_manager import run_command
 
+
+# ---------------------------------------------------------------------------
+# Async task registry
+# ---------------------------------------------------------------------------
+# Long-running replication operations (first zsync, mass auto-snapshot purge)
+# regularly outlast a normal HTTP request. Instead of blocking until the SSH
+# command returns, we start a background thread that publishes its progress
+# into an in-memory registry and return a task id immediately. The UI polls
+# /api/replication/task?id=... at its leisure.
+
+_TASKS: Dict[str, Dict[str, Any]] = {}
+_TASKS_LOCK = threading.Lock()
+_TASK_TTL_SECONDS = 6 * 3600  # finished tasks linger for six hours
+
+
+def _gc_tasks() -> None:
+    cutoff = time.time() - _TASK_TTL_SECONDS
+    with _TASKS_LOCK:
+        for tid in [k for k, v in _TASKS.items()
+                    if v.get("finished_at") and v["finished_at"] < cutoff]:
+            _TASKS.pop(tid, None)
+
+
+def start_task(name: str, fn, *args, **kwargs) -> str:
+    """Run ``fn(progress_cb, *args, **kwargs)`` in a background thread.
+
+    ``progress_cb(message, **fields)`` lets the worker push status updates to
+    the registry. Returns a task id the caller hands to the client.
+    """
+    _gc_tasks()
+    tid = uuid.uuid4().hex[:12]
+    record: Dict[str, Any] = {
+        "id": tid,
+        "name": name,
+        "status": "running",
+        "progress": "",
+        "started_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "error": "",
+        "log": [],
+    }
+    with _TASKS_LOCK:
+        _TASKS[tid] = record
+
+    def _progress(msg: str, **fields):
+        with _TASKS_LOCK:
+            r = _TASKS.get(tid)
+            if not r:
+                return
+            r["progress"] = msg
+            r["log"].append({"t": time.time(), "msg": msg, **fields})
+            # Cap log so a runaway task doesn't eat memory.
+            if len(r["log"]) > 500:
+                r["log"] = r["log"][-500:]
+
+    def _runner():
+        try:
+            result = fn(_progress, *args, **kwargs)
+            with _TASKS_LOCK:
+                r = _TASKS.get(tid)
+                if r:
+                    r["status"] = "done"
+                    r["result"] = result
+                    r["finished_at"] = time.time()
+        except Exception as e:
+            with _TASKS_LOCK:
+                r = _TASKS.get(tid)
+                if r:
+                    r["status"] = "error"
+                    r["error"] = f"{e}\n{traceback.format_exc()[-1500:]}"
+                    r["finished_at"] = time.time()
+
+    threading.Thread(target=_runner, daemon=True, name=f"repl-{name}-{tid}").start()
+    return tid
+
+
+def get_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with _TASKS_LOCK:
+        r = _TASKS.get(task_id)
+        if not r:
+            return None
+        # Return a shallow copy so callers can't mutate the live record.
+        return dict(r)
+
 CONFIG_PATH = "/etc/bashclub/zsync.conf"
 CONFIG_DIR = "/etc/bashclub"
-LOG_PATH = "/var/log/bashclub-zsync/zsync.log"
+LOG_PATH = "/var/log/bashclub-zsync.log"
 BINARY_NAME = "bashclub-zsync"
 CHECKZFS_BINARY = "checkzfs"
 
@@ -319,7 +408,10 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
 
 
 def delete_config(host: Dict[str, Any], source: Optional[str] = None,
-                  purge_snapshots: bool = False) -> Dict[str, Any]:
+                  purge_snapshots: bool = False,
+                  purge_children: bool = False,
+                  purge_async: bool = True,
+                  source_host: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Delete a per-source replication config and (optionally) the
     zfs-auto-snapshots underneath the replica target.
 
@@ -349,6 +441,8 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
         "snapshots_failed_count": 0,
         "snapshots_examples": [],
         "destroy_output": "",
+        "purge_task_id": None,
+        "purge_children_task_id": None,
         "error": "",
     }
 
@@ -360,25 +454,45 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
         out["error"] = f"cron remove failed: {e}"
 
     # 2. config file (with backup)
+    # Use a single ``mv`` instead of cp+rm: it's atomic and impossible to end
+    # up in the previous failure mode (backup created but original still
+    # present). After mv we explicitly verify the original is gone.
     if cfg.get("exists"):
         rm = run_command(
             host,
             f"if [ -f {shlex.quote(cfg_path)} ]; then "
-            f"cp -a {shlex.quote(cfg_path)} {shlex.quote(cfg_path)}.bak.$(date +%Y%m%d%H%M%S) && "
-            f"rm -f {shlex.quote(cfg_path)} && echo __CFG_OK__; "
-            f"fi",
+            f"  TS=$(date +%Y%m%d%H%M%S); "
+            f"  if mv {shlex.quote(cfg_path)} {shlex.quote(cfg_path)}.bak.$TS; then "
+            f"    if [ ! -f {shlex.quote(cfg_path)} ]; then echo __CFG_OK__; "
+            f"    else echo __CFG_STILL_EXISTS__; fi; "
+            f"  else echo __MV_FAILED__; "
+            f"  fi; "
+            f"else echo __CFG_NONE__; fi",
             timeout=15,
         )
-        out["config_removed"] = "__CFG_OK__" in (rm.get("stdout") or "")
+        stdout = rm.get("stdout") or ""
+        out["config_removed"] = "__CFG_OK__" in stdout
         if not out["config_removed"]:
-            out["error"] = (out["error"] + " | " if out["error"] else "") + \
-                           "config remove failed: " + (rm.get("stderr") or "").strip()
+            reason = "unknown"
+            if "__MV_FAILED__" in stdout:
+                reason = "mv failed: " + (rm.get("stderr") or "").strip()
+            elif "__CFG_STILL_EXISTS__" in stdout:
+                reason = "mv reported success but file is still present"
+            elif "__CFG_NONE__" in stdout:
+                # Race: file vanished between read_config and our removal.
+                # Treat as already-gone.
+                out["config_removed"] = True
+            else:
+                reason = (rm.get("stderr") or stdout or "no output").strip()[:200]
+            if not out["config_removed"]:
+                out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                               "config remove failed: " + reason
 
     # 3. ZFS-auto-snapshot purge under the replica target.
     # Only snapshots matching "@zfs-auto-snap_*" are destroyed -- the datasets
     # themselves and any non-auto snapshots (e.g. zsync_* baselines) stay
-    # intact. We list first, then destroy one by one so a single failure
-    # doesn't abort the rest.
+    # intact. With purge_async=True (the default) the purge runs as a
+    # background task so the HTTP request returns immediately.
     if purge_snapshots and target_ds:
         if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds):
             out["error"] = (out["error"] + " | " if out["error"] else "") + \
@@ -389,6 +503,12 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
             # still wipe a huge amount of auto-snapshots.
             out["error"] = (out["error"] + " | " if out["error"] else "") + \
                            f"refusing to operate on top-level pool: {target_ds}"
+        elif purge_async:
+            try:
+                out["purge_task_id"] = purge_auto_snapshots_async(host, target_ds, source_host=source_host)
+            except Exception as e:
+                out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                               f"purge task launch failed: {e}"
         else:
             list_cmd = (
                 f"zfs list -H -t snapshot -o name -r {shlex.quote(target_ds)} 2>/dev/null "
@@ -419,8 +539,50 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
             if failures:
                 out["destroy_output"] = "\n".join(failures)[-2000:]
 
+    # 4. Optional: destroy the replica child datasets so a fresh sync into
+    # the same target works (zsync's recv refuses to overwrite existing
+    # filesystems without a matching baseline). Always async because a
+    # subtree of dozens of zvols can take a while.
+    if purge_children and target_ds:
+        if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds):
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           "target dataset has invalid characters"
+        elif "/" not in target_ds:
+            out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                           f"refusing to operate on top-level pool: {target_ds}"
+        else:
+            try:
+                out["purge_children_task_id"] = purge_replica_children_async(host, target_ds, source_host=source_host)
+            except Exception as e:
+                out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                               f"children purge launch failed: {e}"
+
     out["success"] = out["config_removed"] or not out["config_existed"]
     return out
+
+
+def list_auto_snap_disabled(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Return filesystems on ``host`` whose ``com.sun:auto-snapshot`` property
+    is set to ``false`` — i.e. datasets that are safe to use as a replication
+    target because zfs-auto-snapshot will not pollute them with rotating
+    snapshots that conflict with zsync's stream baseline.
+
+    Inheritance counts: a child without the property explicitly set inherits
+    the parent's ``false`` value, which still satisfies the contract.
+    """
+    cmd = "zfs list -H -o name,com.sun:auto-snapshot -t filesystem 2>/dev/null"
+    r = run_command(host, cmd, timeout=20)
+    if not r.get("success"):
+        return {"datasets": [], "error": (r.get("stderr") or "").strip()[:200]}
+    out: List[Dict[str, Any]] = []
+    for line in (r.get("stdout") or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        name, value = parts[0].strip(), parts[1].strip()
+        if value == "false":
+            out.append({"name": name, "value": value})
+    return {"datasets": out}
 
 
 def list_configs(host: Dict[str, Any]) -> Dict[str, Any]:
@@ -469,7 +631,7 @@ def run_now(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any
     """
     cfg_path = config_path_for(source)
     cmd = (
-        f"mkdir -p /var/log/bashclub-zsync && "
+        f"touch /var/log/bashclub-zsync.log && "
         f"{BINARY_NAME} -c {shlex.quote(cfg_path)} "
         f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
     )
@@ -485,6 +647,276 @@ def run_now(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any
         "exit_code": exit_code,
         "stderr": r["stderr"],
     }
+
+
+def run_now_async(host: Dict[str, Any], source: Optional[str] = None) -> str:
+    """Async variant of run_now() for first-sync / large transfers.
+
+    The first zsync run easily exceeds 10 minutes (full baseline transfer),
+    which would time out the foreground HTTP request and leave the UI hanging.
+    This launches the run in a background thread and returns a task id; the
+    UI then polls /api/replication/task?id=... for progress.
+    """
+    cfg_path = config_path_for(source)
+
+    def _job(progress, _host, _cfg_path):
+        progress(f"Starting bashclub-zsync with {_cfg_path} …")
+        cmd = (
+            f"touch /var/log/bashclub-zsync.log && "
+            f"{BINARY_NAME} -c {shlex.quote(_cfg_path)} "
+            f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
+        )
+        # Generous timeout — initial replication of a multi-TB pool can take
+        # hours. The thread sits patiently; nothing else blocks.
+        r = run_command(_host, cmd, timeout=6 * 3600)
+        exit_code = None
+        if r.get("stdout"):
+            m = re.search(r"__exit=(\d+)\s*$", r["stdout"].strip())
+            if m:
+                exit_code = int(m.group(1))
+
+        # bashclub-zsync's exit code reflects whichever step ran last. When
+        # replication finishes and the trailing ``checkzfs`` step finds any
+        # non-replicated source datasets, it exits non-zero with status warn
+        # — that bubbles out as exit=1 even though replication itself was a
+        # full success. Disambiguate by inspecting the tail of the log.
+        log_r = run_command(_host, f"tail -n 200 {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=15)
+        log_tail = (log_r.get("stdout") or "")
+        finished_count = len(re.findall(r"Replication of \S+ finished\.", log_tail))
+        has_checkzfs_step = "Running checkzfs" in log_tail
+        # Hard failure markers — these indicate the replication itself blew up.
+        fatal_markers = (
+            "cannot receive new filesystem stream",
+            "cannot receive incremental stream",
+            "destination has snapshots",
+            "ERROR",
+            "Permission denied",
+            "lost connection",
+        )
+        has_fatal = any(m in log_tail for m in fatal_markers)
+
+        if exit_code == 0:
+            classification = "ok"
+            summary = f"Replication completed cleanly ({finished_count} dataset(s))."
+        elif has_fatal:
+            classification = "error"
+            summary = "Replication failed — see log."
+        elif finished_count > 0 and has_checkzfs_step:
+            # Replication ran fine, only checkzfs reported warnings at the end.
+            classification = "warning"
+            summary = (f"Replication completed for {finished_count} dataset(s); "
+                       f"checkzfs reported warnings (untagged source datasets) "
+                       f"— this is informational, not a failure.")
+        elif finished_count > 0:
+            classification = "warning"
+            summary = (f"Replication completed for {finished_count} dataset(s); "
+                       f"non-zero exit (={exit_code}) without a clear error marker.")
+        else:
+            classification = "error"
+            summary = f"Replication failed (exit={exit_code}, no datasets replicated)."
+
+        ok = (classification != "error")
+        progress(f"Finished (exit={exit_code}, classification={classification})",
+                 exit_code=exit_code, ok=ok, classification=classification,
+                 finished_count=finished_count)
+        return {
+            "success": ok,
+            "exit_code": exit_code,
+            "classification": classification,
+            "summary": summary,
+            "finished_count": finished_count,
+            "stderr": r.get("stderr", ""),
+        }
+
+    return start_task("run_now", _job, host, cfg_path)
+
+
+def _source_pool_names(source_host: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``{success, pools: [...], error}`` for the source host's zpools.
+
+    Used as a whitelist for the purge operations: only datasets directly under
+    ``<target>/<pool>/...`` for one of these pool names belong to this
+    replication pair, so we can safely destroy them. Anything else under the
+    same target is left alone.
+    """
+    if not source_host:
+        return {"success": False, "pools": [], "error": "source host not available"}
+    r = run_command(source_host, "zpool list -H -o name 2>/dev/null", timeout=15)
+    if not r.get("success"):
+        return {"success": False, "pools": [],
+                "error": (r.get("stderr") or "source host unreachable").strip()[:200]}
+    pools = [n.strip() for n in (r.get("stdout") or "").splitlines() if n.strip()]
+    if not pools:
+        return {"success": False, "pools": [], "error": "source host returned no pools"}
+    return {"success": True, "pools": pools}
+
+
+def purge_auto_snapshots_async(host: Dict[str, Any], target_ds: str,
+                               source_host: Optional[Dict[str, Any]] = None) -> str:
+    """Async variant of the auto-snapshot purge inside delete_config().
+
+    A multi-VM Proxmox host typically carries hundreds of zfs-auto-snap_*
+    snapshots under the replica target — destroying each one synchronously
+    inside an HTTP request reliably times out. The same job runs as a
+    background task here, with per-snapshot progress.
+    """
+    if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds or "") or "/" not in (target_ds or ""):
+        raise ValueError("invalid or top-level dataset")
+
+    # Resolve source pool whitelist up front so we never touch a dataset that
+    # doesn't belong to this pair. If we can't determine the whitelist, the
+    # task fails loudly rather than guessing.
+    src_info = _source_pool_names(source_host) if source_host else {"success": False, "pools": [], "error": "source host not registered"}
+
+    def _job(progress, _host, _ds, _src):
+        if not _src["success"]:
+            return {"success": False, "error": "Cannot determine source pools (" + _src.get("error", "?") + "). Refusing to purge — bring the source host online or do it manually.",
+                    "snapshots_destroyed_count": 0, "snapshots_failed_count": 0,
+                    "snapshots_examples": [], "destroy_output": "", "target_dataset": _ds}
+        pools = _src["pools"]
+        progress("Source pool whitelist: " + ", ".join(pools), pools=pools)
+
+        # Limit the snapshot listing to subtrees ``<target>/<pool>``: those
+        # are the only branches owned by this replication pair.
+        snap_names: List[str] = []
+        for pool in pools:
+            if not re.match(r"^[A-Za-z0-9._-]+$", pool):
+                continue  # ignore weird pool names
+            branch = f"{_ds}/{pool}"
+            # Confirm the branch exists before listing — a fresh pair may have
+            # only some of the source pools replicated.
+            chk = run_command(_host, f"zfs list -H {shlex.quote(branch)} 2>/dev/null", timeout=15)
+            if not chk.get("success") or not (chk.get("stdout") or "").strip():
+                continue
+            list_cmd = (
+                f"zfs list -H -t snapshot -o name -r {shlex.quote(branch)} 2>/dev/null "
+                f"| grep '@zfs-auto-snap_' || true"
+            )
+            r_list = run_command(_host, list_cmd, timeout=120)
+            for s in (r_list.get("stdout") or "").splitlines():
+                s = s.strip()
+                if s:
+                    snap_names.append(s)
+        names = snap_names
+        total = len(names)
+        progress(f"Found {total} auto-snapshot(s) to destroy", total=total)
+        destroyed = 0
+        failed = 0
+        failures: List[str] = []
+        for i, snap in enumerate(names, start=1):
+            if "@" not in snap or not re.match(r"^[A-Za-z0-9._:/@-]+$", snap):
+                failed += 1
+                failures.append(snap + ": invalid name")
+                continue
+            rd = run_command(_host, f"zfs destroy {shlex.quote(snap)} 2>&1", timeout=60)
+            if rd.get("success"):
+                destroyed += 1
+            else:
+                failed += 1
+                if len(failures) < 10:
+                    failures.append(f"{snap}: {(rd.get('stderr') or rd.get('stdout') or '').strip()[:120]}")
+            # Heartbeat every 5 destroys (or on the last one) so polling sees life.
+            if i == total or i % 5 == 0:
+                progress(f"Destroyed {destroyed}/{total} (failed={failed})",
+                         destroyed=destroyed, failed=failed, total=total)
+        return {
+            "success": failed == 0,
+            "snapshots_destroyed_count": destroyed,
+            "snapshots_failed_count": failed,
+            "snapshots_examples": names[:5],
+            "destroy_output": "\n".join(failures)[-2000:] if failures else "",
+            "target_dataset": _ds,
+        }
+
+    return start_task("purge_auto_snapshots", _job, host, target_ds, src_info)
+
+
+def purge_replica_children_async(host: Dict[str, Any], target_ds: str,
+                                 source_host: Optional[Dict[str, Any]] = None) -> str:
+    """Destroy every direct child of the replica target dataset.
+
+    After a previous replication pair was deleted, the child datasets such as
+    ``rpool/repl/rpool/ROOT/pve-1`` stay behind. A fresh sync into the same
+    target then fails with ``cannot receive new filesystem stream: dataset
+    already exists`` because zsync's recv refuses to overwrite an existing
+    filesystem without a matching baseline. This wipes the children (one by
+    one, recursive) so the next zsync run starts clean. The target itself
+    (e.g. ``rpool/repl``) is preserved.
+    """
+    if not re.match(r"^[A-Za-z0-9._:/-]+$", target_ds or "") or "/" not in (target_ds or ""):
+        raise ValueError("invalid or top-level dataset")
+
+    src_info = _source_pool_names(source_host) if source_host else {"success": False, "pools": [], "error": "source host not registered"}
+
+    def _job(progress, _host, _ds, _src):
+        if not _src["success"]:
+            return {"success": False,
+                    "error": "Cannot determine source pools (" + _src.get("error", "?") + "). Refusing to purge — bring the source host online or do it manually.",
+                    "children_destroyed_count": 0, "children_failed_count": 0,
+                    "children_examples": [], "destroy_output": "",
+                    "target_dataset": _ds}
+        pools = _src["pools"]
+        progress("Source pool whitelist: " + ", ".join(pools), pools=pools)
+
+        # Only direct children of the target whose name is a source pool name
+        # can have been created by this replication pair. Anything else under
+        # the target was put there by the user (or another tool) and stays.
+        list_cmd = (
+            f"zfs list -H -o name -t filesystem,volume -r -d 1 {shlex.quote(_ds)} 2>/dev/null"
+        )
+        r_list = run_command(_host, list_cmd, timeout=60)
+        all_names = [s for s in (r_list.get("stdout") or "").splitlines() if s.strip()]
+
+        pools_set = set(pools)
+        children: List[str] = []
+        skipped: List[str] = []
+        for name in all_names:
+            if name == _ds:
+                continue  # target itself stays
+            # Direct child name component (last path segment)
+            tail = name[len(_ds) + 1:] if name.startswith(_ds + "/") else ""
+            if tail and tail in pools_set:
+                children.append(name)
+            else:
+                skipped.append(name)
+
+        total = len(children)
+        progress(f"Found {total} pair-owned child dataset(s) under {_ds} "
+                 f"(skipped {len(skipped)} unrelated)",
+                 total=total, skipped=len(skipped))
+
+        destroyed = 0
+        failed = 0
+        failures: List[str] = []
+        for i, name in enumerate(children, start=1):
+            if not re.match(r"^[A-Za-z0-9._:/-]+$", name) or "/" not in name:
+                failed += 1
+                failures.append(name + ": invalid name")
+                continue
+            # zfs destroy -r removes the child plus everything under it,
+            # including any leftover snapshots. Generous timeout; large
+            # subtrees can take a while.
+            rd = run_command(_host, f"zfs destroy -r {shlex.quote(name)} 2>&1", timeout=300)
+            if rd.get("success"):
+                destroyed += 1
+            else:
+                failed += 1
+                if len(failures) < 10:
+                    failures.append(f"{name}: {(rd.get('stderr') or rd.get('stdout') or '').strip()[:160]}")
+            progress(f"Destroyed {destroyed}/{total} child(ren) (failed={failed})",
+                     destroyed=destroyed, failed=failed, total=total)
+        return {
+            "success": failed == 0,
+            "children_destroyed_count": destroyed,
+            "children_failed_count": failed,
+            "children_examples": children[:5],
+            "skipped_unrelated": skipped[:10],
+            "skipped_unrelated_count": len(skipped),
+            "destroy_output": "\n".join(failures)[-2000:] if failures else "",
+            "target_dataset": _ds,
+        }
+
+    return start_task("purge_replica_children", _job, host, target_ds, src_info)
 
 
 def bootstrap_ssh(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> Dict[str, Any]:

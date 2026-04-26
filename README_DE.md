@@ -51,6 +51,19 @@
   - Robustes Cleanup: kpartx-Mappings, dmsetup-Fallback, snapdev zurücksetzen
   - Cleanup beim Schließen des Modals, Tab-Schließen (sendBeacon) und über die Health-Seite
 
+### Replikation (bashclub-zsync)
+- **5-Schritt-Wizard** -- Quell-/Ziel-Host-Paar → Setup → Datasets → Konfiguration → Log, mit progressiver Freischaltung
+- **Ein-Klick-Einrichtung** -- Installiert `bashclub-zsync` auf **beiden** Hosts über das offizielle deb822-APT-Repo (`apt.bashclub.org/release/`) und richtet passwortlosen SSH-Zugang vom Ziel zur Quelle ein (Key-Generierung, `ssh-keyscan` für `known_hosts`, `authorized_keys` ergänzen, BatchMode-Probe)
+- **PVE-Erkennung** -- Pro Host PVE-Versions-Badge (warnt, wenn ein Host kein Proxmox VE ist)
+- **Per-Source-Config-Dateien** -- Jedes Replikations-Paar lebt in einer eigenen `/etc/bashclub/<source-ip>.conf`, sodass mehrere Paare auf einem Ziel-Host nebeneinander existieren können (entspricht der Upstream-bashclub-Konvention)
+- **Dataset-Tagging** -- Checkbox-Liste aller Quell-Datasets/Zvols; setzt bzw. entfernt die `bashclub:zsync`-User-Property (Wert `all`), damit der Upstream-Filter sie auch tatsächlich aufgreift
+- **Ziel-Dataset-Helfer** -- Dropdown der vorhandenen Datasets auf dem Ziel plus „+ neu anlegen" (`zfs create -p -o com.sun:auto-snapshot=false`, Vorschlag: `rpool/repl`)
+- **Vollständiges Konfigurations-Formular** -- 16 Felder analog zur Upstream-`/etc/bashclub/zsync.conf` (sshport, tag, snapshot_filter, min_keep, zfs_auto_snapshot_*, checkzfs_*); leere Felder werden beim Speichern automatisch durch Upstream-Defaults ersetzt, sodass die geschriebene Datei stets produktionsreif ist
+- **Cron-Zeitplan-Verwaltung** -- Vorlagen-Dropdown (bashclub-Standard `20 0-22 * * *`, alle 15/30 Min, stündlich, 2h, 6h, täglich 03:00, frei konfigurierbar) mit Live-Preview, idempotentem Anlegen/Ersetzen/Entfernen, expliziter Reload für cron / cronie / systemd-cron
+- **checkzfs-Statuspanel** -- Führt `checkzfs --source <ip>` auf dem Ziel aus und zeigt eine OK/WARN/CRIT-Übersicht plus gruppierte Tabelle; ANSI bereinigt, Filter „nur replizierte" standardmäßig aktiv
+- **Multi-Paar-Übersicht** -- Listet alle konfigurierten Paare des Bestands (scannt auf jedem registrierten Host `/etc/bashclub/*.conf`); pro Zeile lädt „Öffnen" das Paar in den Wizard
+- **Sicheres Löschen** -- Entfernt Cron-Eintrag + Config (mit Zeitstempel-Backup); optionale Checkbox löscht zusätzlich alle `zfs-auto-snap_*`-Snapshots unterhalb des Replikat-Ziels -- Datasets und zsync-Basis-Snapshots bleiben erhalten, Top-Level-Pools werden abgelehnt
+
 ### Snapshot-Check
 - **Retention-Policy-Übersicht** -- Zeigt konfigurierte `--keep=N`-Werte pro Label aus Cron
 - **Analyse pro Label** -- Snapshot-Gesamtzahl, Dataset-Anzahl, Durchschnitt pro Dataset, Alter des neuesten Snapshots
@@ -352,6 +365,7 @@ pve-zfs-tool/
     ├── snapshot_analysis.py # Gemeinsame Snapshot-Health-Analyse (UI + AI)
     ├── timezone.py          # Zeitzonen-Helper (TZ-Umgebungsvariable)
     ├── notifications.py     # Telegram, Gotify, Matrix & Email Notifications
+    ├── replication.py       # bashclub-zsync-Integration (Install, Config, Cron, checkzfs)
     ├── templates/
     │   ├── index.html       # Single-Page-Application
     │   └── login.html       # Login-Seite

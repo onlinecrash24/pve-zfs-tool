@@ -1253,17 +1253,46 @@ def api_replication_config_set():
 @app.route("/api/replication/run", methods=["POST"])
 @login_required
 def api_replication_run():
-    from app.replication import run_now
+    """Trigger bashclub-zsync. Returns a task id; the client polls
+    /api/replication/task?id=... for progress. The first sync of a large pool
+    can run for hours, which would otherwise time out the HTTP request."""
+    from app.replication import run_now_async
     host, err, code = _require_host()
     if err:
         return jsonify(err), code
     data = request.get_json(silent=True) or {}
     source = (data.get("source") or request.args.get("source") or None)
-    result = run_now(host, source=source)
+    task_id = run_now_async(host, source=source)
     audit_log("replication.run", target=host["address"], host=host["address"],
-              success=result["success"],
-              details={"exit_code": result.get("exit_code")})
-    return jsonify(result)
+              success=True,
+              details={"task_id": task_id, "source": source})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/replication/task")
+@login_required
+def api_replication_task():
+    from app.replication import get_task
+    tid = (request.args.get("id") or "").strip()
+    if not tid:
+        return jsonify({"error": "id required"}), 400
+    rec = get_task(tid)
+    if not rec:
+        return jsonify({"error": "task not found"}), 404
+    # Strip the full log for the regular polling response; only return last few
+    # entries so the wire size stays small.
+    log_tail = (rec.get("log") or [])[-20:]
+    return jsonify({
+        "id": rec["id"],
+        "name": rec.get("name"),
+        "status": rec.get("status"),
+        "progress": rec.get("progress"),
+        "started_at": rec.get("started_at"),
+        "finished_at": rec.get("finished_at"),
+        "result": rec.get("result"),
+        "error": rec.get("error"),
+        "log_tail": log_tail,
+    })
 
 
 @app.route("/api/replication/bootstrap-ssh", methods=["POST"])
@@ -1370,10 +1399,24 @@ def api_replication_config_delete():
         return jsonify(err), code
     source = request.args.get("source") or None
     purge = (request.args.get("purge") or "").lower() in ("1", "true", "yes")
-    result = delete_config(host, source=source, purge_snapshots=purge)
+    purge_children = (request.args.get("purge_children") or "").lower() in ("1", "true", "yes")
+
+    # Resolve source host (root@<addr>) so the purge tasks can fetch the
+    # source's pool list as a safety whitelist. If the source isn't
+    # registered or is unreachable, the purge tasks will refuse to operate
+    # rather than guess.
+    source_host_dict = None
+    if source and (purge or purge_children):
+        addr_only = source.split("@", 1)[1] if "@" in source else source
+        source_host_dict = _find_host(addr_only)
+
+    result = delete_config(host, source=source, purge_snapshots=purge,
+                           purge_children=purge_children,
+                           source_host=source_host_dict)
     audit_log("replication.config.delete", target=host["address"], host=host["address"],
               success=result.get("success", False),
               details={"source": source, "purge_snapshots": purge,
+                       "purge_children": purge_children,
                        "config_path": result.get("config_path"),
                        "target_dataset": result.get("target_dataset"),
                        "snapshots_purged": result.get("snapshots_purged"),
@@ -1424,6 +1467,21 @@ def api_replication_cron_delete():
     audit_log("replication.cron.remove", target=host["address"], host=host["address"],
               success=result.get("success", False))
     return jsonify(result)
+
+
+@app.route("/api/replication/target-candidates")
+@login_required
+def api_replication_target_candidates():
+    """List filesystems on the target host whose com.sun:auto-snapshot=false.
+
+    Used by the replication wizard's target dataset dropdown so the user can
+    only pick datasets safe for replicas (no auto-snapshot pollution that
+    would conflict with zsync's stream baselines)."""
+    from app.replication import list_auto_snap_disabled
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(list_auto_snap_disabled(host))
 
 
 @app.route("/api/replication/configs")

@@ -241,6 +241,15 @@ async function viewHome() {
                 </ul>
             </div>
             <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_repl_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_repl_1"))}</li>
+                    <li>${escapeHtml(t("feat_repl_2"))}</li>
+                    <li>${escapeHtml(t("feat_repl_3"))}</li>
+                    <li>${escapeHtml(t("feat_repl_4"))}</li>
+                </ul>
+            </div>
+            <div>
                 <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_health_title"))}</h4>
                 <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
                     <li>${escapeHtml(t("feat_health_1"))}</li>
@@ -2754,6 +2763,7 @@ async function viewReplication() {
         // Two-stage delete: ask whether to also wipe the replica target dataset.
         const targetLabel = p.target ? p.target : "—";
         const purgeCb = h("input", { type: "checkbox", id: "repl-purge-cb" });
+        const childrenCb = h("input", { type: "checkbox", id: "repl-purge-children-cb" });
         const body = h("div", {}, [
             h("p", {}, t("repl_pairs_delete_intro").replace("{src}", p.source || "?").replace("{tgt}", (p.targetHost.name || p.targetHost.address))),
             h("p", { style: "font-size:12px;color:var(--text-secondary)" }, t("repl_pairs_delete_what")),
@@ -2761,12 +2771,20 @@ async function viewReplication() {
                 h("li", {}, t("repl_pairs_delete_li_cron")),
                 h("li", {}, t("repl_pairs_delete_li_config").replace("{path}", p.path || "?")),
             ]),
-            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer" }, [
+            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer;margin-bottom:8px" }, [
                 purgeCb,
                 h("div", {}, [
                     h("div", { style: "font-weight:600;color:var(--danger)" }, t("repl_pairs_purge_label")),
                     h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" },
                         t("repl_pairs_purge_hint").replace("{ds}", targetLabel)),
+                ]),
+            ]),
+            h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer" }, [
+                childrenCb,
+                h("div", {}, [
+                    h("div", { style: "font-weight:600;color:var(--danger)" }, t("repl_pairs_purge_children_label")),
+                    h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" },
+                        t("repl_pairs_purge_children_hint").replace("{ds}", targetLabel)),
                 ]),
             ]),
         ]);
@@ -2775,33 +2793,72 @@ async function viewReplication() {
         cancelBtn.onclick = closeModal;
         confirmBtn.onclick = async () => {
             const purge = purgeCb.checked;
-            const phrase = purge ? t("repl_pairs_purge_confirm").replace("{ds}", targetLabel) : t("repl_pairs_delete_confirm");
+            const purgeChildren = childrenCb.checked;
+            // Strongest warning wins on the OS-level confirm dialog
+            const phrase = purgeChildren ? t("repl_pairs_purge_children_confirm").replace("{ds}", targetLabel)
+                          : purge ? t("repl_pairs_purge_confirm").replace("{ds}", targetLabel)
+                          : t("repl_pairs_delete_confirm");
             if (!confirm(phrase)) return;
             confirmBtn.disabled = true;
             try {
                 const url = "/api/replication/config?host=" + encodeURIComponent(p.targetHost.address) +
                             "&source=" + encodeURIComponent(p.source) +
-                            (purge ? "&purge=1" : "");
+                            (purge ? "&purge=1" : "") +
+                            (purgeChildren ? "&purge_children=1" : "");
                 const r = await API.del(url, {});
-                if (r.success) {
-                    let msg = t("repl_pairs_delete_done");
-                    if (purge) {
-                        const n = r.snapshots_destroyed_count || 0;
-                        if (n > 0 || r.snapshots_purged) {
-                            msg += " — " + t("repl_pairs_purge_done").replace("{n}", String(n));
-                        } else {
-                            msg += " — " + t("repl_pairs_purge_none");
-                        }
-                        if (r.snapshots_failed_count) {
-                            msg += " (" + r.snapshots_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
-                        }
-                    }
-                    toast(msg, "success");
-                } else {
+                if (!r.success) {
                     toast(r.error || t("failed"), "error");
+                    closeModal(); refreshPairs(); return;
                 }
-                closeModal();
-                refreshPairs();
+                // Cron + config removal already happened synchronously above.
+                // Optional purge tasks run in the background — close the modal
+                // immediately and surface their final tally via toasts.
+                closeModal(); refreshPairs();
+                toast(t("repl_pairs_delete_done"), "success");
+                if (purge && r.purge_task_id) {
+                    toast(t("repl_pairs_purge_started"), "info");
+                    pollReplicationTask(r.purge_task_id, {
+                        onDone: (rec) => {
+                            const res = rec.result || {};
+                            // The task itself can refuse if source pools
+                            // can't be enumerated (refusing is success-by-
+                            // safety, not an error). Surface that clearly.
+                            if (res.success === false && res.error) {
+                                toast(res.error, "warning"); return;
+                            }
+                            const n = res.snapshots_destroyed_count || 0;
+                            let msg = n > 0 ? t("repl_pairs_purge_done").replace("{n}", String(n))
+                                            : t("repl_pairs_purge_none");
+                            if (res.snapshots_failed_count) {
+                                msg += " (" + res.snapshots_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
+                            }
+                            toast(msg, "success");
+                        },
+                        onError: (msg) => toast(msg || t("failed"), "error"),
+                    });
+                }
+                if (purgeChildren && r.purge_children_task_id) {
+                    toast(t("repl_pairs_purge_children_started"), "info");
+                    pollReplicationTask(r.purge_children_task_id, {
+                        onDone: (rec) => {
+                            const res = rec.result || {};
+                            if (res.success === false && res.error) {
+                                toast(res.error, "warning"); return;
+                            }
+                            const n = res.children_destroyed_count || 0;
+                            let msg = n > 0 ? t("repl_pairs_purge_children_done").replace("{n}", String(n))
+                                            : t("repl_pairs_purge_children_none");
+                            if (res.children_failed_count) {
+                                msg += " (" + res.children_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
+                            }
+                            if (res.skipped_unrelated_count) {
+                                msg += " — " + t("repl_pairs_skipped_unrelated").replace("{n}", String(res.skipped_unrelated_count));
+                            }
+                            toast(msg, "success");
+                        },
+                        onError: (msg) => toast(msg || t("failed"), "error"),
+                    });
+                }
             } catch (e) { toast(e.message, "error"); }
             finally { confirmBtn.disabled = false; }
         };
@@ -2817,6 +2874,35 @@ async function viewReplication() {
     }
 
     pairsRefreshBtn.onclick = refreshPairs;
+
+    // Poll a long-running replication task. Calls onTick() on every update,
+    // onDone(record) when it finishes successfully, onError(msg) on failure
+    // or timeout. Polling backs off from 2s → 5s after the first minute so
+    // a multi-hour first-sync doesn't hammer the server.
+    function pollReplicationTask(taskId, { onTick, onDone, onError, maxSeconds = 8 * 3600 } = {}) {
+        const started = Date.now();
+        let interval = 2000;
+        let lastProgress = "";
+        const tick = async () => {
+            try {
+                const rec = await API.get("/api/replication/task?id=" + encodeURIComponent(taskId));
+                if (rec.progress && rec.progress !== lastProgress) {
+                    lastProgress = rec.progress;
+                    if (onTick) onTick(rec);
+                }
+                if (rec.status === "done") { if (onDone) onDone(rec); return; }
+                if (rec.status === "error") { if (onError) onError(rec.error || "task error"); return; }
+                if ((Date.now() - started) > maxSeconds * 1000) {
+                    if (onError) onError("task polling timed out"); return;
+                }
+                if ((Date.now() - started) > 60 * 1000) interval = 5000;
+                setTimeout(tick, interval);
+            } catch (e) {
+                if (onError) onError(e.message || "task poll failed");
+            }
+        };
+        tick();
+    }
 
     // -- Step 1: Source + Target host selection ----------------------------
     const selCard = h("div", { className: "card" });
@@ -3122,11 +3208,15 @@ async function viewReplication() {
         const defSourceStr = (src.user || "root") + "@" + src.address;
         const defSourcePort = String(src.port || 22);
 
-        // Target dataset dropdown
+        // Target dataset dropdown — restricted to filesystems whose
+        // com.sun:auto-snapshot=false (the contract zsync expects on its
+        // replica targets, otherwise zfs-auto-snapshot pollutes the
+        // replicated datasets with rotating snapshots that fight with
+        // zsync's stream baseline).
         let datasets = [];
         try {
-            const ds = await API.get("/api/datasets" + qs);
-            datasets = (ds.filesystems || ds || []).map(d => d.name || d).filter(n => typeof n === "string");
+            const ds = await API.get("/api/replication/target-candidates" + qs);
+            datasets = (ds.datasets || []).map(d => d.name).filter(Boolean);
         } catch (_) {}
 
         const tgtSelect = h("select", { className: "form-input", style: "width:100%" }, [
@@ -3138,6 +3228,13 @@ async function viewReplication() {
             }),
             h("option", { value: "__new__" }, "+ " + t("repl_create_target")),
         ]);
+        // Tiny status line beneath the dropdown — explains why fewer
+        // datasets show up here than under "Datasets / Pools".
+        const tgtFilterInfo = h("div", {
+            style: "font-size:11px;color:var(--text-secondary);margin-top:4px;font-style:italic"
+        }, datasets.length === 0
+            ? t("repl_target_filter_empty")
+            : t("repl_target_filter_info").replace("{n}", String(datasets.length)));
         const tgtNewInput = h("input", { type: "text", className: "form-input", style: "margin-top:6px;display:none", placeholder: "rpool/repl", value: "rpool/repl" });
         const tgtCreateBtn = h("button", { className: "btn btn-sm btn-warning", style: "margin-top:6px;margin-left:6px;display:none" }, t("repl_create_target_btn"));
         tgtSelect.onchange = () => {
@@ -3173,6 +3270,7 @@ async function viewReplication() {
         const tgtCell = h("div");
         tgtCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_target")));
         tgtCell.appendChild(tgtSelect);
+        tgtCell.appendChild(tgtFilterInfo);
         tgtCell.appendChild(h("div", { style: "white-space:nowrap" }, [tgtNewInput, tgtCreateBtn]));
         tgtCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_target")));
         form.appendChild(tgtCell);
@@ -3247,11 +3345,59 @@ async function viewReplication() {
             runBtn.disabled = true; runBtn.textContent = t("repl_running");
             try {
                 const r = await API.post("/api/replication/run" + qsPair, { source: src.address });
-                if (r.success) toast(t("repl_run_ok"), "success");
-                else toast(t("repl_run_failed") + " (exit=" + (r.exit_code ?? "?") + ")", "error");
-                refreshLog();
-            } catch (e) { toast(e.message, "error"); }
-            finally { runBtn.disabled = false; runBtn.textContent = t("repl_run_now"); }
+                if (!r.success || !r.task_id) {
+                    toast(r.error || t("repl_run_failed"), "error");
+                    return;
+                }
+                toast(t("repl_run_started"), "info");
+                // Poll the task until it finishes; refresh log along the way so
+                // the user sees zsync progress even before the run is done.
+                pollReplicationTask(r.task_id, {
+                    onTick: () => refreshLog(),
+                    onDone: async (rec) => {
+                        const res = rec.result || {};
+                        const cls = res.classification || (res.success ? "ok" : "error");
+                        const exit = res.exit_code != null ? res.exit_code : "?";
+                        const finished = res.finished_count != null ? res.finished_count : 0;
+                        if (cls === "ok") {
+                            toast(t("repl_run_ok") +
+                                  (finished ? " — " + t("repl_run_finished_n").replace("{n}", String(finished)) : ""),
+                                  "success");
+                        } else if (cls === "warning") {
+                            // bashclub-zsync's trailing checkzfs step routinely
+                            // returns non-zero just to flag untagged source
+                            // datasets. Replication itself was fine — say so
+                            // clearly rather than scream "failed".
+                            toast(t("repl_run_ok_with_warning")
+                                    .replace("{n}", String(finished)),
+                                  "warning");
+                        } else {
+                            // Pull the last log lines so the user sees WHY it
+                            // failed (typically zfs recv refusing because the
+                            // target dataset already exists).
+                            let tail = "";
+                            try {
+                                const lr = await API.get("/api/replication/log" + qs + "&lines=30");
+                                if (lr && lr.content) tail = lr.content;
+                            } catch (_) { /* ignore */ }
+                            const html = `<p><b>${escapeHtml(t("repl_run_failed"))}</b> (exit=${escapeHtml(String(exit))})</p>` +
+                                         (res.summary ? `<p style="font-size:13px">${escapeHtml(res.summary)}</p>` : "") +
+                                         (tail ? `<pre class="output" style="max-height:300px">${escapeHtml(tail.split("\n").slice(-30).join("\n"))}</pre>` : "") +
+                                         `<p style="font-size:12px;color:var(--text-secondary)">${escapeHtml(t("repl_run_failed_hint"))}</p>`;
+                            openModal(t("repl_run_failed"), html);
+                        }
+                        refreshLog();
+                        runBtn.disabled = false; runBtn.textContent = t("repl_run_now");
+                    },
+                    onError: (msg) => {
+                        toast(msg || t("repl_run_failed"), "error");
+                        runBtn.disabled = false; runBtn.textContent = t("repl_run_now");
+                    },
+                });
+            } catch (e) {
+                toast(e.message, "error");
+                runBtn.disabled = false; runBtn.textContent = t("repl_run_now");
+            }
         };
         cfgBtnRow.appendChild(runBtn);
         cfgBody.appendChild(cfgBtnRow);
