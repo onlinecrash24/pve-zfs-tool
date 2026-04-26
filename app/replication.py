@@ -674,11 +674,57 @@ def run_now_async(host: Dict[str, Any], source: Optional[str] = None) -> str:
             m = re.search(r"__exit=(\d+)\s*$", r["stdout"].strip())
             if m:
                 exit_code = int(m.group(1))
-        ok = r.get("success", False) and (exit_code == 0)
-        progress(f"Finished (exit={exit_code})", exit_code=exit_code, ok=ok)
+
+        # bashclub-zsync's exit code reflects whichever step ran last. When
+        # replication finishes and the trailing ``checkzfs`` step finds any
+        # non-replicated source datasets, it exits non-zero with status warn
+        # — that bubbles out as exit=1 even though replication itself was a
+        # full success. Disambiguate by inspecting the tail of the log.
+        log_r = run_command(_host, f"tail -n 200 {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=15)
+        log_tail = (log_r.get("stdout") or "")
+        finished_count = len(re.findall(r"Replication of \S+ finished\.", log_tail))
+        has_checkzfs_step = "Running checkzfs" in log_tail
+        # Hard failure markers — these indicate the replication itself blew up.
+        fatal_markers = (
+            "cannot receive new filesystem stream",
+            "cannot receive incremental stream",
+            "destination has snapshots",
+            "ERROR",
+            "Permission denied",
+            "lost connection",
+        )
+        has_fatal = any(m in log_tail for m in fatal_markers)
+
+        if exit_code == 0:
+            classification = "ok"
+            summary = f"Replication completed cleanly ({finished_count} dataset(s))."
+        elif has_fatal:
+            classification = "error"
+            summary = "Replication failed — see log."
+        elif finished_count > 0 and has_checkzfs_step:
+            # Replication ran fine, only checkzfs reported warnings at the end.
+            classification = "warning"
+            summary = (f"Replication completed for {finished_count} dataset(s); "
+                       f"checkzfs reported warnings (untagged source datasets) "
+                       f"— this is informational, not a failure.")
+        elif finished_count > 0:
+            classification = "warning"
+            summary = (f"Replication completed for {finished_count} dataset(s); "
+                       f"non-zero exit (={exit_code}) without a clear error marker.")
+        else:
+            classification = "error"
+            summary = f"Replication failed (exit={exit_code}, no datasets replicated)."
+
+        ok = (classification != "error")
+        progress(f"Finished (exit={exit_code}, classification={classification})",
+                 exit_code=exit_code, ok=ok, classification=classification,
+                 finished_count=finished_count)
         return {
             "success": ok,
             "exit_code": exit_code,
+            "classification": classification,
+            "summary": summary,
+            "finished_count": finished_count,
             "stderr": r.get("stderr", ""),
         }
 

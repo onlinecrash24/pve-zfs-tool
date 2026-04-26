@@ -3355,21 +3355,34 @@ async function viewReplication() {
                 pollReplicationTask(r.task_id, {
                     onTick: () => refreshLog(),
                     onDone: async (rec) => {
-                        const ok = rec.result && rec.result.success;
-                        const exit = rec.result ? rec.result.exit_code : "?";
-                        if (ok) {
-                            toast(t("repl_run_ok"), "success");
+                        const res = rec.result || {};
+                        const cls = res.classification || (res.success ? "ok" : "error");
+                        const exit = res.exit_code != null ? res.exit_code : "?";
+                        const finished = res.finished_count != null ? res.finished_count : 0;
+                        if (cls === "ok") {
+                            toast(t("repl_run_ok") +
+                                  (finished ? " — " + t("repl_run_finished_n").replace("{n}", String(finished)) : ""),
+                                  "success");
+                        } else if (cls === "warning") {
+                            // bashclub-zsync's trailing checkzfs step routinely
+                            // returns non-zero just to flag untagged source
+                            // datasets. Replication itself was fine — say so
+                            // clearly rather than scream "failed".
+                            toast(t("repl_run_ok_with_warning")
+                                    .replace("{n}", String(finished)),
+                                  "warning");
                         } else {
                             // Pull the last log lines so the user sees WHY it
                             // failed (typically zfs recv refusing because the
                             // target dataset already exists).
                             let tail = "";
                             try {
-                                const lr = await API.get("/api/replication/log" + qs + "&lines=20");
+                                const lr = await API.get("/api/replication/log" + qs + "&lines=30");
                                 if (lr && lr.content) tail = lr.content;
                             } catch (_) { /* ignore */ }
                             const html = `<p><b>${escapeHtml(t("repl_run_failed"))}</b> (exit=${escapeHtml(String(exit))})</p>` +
-                                         (tail ? `<pre class="output" style="max-height:300px">${escapeHtml(tail.split("\n").slice(-20).join("\n"))}</pre>` : "") +
+                                         (res.summary ? `<p style="font-size:13px">${escapeHtml(res.summary)}</p>` : "") +
+                                         (tail ? `<pre class="output" style="max-height:300px">${escapeHtml(tail.split("\n").slice(-30).join("\n"))}</pre>` : "") +
                                          `<p style="font-size:12px;color:var(--text-secondary)">${escapeHtml(t("repl_run_failed_hint"))}</p>`;
                             openModal(t("repl_run_failed"), html);
                         }
