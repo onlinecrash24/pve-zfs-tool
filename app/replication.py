@@ -454,19 +454,39 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
         out["error"] = f"cron remove failed: {e}"
 
     # 2. config file (with backup)
+    # Use a single ``mv`` instead of cp+rm: it's atomic and impossible to end
+    # up in the previous failure mode (backup created but original still
+    # present). After mv we explicitly verify the original is gone.
     if cfg.get("exists"):
         rm = run_command(
             host,
             f"if [ -f {shlex.quote(cfg_path)} ]; then "
-            f"cp -a {shlex.quote(cfg_path)} {shlex.quote(cfg_path)}.bak.$(date +%Y%m%d%H%M%S) && "
-            f"rm -f {shlex.quote(cfg_path)} && echo __CFG_OK__; "
-            f"fi",
+            f"  TS=$(date +%Y%m%d%H%M%S); "
+            f"  if mv {shlex.quote(cfg_path)} {shlex.quote(cfg_path)}.bak.$TS; then "
+            f"    if [ ! -f {shlex.quote(cfg_path)} ]; then echo __CFG_OK__; "
+            f"    else echo __CFG_STILL_EXISTS__; fi; "
+            f"  else echo __MV_FAILED__; "
+            f"  fi; "
+            f"else echo __CFG_NONE__; fi",
             timeout=15,
         )
-        out["config_removed"] = "__CFG_OK__" in (rm.get("stdout") or "")
+        stdout = rm.get("stdout") or ""
+        out["config_removed"] = "__CFG_OK__" in stdout
         if not out["config_removed"]:
-            out["error"] = (out["error"] + " | " if out["error"] else "") + \
-                           "config remove failed: " + (rm.get("stderr") or "").strip()
+            reason = "unknown"
+            if "__MV_FAILED__" in stdout:
+                reason = "mv failed: " + (rm.get("stderr") or "").strip()
+            elif "__CFG_STILL_EXISTS__" in stdout:
+                reason = "mv reported success but file is still present"
+            elif "__CFG_NONE__" in stdout:
+                # Race: file vanished between read_config and our removal.
+                # Treat as already-gone.
+                out["config_removed"] = True
+            else:
+                reason = (rm.get("stderr") or stdout or "no output").strip()[:200]
+            if not out["config_removed"]:
+                out["error"] = (out["error"] + " | " if out["error"] else "") + \
+                               "config remove failed: " + reason
 
     # 3. ZFS-auto-snapshot purge under the replica target.
     # Only snapshots matching "@zfs-auto-snap_*" are destroyed -- the datasets
