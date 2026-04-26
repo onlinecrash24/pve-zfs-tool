@@ -4254,20 +4254,57 @@ async function viewAI() {
                 ${escapeHtml(t("ai_attach_pdf"))}
             </label>
         </div>
-
-        <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
-            <button class="btn btn-primary" id="ai-generate-btn">${escapeHtml(t("ai_generate_now"))}</button>
-            <button class="btn" id="ai-export-raw-btn">${escapeHtml(t("ai_export_raw") || "Export Raw Data")}</button>
-            <span id="ai-generate-status" style="font-size:13px;margin-left:10px"></span>
-        </div>
     `;
     schedCard.appendChild(schedBody);
     container.appendChild(schedCard);
 
+    // ---- Card 2b: Generate now ----
+    // Lifted out of the Schedule card so the manual "make a report right
+    // now" flow doesn't get visually buried under the cron settings -- and
+    // so we can give the user a clear scope toggle (active host vs. all
+    // hosts combined). The previous one-button layout silently always
+    // sent host=currentHost, which made combined reports impossible from
+    // the UI even though the backend has supported them all along.
+    const genCard = h("div", { className: "card", style: "margin-top:16px" });
+    genCard.appendChild(h("div", { className: "card-header" }, t("ai_generate_now")));
+    const genBody = h("div", { className: "card-body" });
+    genBody.innerHTML = `
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px">
+            ${escapeHtml(t("ai_generate_intro"))}
+        </p>
+        <div class="grid grid-2" style="gap:14px;align-items:end">
+            <div>
+                <label>${escapeHtml(t("ai_generate_scope"))}</label>
+                <select id="ai-gen-scope" class="form-control" style="margin-top:4px">
+                    <option value="host" selected>
+                        ${escapeHtml(t("ai_generate_scope_host"))} &mdash; ${escapeHtml(currentHost || "?")}
+                    </option>
+                    <option value="all">
+                        ${escapeHtml(t("ai_generate_scope_all"))}
+                    </option>
+                </select>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end">
+                <button class="btn" id="ai-export-raw-btn">${escapeHtml(t("ai_export_raw") || "Export Raw Data")}</button>
+                <button class="btn btn-primary" id="ai-generate-btn">${escapeHtml(t("ai_generate_now"))}</button>
+            </div>
+        </div>
+        <div style="margin-top:10px;font-size:13px">
+            <span id="ai-generate-status"></span>
+        </div>
+    `;
+    genCard.appendChild(genBody);
+    container.appendChild(genCard);
+
     // ---- Card 3: Reports & Chat ----
-    // Filter reports by current host
+    // Show:
+    //   - reports that include the active host (per-host or combined),
+    //   - any combined report covering more than one host (so a multi-host
+    //     report is visible from any of its members), and
+    //   - legacy reports without host info (compat with older entries).
     const hostReports = reports.filter(r => {
-        if (!r.host_addresses) return true; // old reports without host info
+        if (!r.host_addresses) return true;
+        if ((r.host_count || r.host_addresses.length) > 1) return true;
         return r.host_addresses.includes(currentHost);
     });
 
@@ -4278,8 +4315,18 @@ async function viewAI() {
     if (hostReports.length === 0) {
         reportBody.innerHTML = `<p style="color:var(--text-secondary)">${escapeHtml(t("ai_no_reports"))}</p>`;
     } else {
+        // Tag combined / multi-host entries in the dropdown so the user can
+        // tell at a glance which option produces a single-host vs an
+        // all-hosts report.
+        const labelFor = (rep) => {
+            const n = rep.host_count || (rep.host_addresses ? rep.host_addresses.length : 0);
+            const tag = n > 1
+                ? ` · ${t("ai_report_combined_tag")} (${n})`
+                : (rep.host_names && rep.host_names.length === 1 ? ` · ${rep.host_names[0]}` : "");
+            return `${escapeHtml(rep.timestamp)} — ${escapeHtml(rep.provider)} (${escapeHtml(rep.model)})${escapeHtml(tag)}`;
+        };
         let reportOpts = hostReports.map((r, i) =>
-            `<option value="${i}">${escapeHtml(r.timestamp)} — ${escapeHtml(r.provider)} (${escapeHtml(r.model)})</option>`
+            `<option value="${i}">${labelFor(r)}</option>`
         ).join("");
 
         const firstReport = hostReports[0];
@@ -4382,24 +4429,32 @@ async function viewAI() {
         promptEl.value = (getLang() === "de" ? config.default_system_prompt_de : config.default_system_prompt_en) || "";
     });
 
-    // Export raw data
+    // Export raw data — follows the same scope toggle as Generate so the
+    // user sees exactly the JSON the LLM would receive.
     document.getElementById("ai-export-raw-btn").addEventListener("click", () => {
-        window.open(`/api/ai/raw-data?host=${encodeURIComponent(currentHost)}`, "_blank");
+        const scope = (document.getElementById("ai-gen-scope") || {}).value || "host";
+        const url = scope === "all"
+            ? "/api/ai/raw-data"
+            : `/api/ai/raw-data?host=${encodeURIComponent(currentHost)}`;
+        window.open(url, "_blank");
     });
 
     // Generate report
     document.getElementById("ai-generate-btn").addEventListener("click", async () => {
         const btn = document.getElementById("ai-generate-btn");
         const statusEl = document.getElementById("ai-generate-status");
+        const scope = (document.getElementById("ai-gen-scope") || {}).value || "host";
         btn.disabled = true;
-        statusEl.textContent = t("ai_generating");
+        statusEl.textContent = scope === "all" ? t("ai_generating_all") : t("ai_generating");
         statusEl.style.color = "var(--text-secondary)";
 
         // Save config first so language/provider changes are applied
         await _saveAIConfig();
 
         const lang = getLang();
-        const r = await API.post("/api/ai/report", { host: currentHost, lang });
+        // Empty/omitted host → backend collects ALL hosts (combined report).
+        const payload = scope === "all" ? { lang } : { host: currentHost, lang };
+        const r = await API.post("/api/ai/report", payload);
         btn.disabled = false;
         if (r.success) {
             toast(t("ai_report_generated"), "success");
