@@ -1469,6 +1469,21 @@ def api_replication_cron_delete():
     return jsonify(result)
 
 
+@app.route("/api/replication/target-candidates")
+@login_required
+def api_replication_target_candidates():
+    """List filesystems on the target host whose com.sun:auto-snapshot=false.
+
+    Used by the replication wizard's target dataset dropdown so the user can
+    only pick datasets safe for replicas (no auto-snapshot pollution that
+    would conflict with zsync's stream baselines)."""
+    from app.replication import list_auto_snap_disabled
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(list_auto_snap_disabled(host))
+
+
 @app.route("/api/replication/configs")
 @login_required
 def api_replication_configs():

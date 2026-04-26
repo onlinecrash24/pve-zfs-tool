@@ -561,6 +561,30 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
     return out
 
 
+def list_auto_snap_disabled(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Return filesystems on ``host`` whose ``com.sun:auto-snapshot`` property
+    is set to ``false`` — i.e. datasets that are safe to use as a replication
+    target because zfs-auto-snapshot will not pollute them with rotating
+    snapshots that conflict with zsync's stream baseline.
+
+    Inheritance counts: a child without the property explicitly set inherits
+    the parent's ``false`` value, which still satisfies the contract.
+    """
+    cmd = "zfs list -H -o name,com.sun:auto-snapshot -t filesystem 2>/dev/null"
+    r = run_command(host, cmd, timeout=20)
+    if not r.get("success"):
+        return {"datasets": [], "error": (r.get("stderr") or "").strip()[:200]}
+    out: List[Dict[str, Any]] = []
+    for line in (r.get("stdout") or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        name, value = parts[0].strip(), parts[1].strip()
+        if value == "false":
+            out.append({"name": name, "value": value})
+    return {"datasets": out}
+
+
 def list_configs(host: Dict[str, Any]) -> Dict[str, Any]:
     """Enumerate per-source config files in /etc/bashclub.
 

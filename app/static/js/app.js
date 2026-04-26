@@ -3208,11 +3208,15 @@ async function viewReplication() {
         const defSourceStr = (src.user || "root") + "@" + src.address;
         const defSourcePort = String(src.port || 22);
 
-        // Target dataset dropdown
+        // Target dataset dropdown — restricted to filesystems whose
+        // com.sun:auto-snapshot=false (the contract zsync expects on its
+        // replica targets, otherwise zfs-auto-snapshot pollutes the
+        // replicated datasets with rotating snapshots that fight with
+        // zsync's stream baseline).
         let datasets = [];
         try {
-            const ds = await API.get("/api/datasets" + qs);
-            datasets = (ds.filesystems || ds || []).map(d => d.name || d).filter(n => typeof n === "string");
+            const ds = await API.get("/api/replication/target-candidates" + qs);
+            datasets = (ds.datasets || []).map(d => d.name).filter(Boolean);
         } catch (_) {}
 
         const tgtSelect = h("select", { className: "form-input", style: "width:100%" }, [
@@ -3224,6 +3228,13 @@ async function viewReplication() {
             }),
             h("option", { value: "__new__" }, "+ " + t("repl_create_target")),
         ]);
+        // Tiny status line beneath the dropdown — explains why fewer
+        // datasets show up here than under "Datasets / Pools".
+        const tgtFilterInfo = h("div", {
+            style: "font-size:11px;color:var(--text-secondary);margin-top:4px;font-style:italic"
+        }, datasets.length === 0
+            ? t("repl_target_filter_empty")
+            : t("repl_target_filter_info").replace("{n}", String(datasets.length)));
         const tgtNewInput = h("input", { type: "text", className: "form-input", style: "margin-top:6px;display:none", placeholder: "rpool/repl", value: "rpool/repl" });
         const tgtCreateBtn = h("button", { className: "btn btn-sm btn-warning", style: "margin-top:6px;margin-left:6px;display:none" }, t("repl_create_target_btn"));
         tgtSelect.onchange = () => {
@@ -3259,6 +3270,7 @@ async function viewReplication() {
         const tgtCell = h("div");
         tgtCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_target")));
         tgtCell.appendChild(tgtSelect);
+        tgtCell.appendChild(tgtFilterInfo);
         tgtCell.appendChild(h("div", { style: "white-space:nowrap" }, [tgtNewInput, tgtCreateBtn]));
         tgtCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_target")));
         form.appendChild(tgtCell);
