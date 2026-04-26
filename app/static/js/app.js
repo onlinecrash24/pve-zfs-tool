@@ -3958,8 +3958,10 @@ async function viewDR() {
                 try {
                     // Reuse the existing snapshot mount endpoint -- it works
                     // on any snapshot regardless of how the dataset was made.
-                    const r = await API.post("/api/restore/mount?host=" + encodeURIComponent(pair.host_address),
-                                             { snapshot: snap });
+                    // Note: this endpoint expects ``host`` in the JSON body
+                    // (not as a query string like /api/replication/* does).
+                    const r = await API.post("/api/restore/mount",
+                                             { host: pair.host_address, snapshot: snap });
                     if (!r.success) {
                         browseInfo.innerHTML = "";
                         browseInfo.appendChild(h("p", { className: "muted" }, r.error || t("failed")));
