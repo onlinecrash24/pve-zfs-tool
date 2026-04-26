@@ -120,8 +120,11 @@ def set_security_headers(response):
 
 @app.before_request
 def check_auth():
-    # Allow login page, login API, and static files without auth
-    allowed = ("/login", "/api/login", "/static/")
+    # Allow login page, login API, and static files without auth.
+    # /metrics is its own auth path (Bearer token via PROMETHEUS_TOKEN);
+    # the Prometheus exporter must NOT be redirected to the HTML login
+    # page or the scrape silently breaks with "unsupported Content-Type".
+    allowed = ("/login", "/api/login", "/static/", "/metrics")
     if any(request.path.startswith(p) for p in allowed):
         return
     if not session.get("authenticated"):
