@@ -682,6 +682,31 @@ def generate_report(host_address=None, lang_override=None):
     return {"success": True, "report": report}
 
 
+def generate_report_async(host_address=None, lang_override=None):
+    """Run generate_report() in a background thread and return a task id.
+
+    The synchronous path still works (used by the scheduler), but UI-driven
+    runs go through here so the user can keep navigating while the LLM call
+    is in flight. The task result has the same shape as generate_report()'s
+    return value.
+    """
+    from app.tasks import start_task
+
+    def _job(progress, _host_address, _lang):
+        progress("Collecting host data …")
+        # generate_report() is the slow part: data collection + LLM round-trip.
+        # We can't stream sub-step progress from inside it without restructuring
+        # but the "running" status alone unblocks the UI.
+        result = generate_report(host_address=_host_address, lang_override=_lang)
+        if result.get("success"):
+            progress("Report generated", report_id=result.get("report", {}).get("id"))
+        else:
+            progress("Report generation failed", error=result.get("error", ""))
+        return result
+
+    return start_task("ai_report", _job, host_address, lang_override, prefix="ai")
+
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------

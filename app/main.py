@@ -979,11 +979,41 @@ def api_ai_ollama_models():
 
 @app.route("/api/ai/report", methods=["POST"])
 def api_ai_generate_report():
+    """Kick off a report and return a task id immediately.
+
+    The actual LLM call can take 30 s+ on slower providers, which would
+    otherwise freeze the UI and queue every other API request behind it
+    on a single-worker Flask deployment. The client polls
+    /api/ai/task?id=... for completion.
+    """
+    from app.ai_reports import generate_report_async
     data = request.json or {}
     host_address = data.get("host")
     lang = data.get("lang")
-    result = generate_ai_report(host_address, lang)
-    return jsonify(result)
+    task_id = generate_report_async(host_address=host_address, lang_override=lang)
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/ai/task")
+def api_ai_task():
+    """Return the current state of an AI-report task started via /api/ai/report."""
+    from app.tasks import get_task
+    tid = (request.args.get("id") or "").strip()
+    if not tid:
+        return jsonify({"error": "id required"}), 400
+    rec = get_task(tid)
+    if not rec:
+        return jsonify({"error": "task not found"}), 404
+    return jsonify({
+        "id": rec["id"],
+        "name": rec.get("name"),
+        "status": rec.get("status"),
+        "progress": rec.get("progress"),
+        "started_at": rec.get("started_at"),
+        "finished_at": rec.get("finished_at"),
+        "result": rec.get("result"),
+        "error": rec.get("error"),
+    })
 
 
 @app.route("/api/ai/reports", methods=["GET"])

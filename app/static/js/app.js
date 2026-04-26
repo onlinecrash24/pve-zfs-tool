@@ -4439,7 +4439,9 @@ async function viewAI() {
         window.open(url, "_blank");
     });
 
-    // Generate report
+    // Generate report — runs as a background task on the server, the client
+    // polls for completion. The user can navigate away and the toast will
+    // still arrive when the report is done.
     document.getElementById("ai-generate-btn").addEventListener("click", async () => {
         const btn = document.getElementById("ai-generate-btn");
         const statusEl = document.getElementById("ai-generate-status");
@@ -4454,15 +4456,69 @@ async function viewAI() {
         const lang = getLang();
         // Empty/omitted host → backend collects ALL hosts (combined report).
         const payload = scope === "all" ? { lang } : { host: currentHost, lang };
-        const r = await API.post("/api/ai/report", payload);
-        btn.disabled = false;
-        if (r.success) {
-            toast(t("ai_report_generated"), "success");
-            viewAI(); // Refresh to show new report
-        } else {
-            statusEl.textContent = t("ai_report_failed", r.error || "Unknown");
+        let kickoff;
+        try {
+            kickoff = await API.post("/api/ai/report", payload);
+        } catch (e) {
+            btn.disabled = false;
+            statusEl.textContent = t("ai_report_failed", e.message || "Unknown");
             statusEl.style.color = "var(--danger)";
+            return;
         }
+        if (!kickoff || !kickoff.task_id) {
+            btn.disabled = false;
+            statusEl.textContent = t("ai_report_failed", (kickoff && kickoff.error) || "no task id");
+            statusEl.style.color = "var(--danger)";
+            return;
+        }
+        toast(t("ai_report_started"), "info");
+
+        // Re-enable the button right away — the request is no longer hot.
+        btn.disabled = false;
+        statusEl.textContent = t("ai_report_running_bg");
+        statusEl.style.color = "var(--text-secondary)";
+
+        const taskId = kickoff.task_id;
+        let interval = 2000;
+        const started = Date.now();
+        const poll = async () => {
+            let rec;
+            try {
+                rec = await API.get("/api/ai/task?id=" + encodeURIComponent(taskId));
+            } catch (e) {
+                // Network blip — keep trying briefly, then give up.
+                if (Date.now() - started > 10 * 60 * 1000) {
+                    toast(t("ai_report_failed", e.message || "poll failed"), "error");
+                    return;
+                }
+                setTimeout(poll, interval);
+                return;
+            }
+            if (rec.status === "running") {
+                if (Date.now() - started > 60 * 1000) interval = 5000;
+                setTimeout(poll, interval);
+                return;
+            }
+            // Done or error
+            const res = rec.result || {};
+            if (rec.status === "done" && res.success) {
+                toast(t("ai_report_generated"), "success");
+                // Refresh view only if user is still on the AI page; otherwise
+                // they'll see the new report next time they open it.
+                if (currentView === "ai") viewAI();
+            } else {
+                const msg = res.error || rec.error || "Unknown";
+                toast(t("ai_report_failed", msg), "error");
+                if (currentView === "ai") {
+                    const stEl = document.getElementById("ai-generate-status");
+                    if (stEl) {
+                        stEl.textContent = t("ai_report_failed", msg);
+                        stEl.style.color = "var(--danger)";
+                    }
+                }
+            }
+        };
+        poll();
     });
 
     // Report selector + PDF
