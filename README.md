@@ -330,6 +330,12 @@ echo "GRAFANA_ADMIN_PASSWORD=please-change-me" >> .env
 
 # Start zfs-tool + prometheus + grafana
 docker compose --profile monitoring up -d
+
+# Tear everything back down -- the profile flag is required, otherwise
+# `docker compose down` only touches the default services and leaves
+# prometheus + grafana running (which then keeps the monitoring
+# network alive and blocks the next `up`).
+docker compose --profile monitoring down
 ```
 
 Then open:
