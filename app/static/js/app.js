@@ -2820,6 +2820,12 @@ async function viewReplication() {
                     pollReplicationTask(r.purge_task_id, {
                         onDone: (rec) => {
                             const res = rec.result || {};
+                            // The task itself can refuse if source pools
+                            // can't be enumerated (refusing is success-by-
+                            // safety, not an error). Surface that clearly.
+                            if (res.success === false && res.error) {
+                                toast(res.error, "warning"); return;
+                            }
                             const n = res.snapshots_destroyed_count || 0;
                             let msg = n > 0 ? t("repl_pairs_purge_done").replace("{n}", String(n))
                                             : t("repl_pairs_purge_none");
@@ -2836,11 +2842,17 @@ async function viewReplication() {
                     pollReplicationTask(r.purge_children_task_id, {
                         onDone: (rec) => {
                             const res = rec.result || {};
+                            if (res.success === false && res.error) {
+                                toast(res.error, "warning"); return;
+                            }
                             const n = res.children_destroyed_count || 0;
                             let msg = n > 0 ? t("repl_pairs_purge_children_done").replace("{n}", String(n))
                                             : t("repl_pairs_purge_children_none");
                             if (res.children_failed_count) {
                                 msg += " (" + res.children_failed_count + " " + t("repl_pairs_purge_failed_n") + ")";
+                            }
+                            if (res.skipped_unrelated_count) {
+                                msg += " — " + t("repl_pairs_skipped_unrelated").replace("{n}", String(res.skipped_unrelated_count));
                             }
                             toast(msg, "success");
                         },

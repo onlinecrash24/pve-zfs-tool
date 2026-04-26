@@ -1400,8 +1400,19 @@ def api_replication_config_delete():
     source = request.args.get("source") or None
     purge = (request.args.get("purge") or "").lower() in ("1", "true", "yes")
     purge_children = (request.args.get("purge_children") or "").lower() in ("1", "true", "yes")
+
+    # Resolve source host (root@<addr>) so the purge tasks can fetch the
+    # source's pool list as a safety whitelist. If the source isn't
+    # registered or is unreachable, the purge tasks will refuse to operate
+    # rather than guess.
+    source_host_dict = None
+    if source and (purge or purge_children):
+        addr_only = source.split("@", 1)[1] if "@" in source else source
+        source_host_dict = _find_host(addr_only)
+
     result = delete_config(host, source=source, purge_snapshots=purge,
-                           purge_children=purge_children)
+                           purge_children=purge_children,
+                           source_host=source_host_dict)
     audit_log("replication.config.delete", target=host["address"], host=host["address"],
               success=result.get("success", False),
               details={"source": source, "purge_snapshots": purge,
