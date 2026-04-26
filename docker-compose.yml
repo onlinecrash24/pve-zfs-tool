@@ -50,6 +50,13 @@ services:
       - /bin/sh
       - -c
       - |
+        if [ -z "$$PROM_TOKEN" ]; then
+          echo "ERROR: PROMETHEUS_TOKEN is empty." >&2
+          echo "Create a .env file next to docker-compose.yml with:" >&2
+          echo "  PROMETHEUS_TOKEN=\$$(openssl rand -hex 32)" >&2
+          echo "and rerun: docker compose --profile monitoring up -d" >&2
+          exit 1
+        fi
         printf '%s' "$$PROM_TOKEN" > /etc/prometheus/token && \
         exec /bin/prometheus \
              --config.file=/etc/prometheus/prometheus.yml \

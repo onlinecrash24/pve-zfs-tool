@@ -344,6 +344,35 @@ Anschließend:
 Die Provisioning-Dateien liegen unter `docker/prometheus/` und
 `docker/grafana/` — gerne kopieren und das Dashboard erweitern.
 
+#### Fehlersuche „No data" in Grafana
+
+Zeigen alle Panels „No data", erreichen die Metriken Prometheus nicht.
+Schritt für Schritt prüfen:
+
+1. **`.env` existiert und enthält einen nicht-leeren Token.** Bei
+   leerem Token startet der Prometheus-Container nicht mehr —
+   `docker compose logs prometheus` ansehen. Der `/metrics`-Endpoint
+   des zfs-tool-Containers liefert ohne Token ebenfalls 404.
+2. **Container nach Änderung der `.env` neu erzeugen.** Compose liest
+   die `.env` nur beim Anlegen; ein einfaches `restart` übernimmt
+   den alten leeren Wert nicht. Stattdessen
+   `docker compose --profile monitoring up -d --force-recreate`.
+3. **Scrape aus dem Container heraus testen**, um Token + Metriken zu
+   verifizieren:
+   ```bash
+   docker compose exec prometheus wget -qO- \
+     --header="Authorization: Bearer $(cat /etc/prometheus/token)" \
+     http://zfs-tool:5000/metrics | head
+   ```
+   Erwartet: `pvezfs_*`-Zeilen. 401 = Token-Mismatch; leerer Body
+   oder 404 = im zfs-tool-Container fehlt die Env-Variable.
+4. **Prometheus-Targets-Seite** unter <http://DOCKER-HOST:9090/targets>
+   — der Job `pvezfs` muss `UP` sein. Steht da `down`, sagt die
+   Fehlerspalte, ob DNS-, Verbindungs- oder Auth-Problem.
+5. **Mindestens einen Host im pve-zfs-tool angelegen.** Ohne Host hat
+   der Sampler nichts zu erfassen; die Metriken bleiben leer, obwohl
+   der Endpoint läuft.
+
 ## Konfiguration
 
 ### Umgebungsvariablen
