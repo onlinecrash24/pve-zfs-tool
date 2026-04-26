@@ -1514,6 +1514,20 @@ def api_replication_target_candidates():
     return jsonify(list_auto_snap_disabled(host))
 
 
+@app.route("/api/replication/health")
+@login_required
+def api_replication_health():
+    """Aggregated health view across every replication pair on every host.
+
+    On-demand (no cache) so the UI dashboard sees the latest state. The
+    sampler thread runs the same checks every 15 min in the background and
+    fires notifications on transitions; this endpoint is the same code path
+    minus the throttling.
+    """
+    from app.replication_monitor import health_snapshot
+    return jsonify(health_snapshot())
+
+
 @app.route("/api/replication/configs")
 @login_required
 def api_replication_configs():

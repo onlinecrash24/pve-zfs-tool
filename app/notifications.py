@@ -62,6 +62,7 @@ DEFAULT_CONFIG = {
         "host_offline": True,
         "auto_snapshot": True,
         "ai_report": True,
+        "replication_lag": True,
     },
 }
 

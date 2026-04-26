@@ -186,6 +186,15 @@ def _sample_and_monitor(host):
 
     # Run the state-change detectors (never raises)
     run_checks(host, pools, reachable, pools_status=pools_status)
+
+    # Replication health probe — also state-change driven, swallows its own
+    # errors so a misconfigured pair can't break the metrics loop.
+    if reachable:
+        try:
+            from app.replication_monitor import run_checks_for_host as _repl_checks
+            _repl_checks(host)
+        except Exception as e:
+            log.warning("repl_monitor: failed for %s: %s", host.get("address"), e)
     return n
 
 

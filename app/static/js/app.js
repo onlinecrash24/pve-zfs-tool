@@ -2718,11 +2718,63 @@ async function viewReplication() {
             return;
         }
 
+        // Layer the per-pair health snapshot on top of the configs list.
+        // Health is loaded in parallel; if it fails (e.g. no SSH), the table
+        // still renders with "unknown" status badges instead of nothing.
+        let healthByKey = {};
+        let summary = null;
+        try {
+            const hr = await API.get("/api/replication/health");
+            summary = hr.summary;
+            (hr.pairs || []).forEach(p => {
+                const k = (p.host_address || "") + "::" + (p.config_path || "");
+                healthByKey[k] = p;
+            });
+        } catch (_) { /* keep going without health */ }
+
+        const fmtAge = (sec) => {
+            if (sec == null) return "—";
+            if (sec < 90) return Math.round(sec) + " s";
+            if (sec < 5400) return Math.round(sec / 60) + " min";
+            if (sec < 172800) return Math.round(sec / 3600) + " h";
+            return Math.round(sec / 86400) + " d";
+        };
+        const fmtAbs = (ts) => {
+            if (!ts) return "—";
+            const d = new Date(ts * 1000);
+            return d.toLocaleString();
+        };
+        const statusClass = (s) => ({
+            ok: "badge-success",
+            warn: "badge-warning",
+            crit: "badge-danger",
+            pending: "badge-secondary",
+            no_schedule: "badge-secondary",
+        }[s] || "badge-secondary");
+
+        // Top summary banner (hidden if everything is fine)
+        pairsBody.innerHTML = "";
+        if (summary) {
+            const row = h("div", { style: "display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:13px" });
+            const mkPill = (label, n, cls) =>
+                h("span", { className: "badge " + cls, style: "padding:4px 10px" },
+                  label + ": " + (n || 0));
+            row.appendChild(mkPill(t("repl_health_ok"),    summary.ok,    "badge-success"));
+            row.appendChild(mkPill(t("repl_health_warn"),  summary.warn,  "badge-warning"));
+            row.appendChild(mkPill(t("repl_health_crit"),  summary.crit,  "badge-danger"));
+            if (summary.pending)     row.appendChild(mkPill(t("repl_health_pending"),     summary.pending,     "badge-secondary"));
+            if (summary.no_schedule) row.appendChild(mkPill(t("repl_health_no_schedule"), summary.no_schedule, "badge-secondary"));
+            pairsBody.appendChild(row);
+        }
+
         const tbl = h("table", { className: "data-table", style: "margin:0;font-size:13px;width:100%" });
         tbl.appendChild(h("thead", {}, h("tr", {}, [
+            h("th", { style: "width:90px" }, t("repl_pairs_status")),
             h("th", {}, t("repl_pairs_source")),
             h("th", {}, t("repl_pairs_target_host")),
             h("th", {}, t("repl_pairs_target_ds")),
+            h("th", { style: "width:140px" }, t("repl_pairs_last_sync")),
+            h("th", { style: "width:90px;text-align:right" }, t("repl_pairs_lag")),
             h("th", {}, t("repl_pairs_path")),
             h("th", { style: "width:200px;text-align:right" }, ""),
         ])));
@@ -2732,30 +2784,38 @@ async function viewReplication() {
             const openBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("repl_pairs_open"));
             const delBtn  = h("button", { className: "btn btn-sm btn-danger" }, t("repl_pairs_delete"));
             openBtn.onclick = () => {
-                // Locate matching source host in our hosts list (by address) and
-                // pre-select dropdowns so renderAll() loads this pair into the wizard.
                 const srcHst = hosts.find(x => x.address === sourceAddr);
-                if (!srcHst) {
-                    toast(t("repl_pairs_source_unknown"), "error");
-                    return;
-                }
+                if (!srcHst) { toast(t("repl_pairs_source_unknown"), "error"); return; }
                 sourceSel.value = srcHst.address;
                 targetSel.value = p.targetHost.address;
                 renderAll();
-                // scroll the wizard into view
                 setTimeout(() => selCard.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
             };
             delBtn.onclick = () => openDeletePairModal(p);
+
+            const key = (p.targetHost.address || "") + "::" + (p.path || "");
+            const hp = healthByKey[key];
+            const status = hp ? hp.status : "pending";
+            const lagSec = hp ? hp.lag_seconds : null;
+            const lastTs = hp ? hp.last_sync_ts : null;
+            const statusBadge = h("span", {
+                className: "badge " + statusClass(status),
+                title: hp && hp.schedule ? "cron: " + hp.schedule : "",
+                style: "min-width:60px;display:inline-block;text-align:center"
+            }, t("repl_status_" + status) || status.toUpperCase());
+
             tb.appendChild(h("tr", {}, [
+                h("td", {}, statusBadge),
                 h("td", { style: "font-family:monospace;font-size:12px" }, p.source || "—"),
                 h("td", {}, (p.targetHost.name || p.targetHost.address)),
                 h("td", { style: "font-family:monospace;font-size:12px" }, p.target || "—"),
+                h("td", { style: "font-size:12px" }, fmtAbs(lastTs)),
+                h("td", { style: "text-align:right;font-family:monospace;font-size:12px" }, fmtAge(lagSec)),
                 h("td", { style: "font-family:monospace;font-size:11px;color:var(--text-secondary)" }, p.path || ""),
                 h("td", { style: "text-align:right" }, [openBtn, delBtn]),
             ]));
         });
         tbl.appendChild(tb);
-        pairsBody.innerHTML = "";
         pairsBody.appendChild(tbl);
     }
 
