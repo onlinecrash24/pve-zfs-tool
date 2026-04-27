@@ -3,10 +3,16 @@ name: Build & Publish Docker Image
 on:
   push:
     branches:
-      - main
       - dev               # Dev-Branch: baut Image mit :dev Tag zum Testen
     tags:
-      - "v*"               # Jeder Tag mit v-Prefix triggert Release-Build (v0.9.5, v1.0.0, etc.)
+      - "v*"               # Release-Build: ein Image, alle Release-Tags
+                           # (:latest + :X.Y.Z + :X.Y + :sha-xxxxxxx)
+                           # Reine main-Pushes ohne Tag triggern KEINEN
+                           # Build mehr -- der nächste Tag-Push baut das
+                           # Release-Image; das vermeidet die früher
+                           # entstandenen Doppel-Images, bei denen
+                           # :latest und :0.9.X auf unterschiedliche
+                           # digests zeigten.
   pull_request:
     branches:
       - main              # Bei PRs nur bauen, nicht pushen
@@ -48,14 +54,16 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Bei Push auf main → :latest
-            type=raw,value=latest,enable={{is_default_branch}}
             # Bei Push auf dev → :dev
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
-            # Bei Tags wie v1.2.3 → :1.2.3 und :1.2 und :1
+            # Bei Tag v1.2.3:
+            #   :latest        (zeigt auf den selben digest wie die anderen)
+            #   :1.2.3 + :1.2  (semver)
+            #   :sha-abc1234   (Commit-SHA, immer)
+            # Alle vier Tags landen in einem einzigen Build → ein digest.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # Immer: kurzer Commit-SHA → :sha-abc1234
             type=sha,prefix=sha-,format=short
 
       # 5. Image bauen und pushen
