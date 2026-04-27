@@ -120,8 +120,11 @@ def set_security_headers(response):
 
 @app.before_request
 def check_auth():
-    # Allow login page, login API, and static files without auth
-    allowed = ("/login", "/api/login", "/static/")
+    # Allow login page, login API, and static files without auth.
+    # /metrics is its own auth path (Bearer token via PROMETHEUS_TOKEN);
+    # the Prometheus exporter must NOT be redirected to the HTML login
+    # page or the scrape silently breaks with "unsupported Content-Type".
+    allowed = ("/login", "/api/login", "/static/", "/metrics")
     if any(request.path.startswith(p) for p in allowed):
         return
     if not session.get("authenticated"):
@@ -1512,6 +1515,93 @@ def api_replication_target_candidates():
     if err:
         return jsonify(err), code
     return jsonify(list_auto_snap_disabled(host))
+
+
+@app.route("/api/replication/health")
+@login_required
+def api_replication_health():
+    """Aggregated health view across every replication pair on every host.
+
+    On-demand (no cache) so the UI dashboard sees the latest state. The
+    sampler thread runs the same checks every 15 min in the background and
+    fires notifications on transitions; this endpoint is the same code path
+    minus the throttling.
+    """
+    from app.replication_monitor import health_snapshot
+    return jsonify(health_snapshot())
+
+
+@app.route("/api/dr/replicas")
+@login_required
+def api_dr_replicas():
+    """List every known replica pair across all registered hosts.
+    Powers the first card in the Disaster Recovery view."""
+    from app.dr import list_replica_pairs
+    return jsonify(list_replica_pairs())
+
+
+@app.route("/api/dr/datasets")
+@login_required
+def api_dr_datasets():
+    """List replicated child datasets under a replica root on a target host."""
+    from app.dr import list_replica_datasets
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    root = (request.args.get("root") or "").strip()
+    if not root:
+        return jsonify({"error": "root required"}), 400
+    return jsonify(list_replica_datasets(host, root))
+
+
+@app.route("/api/dr/snapshots")
+@login_required
+def api_dr_snapshots():
+    """List snapshots available for one replica dataset."""
+    from app.dr import list_replica_snapshots
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    ds = (request.args.get("dataset") or "").strip()
+    if not ds:
+        return jsonify({"error": "dataset required"}), 400
+    return jsonify(list_replica_snapshots(host, ds))
+
+
+@app.route("/api/dr/reverse-sync", methods=["POST"])
+@login_required
+def api_dr_reverse_sync():
+    """Send a replica dataset back to a (rebuilt) source host.
+
+    Returns a task id immediately; the client polls
+    /api/replication/task?id=... for completion (the same registry is
+    shared across all long-running operations).
+    """
+    from app.dr import reverse_sync_async
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    try:
+        task_id = reverse_sync_async(
+            target_host=host,
+            replica_dataset=(data.get("replica_dataset") or "").strip(),
+            replica_root=(data.get("replica_root") or "").strip(),
+            source_address=(data.get("source_address") or "").strip(),
+            source_port=int(data.get("source_port") or 22),
+            source_user=(data.get("source_user") or "root").strip(),
+            source_dataset=(data.get("source_dataset") or None),
+            snapshot=(data.get("snapshot") or None),
+            force=bool(data.get("force")),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    audit_log("dr.reverse_sync", target=data.get("replica_dataset"),
+              host=host["address"], success=True,
+              details={"task_id": task_id,
+                       "source_address": data.get("source_address"),
+                       "force": bool(data.get("force"))})
+    return jsonify({"success": True, "task_id": task_id})
 
 
 @app.route("/api/replication/configs")

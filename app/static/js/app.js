@@ -144,6 +144,7 @@ async function renderView() {
         snapshots: viewSnapshots,
         "snapshot-check": viewSnapshotCheck,
         replication: viewReplication,
+        dr: viewDR,
         guests: viewGuests,
         health: viewHealth,
         metrics: viewMetrics,
@@ -154,6 +155,38 @@ async function renderView() {
     const fn = map[currentView] || viewHome;
     await fn();
 }
+
+// Poll a long-running replication-style task. Used by the replication
+// view, the DR view (reverse-sync) and any future async flow that
+// publishes via app/tasks.py. Calls onTick(rec) on every progress
+// update, onDone(rec) on completion, onError(msg) on failure / timeout.
+// Polling backs off from 2s → 5s after the first minute so a multi-hour
+// first-sync doesn't hammer the server.
+function pollReplicationTask(taskId, { onTick, onDone, onError, maxSeconds = 8 * 3600 } = {}) {
+    const started = Date.now();
+    let interval = 2000;
+    let lastProgress = "";
+    const tick = async () => {
+        try {
+            const rec = await API.get("/api/replication/task?id=" + encodeURIComponent(taskId));
+            if (rec.progress && rec.progress !== lastProgress) {
+                lastProgress = rec.progress;
+                if (onTick) onTick(rec);
+            }
+            if (rec.status === "done") { if (onDone) onDone(rec); return; }
+            if (rec.status === "error") { if (onError) onError(rec.error || "task error"); return; }
+            if ((Date.now() - started) > maxSeconds * 1000) {
+                if (onError) onError("task polling timed out"); return;
+            }
+            if ((Date.now() - started) > 60 * 1000) interval = 5000;
+            setTimeout(tick, interval);
+        } catch (e) {
+            if (onError) onError(e.message || "task poll failed");
+        }
+    };
+    tick();
+}
+
 
 // -- Home ------------------------------------------------------------------
 async function viewHome() {
@@ -2718,11 +2751,63 @@ async function viewReplication() {
             return;
         }
 
+        // Layer the per-pair health snapshot on top of the configs list.
+        // Health is loaded in parallel; if it fails (e.g. no SSH), the table
+        // still renders with "unknown" status badges instead of nothing.
+        let healthByKey = {};
+        let summary = null;
+        try {
+            const hr = await API.get("/api/replication/health");
+            summary = hr.summary;
+            (hr.pairs || []).forEach(p => {
+                const k = (p.host_address || "") + "::" + (p.config_path || "");
+                healthByKey[k] = p;
+            });
+        } catch (_) { /* keep going without health */ }
+
+        const fmtAge = (sec) => {
+            if (sec == null) return "—";
+            if (sec < 90) return Math.round(sec) + " s";
+            if (sec < 5400) return Math.round(sec / 60) + " min";
+            if (sec < 172800) return Math.round(sec / 3600) + " h";
+            return Math.round(sec / 86400) + " d";
+        };
+        const fmtAbs = (ts) => {
+            if (!ts) return "—";
+            const d = new Date(ts * 1000);
+            return d.toLocaleString();
+        };
+        const statusClass = (s) => ({
+            ok: "badge-success",
+            warn: "badge-warning",
+            crit: "badge-danger",
+            pending: "badge-secondary",
+            no_schedule: "badge-secondary",
+        }[s] || "badge-secondary");
+
+        // Top summary banner (hidden if everything is fine)
+        pairsBody.innerHTML = "";
+        if (summary) {
+            const row = h("div", { style: "display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:13px" });
+            const mkPill = (label, n, cls) =>
+                h("span", { className: "badge " + cls, style: "padding:4px 10px" },
+                  label + ": " + (n || 0));
+            row.appendChild(mkPill(t("repl_health_ok"),    summary.ok,    "badge-success"));
+            row.appendChild(mkPill(t("repl_health_warn"),  summary.warn,  "badge-warning"));
+            row.appendChild(mkPill(t("repl_health_crit"),  summary.crit,  "badge-danger"));
+            if (summary.pending)     row.appendChild(mkPill(t("repl_health_pending"),     summary.pending,     "badge-secondary"));
+            if (summary.no_schedule) row.appendChild(mkPill(t("repl_health_no_schedule"), summary.no_schedule, "badge-secondary"));
+            pairsBody.appendChild(row);
+        }
+
         const tbl = h("table", { className: "data-table", style: "margin:0;font-size:13px;width:100%" });
         tbl.appendChild(h("thead", {}, h("tr", {}, [
+            h("th", { style: "width:90px" }, t("repl_pairs_status")),
             h("th", {}, t("repl_pairs_source")),
             h("th", {}, t("repl_pairs_target_host")),
             h("th", {}, t("repl_pairs_target_ds")),
+            h("th", { style: "width:140px" }, t("repl_pairs_last_sync")),
+            h("th", { style: "width:90px;text-align:right" }, t("repl_pairs_lag")),
             h("th", {}, t("repl_pairs_path")),
             h("th", { style: "width:200px;text-align:right" }, ""),
         ])));
@@ -2732,30 +2817,38 @@ async function viewReplication() {
             const openBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("repl_pairs_open"));
             const delBtn  = h("button", { className: "btn btn-sm btn-danger" }, t("repl_pairs_delete"));
             openBtn.onclick = () => {
-                // Locate matching source host in our hosts list (by address) and
-                // pre-select dropdowns so renderAll() loads this pair into the wizard.
                 const srcHst = hosts.find(x => x.address === sourceAddr);
-                if (!srcHst) {
-                    toast(t("repl_pairs_source_unknown"), "error");
-                    return;
-                }
+                if (!srcHst) { toast(t("repl_pairs_source_unknown"), "error"); return; }
                 sourceSel.value = srcHst.address;
                 targetSel.value = p.targetHost.address;
                 renderAll();
-                // scroll the wizard into view
                 setTimeout(() => selCard.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
             };
             delBtn.onclick = () => openDeletePairModal(p);
+
+            const key = (p.targetHost.address || "") + "::" + (p.path || "");
+            const hp = healthByKey[key];
+            const status = hp ? hp.status : "pending";
+            const lagSec = hp ? hp.lag_seconds : null;
+            const lastTs = hp ? hp.last_sync_ts : null;
+            const statusBadge = h("span", {
+                className: "badge " + statusClass(status),
+                title: hp && hp.schedule ? "cron: " + hp.schedule : "",
+                style: "min-width:60px;display:inline-block;text-align:center"
+            }, t("repl_status_" + status) || status.toUpperCase());
+
             tb.appendChild(h("tr", {}, [
+                h("td", {}, statusBadge),
                 h("td", { style: "font-family:monospace;font-size:12px" }, p.source || "—"),
                 h("td", {}, (p.targetHost.name || p.targetHost.address)),
                 h("td", { style: "font-family:monospace;font-size:12px" }, p.target || "—"),
+                h("td", { style: "font-size:12px" }, fmtAbs(lastTs)),
+                h("td", { style: "text-align:right;font-family:monospace;font-size:12px" }, fmtAge(lagSec)),
                 h("td", { style: "font-family:monospace;font-size:11px;color:var(--text-secondary)" }, p.path || ""),
                 h("td", { style: "text-align:right" }, [openBtn, delBtn]),
             ]));
         });
         tbl.appendChild(tb);
-        pairsBody.innerHTML = "";
         pairsBody.appendChild(tbl);
     }
 
@@ -2875,34 +2968,9 @@ async function viewReplication() {
 
     pairsRefreshBtn.onclick = refreshPairs;
 
-    // Poll a long-running replication task. Calls onTick() on every update,
-    // onDone(record) when it finishes successfully, onError(msg) on failure
-    // or timeout. Polling backs off from 2s → 5s after the first minute so
-    // a multi-hour first-sync doesn't hammer the server.
-    function pollReplicationTask(taskId, { onTick, onDone, onError, maxSeconds = 8 * 3600 } = {}) {
-        const started = Date.now();
-        let interval = 2000;
-        let lastProgress = "";
-        const tick = async () => {
-            try {
-                const rec = await API.get("/api/replication/task?id=" + encodeURIComponent(taskId));
-                if (rec.progress && rec.progress !== lastProgress) {
-                    lastProgress = rec.progress;
-                    if (onTick) onTick(rec);
-                }
-                if (rec.status === "done") { if (onDone) onDone(rec); return; }
-                if (rec.status === "error") { if (onError) onError(rec.error || "task error"); return; }
-                if ((Date.now() - started) > maxSeconds * 1000) {
-                    if (onError) onError("task polling timed out"); return;
-                }
-                if ((Date.now() - started) > 60 * 1000) interval = 5000;
-                setTimeout(tick, interval);
-            } catch (e) {
-                if (onError) onError(e.message || "task poll failed");
-            }
-        };
-        tick();
-    }
+    // pollReplicationTask is defined globally near the top of the file —
+    // the DR view (reverse-sync) reuses it, so it lives outside this
+    // closure now.
 
     // -- Step 1: Source + Target host selection ----------------------------
     const selCard = h("div", { className: "card" });
@@ -3672,6 +3740,299 @@ async function viewReplication() {
         }
         refreshBtn.onclick = refreshLog;
         refreshLog();
+    }
+}
+
+
+// -- Disaster Recovery -----------------------------------------------------
+//
+// Single-purpose view: send a replica back to a (rebuilt) source host
+// via "zfs send -R | ssh source zfs recv". File-level browsing of a
+// replica snapshot is intentionally left out -- the existing Snapshots
+// view can mount and browse any snapshot, including replica ones, so
+// duplicating that here would only fragment the UX.
+//
+async function viewDR() {
+    setContent(loading());
+    let pairs, hosts;
+    try {
+        [pairs, hosts] = await Promise.all([
+            API.get("/api/dr/replicas"),
+            API.get("/api/hosts"),
+        ]);
+    } catch (e) {
+        setContent(h("p", { className: "muted" }, e.message || "Failed to load")); return;
+    }
+    const allPairs = pairs.pairs || [];
+
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("dr_title")),
+        h("p", {}, t("dr_subtitle")),
+    ]));
+
+    if (!allPairs.length) {
+        container.appendChild(h("div", { className: "card" },
+            h("div", { className: "card-body" }, t("dr_no_replicas"))));
+        setContent(container); return;
+    }
+
+    // -- Card 1: pick a replica pair -------------------------------------
+    const pickCard = h("div", { className: "card" });
+    pickCard.appendChild(h("div", { className: "card-header" }, "1. " + t("dr_pick_replica")));
+    const pickBody = h("div", { className: "card-body" });
+    pickCard.appendChild(pickBody);
+    container.appendChild(pickCard);
+
+    const pairSel = h("select", { className: "form-input", style: "width:100%" }, [
+        h("option", { value: "" }, "— " + t("repl_choose") + " —"),
+        ...allPairs.map((p, i) => {
+            const label = (p.host_name || p.host_address) +
+                          ":" + p.target +
+                          " ⇐ " + p.source;
+            return h("option", { value: String(i) }, label);
+        }),
+    ]);
+    pickBody.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_pick_replica_label")));
+    pickBody.appendChild(pairSel);
+    pickBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-top:8px" }, t("dr_pick_replica_hint")));
+
+    // Mount point for the per-replica content
+    const flowMount = h("div");
+    container.appendChild(flowMount);
+
+    setContent(container);
+
+    pairSel.onchange = () => renderForPair();
+
+    async function renderForPair() {
+        flowMount.innerHTML = "";
+        const idx = parseInt(pairSel.value);
+        if (isNaN(idx)) return;
+        const pair = allPairs[idx];
+
+        // Resolve target + source host objects from the hosts list. The
+        // target is identified by address (always known); the source is
+        // looked up by extracted IP if present in hosts, else falls back
+        // to a stub built from the config's source field.
+        const targetHost = hosts.find(h => h.address === pair.host_address) ||
+                           { address: pair.host_address, name: pair.host_name };
+        const srcIp = pair.source_ip;
+        const sourceHost = hosts.find(h => h.address === srcIp);
+
+        // Load the replica subtree datasets
+        flowMount.innerHTML = loading();
+        let dsResp;
+        try {
+            dsResp = await API.get("/api/dr/datasets?host=" + encodeURIComponent(pair.host_address) +
+                                   "&root=" + encodeURIComponent(pair.target));
+        } catch (e) {
+            flowMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "")}</p>`; return;
+        }
+        flowMount.innerHTML = "";
+        if (dsResp.error) {
+            flowMount.appendChild(h("p", { className: "muted" }, dsResp.error)); return;
+        }
+        const datasets = dsResp.datasets || [];
+
+        // -- Card 2: pick replicated dataset ----------------------------
+        const actCard = h("div", { className: "card", style: "margin-top:16px" });
+        actCard.appendChild(h("div", { className: "card-header" }, "2. " + t("dr_dataset")));
+        const actBody = h("div", { className: "card-body" });
+        actCard.appendChild(actBody);
+        flowMount.appendChild(actCard);
+
+        const dsSel = h("select", { className: "form-input", style: "width:100%" }, [
+            h("option", { value: "" }, "— " + t("repl_choose") + " —"),
+            ...datasets.map(d => h("option", { value: d.name },
+                d.name + "  (" + d.type + ", " + d.used + ")")),
+        ]);
+        actBody.appendChild(dsSel);
+        actBody.appendChild(h("p", { style: "font-size:11px;color:var(--text-secondary);margin-top:6px" }, t("dr_dataset_hint")));
+
+        // Mount point for the reverse-sync card (re-rendered when dataset changes)
+        const reverseMount = h("div");
+        flowMount.appendChild(reverseMount);
+
+        dsSel.onchange = () => {
+            reverseMount.innerHTML = "";
+            if (dsSel.value) renderReverse();
+        };
+
+        function renderReverse() {
+            const ds = dsSel.value;
+            if (!ds) { toast(t("dr_pick_dataset_first"), "warning"); return; }
+
+            const card = h("div", { className: "card", style: "margin-top:16px" });
+            card.appendChild(h("div", { className: "card-header" }, "3. " + t("dr_reverse_title")));
+            // (action picker was removed -- reverse-sync is the only DR
+            // flow now; file browsing happens via the Snapshots view.)
+            const body = h("div", { className: "card-body" });
+            card.appendChild(body);
+            reverseMount.appendChild(card);
+
+            body.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:10px" },
+                t("dr_reverse_intro").replace("{ds}", ds)));
+
+            // Default source dataset = strip replica root
+            const defaultSrcDs = ds.startsWith(pair.target + "/")
+                ? ds.substring(pair.target.length + 1) : "";
+
+            const grid = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px" });
+            // Source target host dropdown — pre-fill with the original
+            // source IP, but allow changing (rebuilt host might have a
+            // different address).
+            const srcHostSel = h("select", { className: "form-input" }, [
+                h("option", { value: "__custom__" }, t("dr_reverse_custom_target") + " …"),
+                ...hosts.map(h2 => h("option", { value: h2.address },
+                    (h2.name || h2.address) + " (" + h2.address + ")")),
+            ]);
+            if (sourceHost) srcHostSel.value = sourceHost.address;
+            else srcHostSel.value = "__custom__";
+
+            const customAddr = h("input", { type: "text", className: "form-input", placeholder: srcIp || "192.0.2.1", value: srcIp || "" });
+            const customPort = h("input", { type: "number", className: "form-input", placeholder: "22", value: "22", style: "max-width:100px" });
+            const customUser = h("input", { type: "text", className: "form-input", placeholder: "root", value: "root", style: "max-width:120px" });
+
+            const customRow = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+                customAddr, customPort, customUser,
+            ]);
+            customRow.style.display = srcHostSel.value === "__custom__" ? "flex" : "none";
+
+            srcHostSel.onchange = () => {
+                customRow.style.display = srcHostSel.value === "__custom__" ? "flex" : "none";
+            };
+
+            const dsInput = h("input", { type: "text", className: "form-input",
+                value: defaultSrcDs, placeholder: defaultSrcDs || "rpool/data/subvol-..." });
+
+            grid.appendChild(h("div", {}, [
+                h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_reverse_target_host")),
+                srcHostSel,
+                h("div", { style: "margin-top:6px" }, customRow),
+            ]));
+            grid.appendChild(h("div", {}, [
+                h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_reverse_target_dataset")),
+                dsInput,
+                h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("dr_reverse_target_dataset_hint")),
+            ]));
+            body.appendChild(grid);
+
+            // Snapshot picker (default: newest)
+            const snapRow = h("div", { style: "margin-top:12px" });
+            snapRow.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_reverse_snapshot")));
+            const revSnapSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+            snapRow.appendChild(revSnapSel);
+            snapRow.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("dr_reverse_snapshot_hint")));
+            body.appendChild(snapRow);
+
+            (async () => {
+                try {
+                    const sr = await API.get("/api/dr/snapshots?host=" + encodeURIComponent(pair.host_address) +
+                                             "&dataset=" + encodeURIComponent(ds));
+                    const snaps = sr.snapshots || [];
+                    revSnapSel.innerHTML = "";
+                    revSnapSel.appendChild(h("option", { value: "" }, t("dr_reverse_newest_default")));
+                    snaps.forEach(s => {
+                        const dt = new Date(s.creation_ts * 1000).toLocaleString();
+                        revSnapSel.appendChild(h("option", { value: s.name.split("@")[1] }, s.name.split("@")[1] + "  ·  " + dt));
+                    });
+                } catch (e) {
+                    revSnapSel.innerHTML = "";
+                    revSnapSel.appendChild(h("option", { value: "" }, e.message || ""));
+                }
+            })();
+
+            // Force checkbox (zfs recv -F)
+            const forceCb = h("input", { type: "checkbox" });
+            const forceLabel = h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;cursor:pointer;margin-top:12px" }, [
+                forceCb,
+                h("div", {}, [
+                    h("div", { style: "font-weight:600;color:var(--danger)" }, t("dr_reverse_force_label")),
+                    h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" }, t("dr_reverse_force_hint")),
+                ]),
+            ]);
+            body.appendChild(forceLabel);
+
+            const runBtn = h("button", { className: "btn btn-warning", style: "margin-top:12px" }, t("dr_reverse_start"));
+            const statusBlock = h("div", { style: "margin-top:12px" });
+            body.appendChild(runBtn);
+            body.appendChild(statusBlock);
+
+            runBtn.onclick = async () => {
+                const useCustom = srcHostSel.value === "__custom__";
+                const srcAddr = useCustom ? customAddr.value.trim() : srcHostSel.value;
+                const srcPort = useCustom ? parseInt(customPort.value) || 22
+                              : (hosts.find(h2 => h2.address === srcHostSel.value) || {}).port || 22;
+                const srcUser = useCustom ? customUser.value.trim()
+                              : (hosts.find(h2 => h2.address === srcHostSel.value) || {}).user || "root";
+                const srcDs = dsInput.value.trim();
+                if (!srcAddr || !srcDs) { toast(t("dr_reverse_missing"), "error"); return; }
+
+                const force = forceCb.checked;
+                const phrase = t("dr_reverse_confirm")
+                    .replace("{snap}", revSnapSel.value || t("dr_reverse_newest"))
+                    .replace("{src}", ds)
+                    .replace("{dst}", srcUser + "@" + srcAddr + ":" + srcDs)
+                    + (force ? "\n\n" + t("dr_reverse_force_warn").replace("{ds}", srcDs) : "");
+                if (!confirm(phrase)) return;
+
+                runBtn.disabled = true;
+                statusBlock.innerHTML = "";
+                statusBlock.appendChild(h("p", { className: "muted" }, t("dr_reverse_starting")));
+
+                let kickoff;
+                try {
+                    kickoff = await API.post("/api/dr/reverse-sync?host=" + encodeURIComponent(pair.host_address), {
+                        replica_dataset: ds,
+                        replica_root: pair.target,
+                        source_address: srcAddr,
+                        source_port: srcPort,
+                        source_user: srcUser,
+                        source_dataset: srcDs,
+                        snapshot: revSnapSel.value || null,
+                        force: force,
+                    });
+                } catch (e) {
+                    statusBlock.innerHTML = "";
+                    statusBlock.appendChild(h("p", { className: "muted" }, e.message || ""));
+                    runBtn.disabled = false; return;
+                }
+                if (!kickoff || !kickoff.task_id) {
+                    statusBlock.innerHTML = "";
+                    statusBlock.appendChild(h("p", { className: "muted" }, kickoff.error || "no task id"));
+                    runBtn.disabled = false; return;
+                }
+                toast(t("dr_reverse_running_bg"), "info");
+
+                statusBlock.innerHTML = "";
+                const progressP = h("p", { className: "muted", style: "font-family:monospace;font-size:12px" }, "…");
+                statusBlock.appendChild(progressP);
+
+                // Reuse the replication task poller (same registry)
+                pollReplicationTask(kickoff.task_id, {
+                    onTick: (rec) => {
+                        progressP.textContent = rec.progress || "…";
+                    },
+                    onDone: (rec) => {
+                        const res = rec.result || {};
+                        progressP.textContent = "";
+                        if (res.success) {
+                            toast(t("dr_reverse_ok"), "success");
+                            statusBlock.appendChild(h("p", {}, "✅ " + t("dr_reverse_ok")));
+                        } else {
+                            const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
+                            openModal(t("dr_reverse_failed"), `<p>${escapeHtml(t("dr_reverse_failed_intro"))} (exit=${escapeHtml(String(res.exit_code))})</p>${tail}`);
+                        }
+                        runBtn.disabled = false;
+                    },
+                    onError: (msg) => {
+                        toast(msg || t("failed"), "error");
+                        runBtn.disabled = false;
+                    },
+                });
+            };
+        }
     }
 }
 
