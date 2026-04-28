@@ -640,8 +640,12 @@ def generate_report(host_address=None, lang_override=None):
 
     _add_report(report)
 
-    # Send via notification channels if enabled
+    # Send via notification channels if enabled. The result is bubbled up
+    # in the response so the UI / scheduler log can show "ok / skipped /
+    # failed" per channel -- previously every dispatch outcome was hidden.
+    notify_summary: Dict[str, Any] = {"enabled": False, "results": {}, "skipped_reason": None}
     if config.get("notify_on_report"):
+        notify_summary["enabled"] = True
         try:
             from app.notifications import send_notification
             content_text = result.get("content", "")
@@ -650,9 +654,15 @@ def generate_report(host_address=None, lang_override=None):
             if len(content_text) > 4000:
                 report_text += "\n\n... (truncated)"
             title = "KI-Bericht" if lang == "de" else "AI Report"
+            # For combined reports the host list can balloon to dozens of
+            # entries. Keep it compact in the subject line: "all hosts (N)".
             host_tag = ""
             if host_names:
-                host_tag = f" ({', '.join(host_names)})"
+                if len(host_names) <= 2:
+                    host_tag = f" ({', '.join(host_names)})"
+                else:
+                    label = "alle Hosts" if lang == "de" else "all hosts"
+                    host_tag = f" ({label}, {len(host_names)})"
 
             # Build PDF attachment if enabled
             pdf_attachment = None
@@ -669,17 +679,38 @@ def generate_report(host_address=None, lang_override=None):
                 except Exception as e:
                     log.warning("PDF generation for notification failed: %s", e)
 
-            send_notification(
+            log.info(
+                "ai_report: dispatching notification (hosts=%d, lang=%s, pdf=%s)",
+                len(host_names or []), lang, bool(pdf_attachment),
+            )
+            results = send_notification(
                 "ai_report",
                 f"{title}{host_tag}",
                 f"Provider: {provider} ({model})\n\n{report_text}",
                 pdf_attachment=pdf_attachment,
                 lang=lang,
             )
+            # send_notification returns either {"skipped": True, ...} when
+            # the event is disabled, or {channel: result_dict} per active
+            # channel. Normalise that into a flat summary.
+            if isinstance(results, dict) and results.get("skipped"):
+                notify_summary["skipped_reason"] = results.get("reason")
+            else:
+                for ch, res in (results or {}).items():
+                    ok = bool(res and res.get("success"))
+                    notify_summary["results"][ch] = {
+                        "success": ok,
+                        "detail": (res or {}).get("detail")
+                                 if not ok else None,
+                    }
+            log.info("ai_report: notification summary: %s", notify_summary)
         except Exception as e:
             log.warning("Failed to send report notification: %s", e)
+            notify_summary["error"] = str(e)
+    else:
+        notify_summary["skipped_reason"] = "notify_on_report disabled"
 
-    return {"success": True, "report": report}
+    return {"success": True, "report": report, "notify": notify_summary}
 
 
 def generate_report_async(host_address=None, lang_override=None):
@@ -854,15 +885,38 @@ def _scheduler_loop():
 
                 if should_run:
                     log.info(
-                        "Scheduled AI report triggered for %s (key=%s, hour=%s)",
-                        entry["label"], run_key, target_hour,
+                        "Scheduled AI report triggered for %s (key=%s, hour=%s, host=%s)",
+                        entry["label"], run_key, target_hour, entry["host"] or "<all>",
                     )
                     _last_run_keys[entry["key"]] = run_key
                     # Mirror into legacy var for the "all hosts" entry
                     if entry["key"] == "__all__":
                         _last_run_key = run_key
                     try:
-                        generate_report(host_address=entry["host"])
+                        result = generate_report(host_address=entry["host"])
+                        if result.get("success"):
+                            n = result.get("notify", {})
+                            if n.get("enabled"):
+                                channels = list((n.get("results") or {}).keys())
+                                ok_channels = [c for c, r in (n.get("results") or {}).items()
+                                               if r.get("success")]
+                                log.info(
+                                    "Scheduled AI report for %s: report saved, "
+                                    "notification dispatched to %d/%d channel(s) (%s)",
+                                    entry["label"], len(ok_channels), len(channels),
+                                    ", ".join(channels) or "none",
+                                )
+                            else:
+                                log.info(
+                                    "Scheduled AI report for %s: report saved, "
+                                    "notifications skipped (%s)",
+                                    entry["label"], n.get("skipped_reason") or "disabled",
+                                )
+                        else:
+                            log.error(
+                                "Scheduled AI report for %s failed: %s",
+                                entry["label"], result.get("error", "unknown"),
+                            )
                     except Exception as e:
                         log.error("Scheduled report generation failed for %s: %s", entry["label"], e)
 

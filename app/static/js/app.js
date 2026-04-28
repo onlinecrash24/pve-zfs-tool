@@ -4529,11 +4529,11 @@ async function viewAI() {
     provCard.appendChild(provBody);
     container.appendChild(provCard);
 
-    // ---- Card 2: Schedule & Generate ----
-    const schedCard = h("div", { className: "card", style: "margin-top:16px" });
-    schedCard.appendChild(h("div", { className: "card-header" }, t("ai_schedule")));
-    const schedBody = h("div", { className: "card-body" });
-
+    // ---- Card 2a: Combined-report schedule (independent block) ----
+    // Lifted out of the per-host card into its own card so the user can
+    // see at a glance whether the all-hosts schedule is enabled --
+    // previously both fieldsets shared one card which led to users
+    // toggling the per-host one and assuming the combined one was on.
     const sched = config.schedule || {};
     const schedules = config.schedules || {};
     const hostSched = schedules[currentHost] || { enabled: false, interval: "daily", hour: 6, weekday: 0 };
@@ -4542,68 +4542,93 @@ async function viewAI() {
         `<option value="${i}" ${sel === i ? "selected" : ""}>${escapeHtml(d)}</option>`
     ).join("");
 
-    schedBody.innerHTML = `
+    const allSchedCard = h("div", { className: "card", style: "margin-top:16px" });
+    allSchedCard.appendChild(h("div", { className: "card-header" }, t("ai_schedule_all_hosts_card")));
+    const allSchedBody = h("div", { className: "card-body" });
+    allSchedBody.innerHTML = `
         <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">
-            ${escapeHtml(t("ai_schedule_note"))}
+            ${escapeHtml(t("ai_schedule_all_hosts_intro"))}
         </p>
-
-        <!-- Combined all-hosts schedule -->
-        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px">
-            <legend style="padding:0 8px;color:var(--accent);font-weight:600">${escapeHtml(t("ai_schedule_all_hosts"))}</legend>
-            <div class="grid grid-2" style="gap:14px">
-                <div style="grid-column:1/-1">
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                        <input type="checkbox" id="ai-sched-enabled" ${sched.enabled ? "checked" : ""}>
-                        ${escapeHtml(t("ai_schedule_enable"))}
-                    </label>
-                </div>
-                <div>
-                    <label>${escapeHtml(t("ai_schedule_interval"))}</label>
-                    <select id="ai-sched-interval" class="form-control" style="margin-top:4px">
-                        <option value="daily" ${sched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
-                        <option value="weekly" ${sched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
-                    </select>
-                </div>
-                <div>
-                    <label>${escapeHtml(t("ai_schedule_hour"))}</label>
-                    <input id="ai-sched-hour" class="form-control" type="number" min="0" max="23" value="${sched.hour ?? 6}" style="margin-top:4px">
-                </div>
-                <div id="ai-weekday-row" style="${sched.interval === "weekly" ? "" : "display:none"}">
-                    <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
-                    <select id="ai-sched-weekday" class="form-control" style="margin-top:4px">${mkWeekdayOpts(sched.weekday)}</select>
-                </div>
+        <div class="grid grid-2" style="gap:14px">
+            <div style="grid-column:1/-1">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="ai-sched-enabled" ${sched.enabled ? "checked" : ""}>
+                    <span><b>${escapeHtml(t("ai_schedule_enable"))}</b> &mdash; ${escapeHtml(t("ai_schedule_all_hosts_enable_hint"))}</span>
+                </label>
             </div>
-        </fieldset>
-
-        <!-- Per-host schedule -->
-        <fieldset style="border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px">
-            <legend style="padding:0 8px;color:var(--accent);font-weight:600">${escapeHtml(t("ai_schedule_this_host"))} &mdash; <code>${escapeHtml(currentHost || "?")}</code></legend>
-            <div class="grid grid-2" style="gap:14px">
-                <div style="grid-column:1/-1">
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                        <input type="checkbox" id="ai-hsched-enabled" ${hostSched.enabled ? "checked" : ""}>
-                        ${escapeHtml(t("ai_schedule_enable"))}
-                    </label>
-                </div>
-                <div>
-                    <label>${escapeHtml(t("ai_schedule_interval"))}</label>
-                    <select id="ai-hsched-interval" class="form-control" style="margin-top:4px">
-                        <option value="daily" ${hostSched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
-                        <option value="weekly" ${hostSched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
-                    </select>
-                </div>
-                <div>
-                    <label>${escapeHtml(t("ai_schedule_hour"))}</label>
-                    <input id="ai-hsched-hour" class="form-control" type="number" min="0" max="23" value="${hostSched.hour ?? 6}" style="margin-top:4px">
-                </div>
-                <div id="ai-hweekday-row" style="${hostSched.interval === "weekly" ? "" : "display:none"}">
-                    <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
-                    <select id="ai-hsched-weekday" class="form-control" style="margin-top:4px">${mkWeekdayOpts(hostSched.weekday)}</select>
-                </div>
+            <div>
+                <label>${escapeHtml(t("ai_schedule_interval"))}</label>
+                <select id="ai-sched-interval" class="form-control" style="margin-top:4px">
+                    <option value="daily" ${sched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
+                    <option value="weekly" ${sched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
+                </select>
             </div>
-        </fieldset>
+            <div>
+                <label>${escapeHtml(t("ai_schedule_hour"))}</label>
+                <input id="ai-sched-hour" class="form-control" type="number" min="0" max="23" value="${sched.hour ?? 6}" style="margin-top:4px">
+            </div>
+            <div id="ai-weekday-row" style="${sched.interval === "weekly" ? "" : "display:none"}">
+                <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
+                <select id="ai-sched-weekday" class="form-control" style="margin-top:4px">${mkWeekdayOpts(sched.weekday)}</select>
+            </div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-sm" id="ai-test-all">${escapeHtml(t("ai_schedule_test_all"))}</button>
+            <span id="ai-test-all-status" style="font-size:12px;color:var(--text-secondary)"></span>
+        </div>
+    `;
+    allSchedCard.appendChild(allSchedBody);
+    container.appendChild(allSchedCard);
 
-        <div style="margin-top:8px">
+    // ---- Card 2b: Per-host schedule ----
+    const hostSchedCard = h("div", { className: "card", style: "margin-top:16px" });
+    hostSchedCard.appendChild(h("div", { className: "card-header" },
+        t("ai_schedule_this_host_card") + " — " + (currentHost || "?")));
+    const hostSchedBody = h("div", { className: "card-body" });
+    hostSchedBody.innerHTML = `
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">
+            ${escapeHtml(t("ai_schedule_this_host_intro"))}
+        </p>
+        <div class="grid grid-2" style="gap:14px">
+            <div style="grid-column:1/-1">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="ai-hsched-enabled" ${hostSched.enabled ? "checked" : ""}>
+                    <span><b>${escapeHtml(t("ai_schedule_enable"))}</b> &mdash; ${escapeHtml(t("ai_schedule_this_host_enable_hint")).replace("{host}", escapeHtml(currentHost || "?"))}</span>
+                </label>
+            </div>
+            <div>
+                <label>${escapeHtml(t("ai_schedule_interval"))}</label>
+                <select id="ai-hsched-interval" class="form-control" style="margin-top:4px">
+                    <option value="daily" ${hostSched.interval === "daily" ? "selected" : ""}>${escapeHtml(t("ai_schedule_daily"))}</option>
+                    <option value="weekly" ${hostSched.interval === "weekly" ? "selected" : ""}>${escapeHtml(t("ai_schedule_weekly"))}</option>
+                </select>
+            </div>
+            <div>
+                <label>${escapeHtml(t("ai_schedule_hour"))}</label>
+                <input id="ai-hsched-hour" class="form-control" type="number" min="0" max="23" value="${hostSched.hour ?? 6}" style="margin-top:4px">
+            </div>
+            <div id="ai-hweekday-row" style="${hostSched.interval === "weekly" ? "" : "display:none"}">
+                <label>${escapeHtml(t("ai_schedule_weekday"))}</label>
+                <select id="ai-hsched-weekday" class="form-control" style="margin-top:4px">${mkWeekdayOpts(hostSched.weekday)}</select>
+            </div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-sm" id="ai-test-host">${escapeHtml(t("ai_schedule_test_host"))}</button>
+            <span id="ai-test-host-status" style="font-size:12px;color:var(--text-secondary)"></span>
+        </div>
+    `;
+    hostSchedCard.appendChild(hostSchedBody);
+    container.appendChild(hostSchedCard);
+
+    // ---- Card 2c: Notifications-on-report (global) ----
+    const notifCard = h("div", { className: "card", style: "margin-top:16px" });
+    notifCard.appendChild(h("div", { className: "card-header" }, t("ai_notify_card")));
+    const notifBody = h("div", { className: "card-body" });
+    notifBody.innerHTML = `
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:10px">
+            ${escapeHtml(t("ai_notify_card_intro"))}
+        </p>
+        <div>
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="ai-notify-report" ${config.notify_on_report ? "checked" : ""}>
                 ${escapeHtml(t("ai_notify_on_report"))}
@@ -4616,10 +4641,12 @@ async function viewAI() {
             </label>
         </div>
     `;
-    schedCard.appendChild(schedBody);
-    container.appendChild(schedCard);
+    notifCard.appendChild(notifBody);
+    container.appendChild(notifCard);
 
-    // ---- Card 2b: Generate now ----
+    // (the three cards above already added themselves to the container)
+
+    // ---- Card 2d: Generate now ----
     // Lifted out of the Schedule card so the manual "make a report right
     // now" flow doesn't get visually buried under the cron settings -- and
     // so we can give the user a clear scope toggle (active host vs. all
@@ -4789,6 +4816,88 @@ async function viewAI() {
         const promptEl = document.getElementById("ai-system-prompt");
         promptEl.value = (getLang() === "de" ? config.default_system_prompt_de : config.default_system_prompt_en) || "";
     });
+
+    // Per-card "Test now" buttons. Both run the same generate-report
+    // pipeline as the scheduler -- including the notification dispatch --
+    // so users can verify out-of-band that the channels actually receive
+    // the configured combined / per-host report.
+    function _bindScheduleTest(btnId, statusId, scope) {
+        const btn = document.getElementById(btnId);
+        const statusEl = document.getElementById(statusId);
+        if (!btn || !statusEl) return;
+        btn.addEventListener("click", async () => {
+            btn.disabled = true;
+            statusEl.style.color = "var(--text-secondary)";
+            statusEl.textContent = scope === "all" ? t("ai_generating_all") : t("ai_generating");
+            await _saveAIConfig();
+            const lang = getLang();
+            const payload = scope === "all" ? { lang } : { host: currentHost, lang };
+            let kickoff;
+            try {
+                kickoff = await API.post("/api/ai/report", payload);
+            } catch (e) {
+                statusEl.style.color = "var(--danger)";
+                statusEl.textContent = e.message || "failed";
+                btn.disabled = false; return;
+            }
+            if (!kickoff || !kickoff.task_id) {
+                statusEl.style.color = "var(--danger)";
+                statusEl.textContent = (kickoff && kickoff.error) || "no task id";
+                btn.disabled = false; return;
+            }
+            statusEl.textContent = t("ai_test_running_bg");
+            const poll = async () => {
+                let rec;
+                try {
+                    rec = await API.get("/api/ai/task?id=" + encodeURIComponent(kickoff.task_id));
+                } catch (e) {
+                    statusEl.style.color = "var(--danger)";
+                    statusEl.textContent = e.message || "poll failed";
+                    btn.disabled = false; return;
+                }
+                if (rec.status === "running") { setTimeout(poll, 2000); return; }
+                btn.disabled = false;
+                const res = rec.result || {};
+                if (rec.status !== "done" || !res.success) {
+                    statusEl.style.color = "var(--danger)";
+                    statusEl.textContent = (res.error || rec.error || "failed");
+                    return;
+                }
+                // Surface notification dispatch results -- this is the whole
+                // point of the Test button: confirm whether email/matrix/etc.
+                // received the report.
+                const n = res.notify || {};
+                if (!n.enabled) {
+                    statusEl.style.color = "var(--text-secondary)";
+                    statusEl.textContent = t("ai_test_done_notif_disabled");
+                    return;
+                }
+                const channels = Object.keys(n.results || {});
+                if (!channels.length) {
+                    statusEl.style.color = "var(--warning, #d4a017)";
+                    statusEl.textContent = t("ai_test_done_no_channels");
+                    return;
+                }
+                const okCh = channels.filter(c => n.results[c].success);
+                const failCh = channels.filter(c => !n.results[c].success);
+                if (failCh.length === 0) {
+                    statusEl.style.color = "var(--success, #1f8a4c)";
+                    statusEl.textContent = t("ai_test_done_ok")
+                        .replace("{n}", String(okCh.length))
+                        .replace("{channels}", okCh.join(", "));
+                } else {
+                    statusEl.style.color = "var(--danger)";
+                    statusEl.textContent = t("ai_test_done_partial")
+                        .replace("{ok}", String(okCh.length))
+                        .replace("{total}", String(channels.length))
+                        .replace("{failed}", failCh.join(", "));
+                }
+            };
+            poll();
+        });
+    }
+    _bindScheduleTest("ai-test-all",  "ai-test-all-status",  "all");
+    _bindScheduleTest("ai-test-host", "ai-test-host-status", "host");
 
     // Export raw data — follows the same scope toggle as Generate so the
     // user sees exactly the JSON the LLM would receive.
