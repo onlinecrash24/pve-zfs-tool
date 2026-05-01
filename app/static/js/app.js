@@ -3034,10 +3034,16 @@ async function viewReplication() {
         const src = hosts.find(x => x.address === sourceSel.value);
         const tgt = hosts.find(x => x.address === targetSel.value);
         if (!src || !tgt) return;
-        if (src.address === tgt.address) {
-            setupMount.appendChild(h("div", { className: "card", style: "margin-top:16px" },
-                h("div", { className: "card-body" }, t("repl_same_host"))));
-            return;
+        // Same-host replication is valid -- a legitimate setup for
+        // cross-pool backups within one box (e.g. rpool/data → tank/repl
+        // on the same machine). Show a non-blocking hint and continue.
+        const sameHost = (src.address === tgt.address);
+        if (sameHost) {
+            setupMount.appendChild(h("div", {
+                className: "card",
+                style: "margin-top:16px;border-left:3px solid var(--accent)"
+            }, h("div", { className: "card-body", style: "font-size:13px" },
+                t("repl_same_host_note"))));
         }
 
         // qs targets the (replication) target host; qsPair adds source so the
