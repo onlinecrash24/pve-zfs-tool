@@ -3403,6 +3403,33 @@ async function viewReplication() {
             Object.keys(cfgInputs).forEach(k => { values[k] = cfgInputs[k].get(); });
             if (!values.target) { toast(t("repl_target_required"), "error"); return; }
             if (!values.source) { toast(t("repl_source_required"), "error"); return; }
+
+            // Same-host pool overlap check: a replica on the same pool as
+            // the source defeats the point of a replica (same vdevs, same
+            // failure domain). Hard-block this on the frontend so the user
+            // can fix the target dataset before we even hit the backend.
+            // The backend repeats the check anyway as defence-in-depth.
+            if (sameHost) {
+                const targetPool = (values.target.split("/")[0] || "").trim();
+                if (targetPool) {
+                    let sourcePools = new Set();
+                    try {
+                        const td = await API.get("/api/replication/tagged-datasets?host=" +
+                                                 encodeURIComponent(src.address) +
+                                                 "&tag=" + encodeURIComponent(values.tag || "bashclub:zsync"));
+                        (td.datasets || []).forEach(d => {
+                            if (d.tagged && d.name) {
+                                sourcePools.add(d.name.split("/")[0]);
+                            }
+                        });
+                    } catch (_) { /* if the call fails, skip the soft check */ }
+                    if (sourcePools.has(targetPool)) {
+                        toast(t("repl_same_pool_block").replace("{pool}", targetPool), "error");
+                        return;
+                    }
+                }
+            }
+
             saveBtn.disabled = true;
             try {
                 const r = await API.post("/api/replication/config" + qsPair, { values, source: src.address });
