@@ -2693,9 +2693,12 @@ async function viewReplication() {
     try { hosts = await API.get("/api/hosts"); }
     catch (e) { setContent(h("p", { className: "muted" }, e.message || "Failed to load hosts")); return; }
 
-    if (!hosts || hosts.length < 2) {
+    // Same-host replication (cross-pool backup on a single box) is a valid
+    // setup, so a single registered host is enough to start the wizard.
+    // We only refuse when there are zero hosts -- nothing to replicate.
+    if (!hosts || hosts.length < 1) {
         setContent(h("div", { className: "card" },
-            h("div", { className: "card-body" }, t("repl_need_two_hosts"))));
+            h("div", { className: "card-body" }, t("repl_need_one_host"))));
         return;
     }
 
