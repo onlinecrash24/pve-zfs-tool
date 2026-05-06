@@ -300,6 +300,37 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
     """
     cfg_path = config_path_for(source or values.get("source"))
 
+    # Same-host pool overlap guard. If the source spec resolves to the
+    # SAME machine we're writing the config on, the target pool MUST be
+    # different from any pool that has tagged datasets -- otherwise the
+    # replica lives on the very vdevs the source data lives on, which
+    # defeats the point. The frontend blocks this earlier; we double-check
+    # here so a direct API call can't bypass it.
+    target_ds = (values.get("target") or "").strip()
+    src_spec = (source or values.get("source") or "").strip()
+    src_ip = _extract_ip(src_spec)
+    host_addrs = {host.get("address"), "127.0.0.1", "localhost"}
+    if target_ds and "/" in target_ds and src_ip and src_ip in host_addrs:
+        target_pool = target_ds.split("/", 1)[0]
+        tag = (values.get("tag") or "bashclub:zsync").strip() or "bashclub:zsync"
+        try:
+            tagged = list_tagged_datasets(host, tag).get("datasets") or []
+        except Exception:
+            tagged = []
+        src_pools = {d["name"].split("/", 1)[0] for d in tagged
+                     if d.get("tagged") and d.get("name")}
+        if target_pool in src_pools:
+            return {
+                "success": False,
+                "config_path": cfg_path,
+                "stderr": (f"refusing same-host write: target pool "
+                           f"'{target_pool}' is also a source pool "
+                           f"(replica on the same vdevs is not a backup)"),
+                "error_code": "same_pool",
+                "target_pool": target_pool,
+                "source_pools": sorted(src_pools),
+            }
+
     # Read existing to preserve layout
     r_read = run_command(host, f"cat {shlex.quote(cfg_path)} 2>/dev/null", timeout=10)
     existing_lines = None

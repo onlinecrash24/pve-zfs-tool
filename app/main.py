@@ -1337,8 +1337,10 @@ def api_replication_bootstrap_ssh():
     s_addr = (data.get("source") or "").strip()
     if not t_addr or not s_addr:
         return jsonify({"error": "target and source are required"}), 400
-    if t_addr == s_addr:
-        return jsonify({"error": "target and source must differ"}), 400
+    # Same-host replication is allowed -- it's a legitimate setup for
+    # cross-pool backups within one box (e.g. rpool/data → tank/repl on
+    # the same machine). bootstrap_ssh is still useful in that case to
+    # ensure root@localhost has its own pubkey in authorized_keys.
     target = _find_host(t_addr)
     source = _find_host(s_addr)
     if not target:
