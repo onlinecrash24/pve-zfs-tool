@@ -134,6 +134,9 @@ def generate_pdf(report):
     model = report.get("model", "")
     host_names = report.get("host_names", [])
     content = report.get("content", "")
+    verdict = (report.get("verdict") or "").lower()
+    crit_n = report.get("critical_findings")
+    warn_n = report.get("warnings_count")
 
     host_str = ", ".join(host_names) if host_names else "?"
     meta = f"{timestamp}  |  {provider} ({model})  |  Hosts: {host_str}"
@@ -144,9 +147,45 @@ def generate_pdf(report):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=20)
 
+    # Render the structured verdict as a coloured banner at the very top so
+    # the user can grasp the report severity at a glance, without having to
+    # scan for the raw [VERDICT:...] block (which we now strip from the
+    # body text). Verdicts are 'ok' / 'warn' / 'crit'; anything else is
+    # silently skipped.
+    _render_verdict_banner(pdf, verdict, crit_n, warn_n, use_unicode)
+
     _render_markdown(pdf, content)
 
     return pdf.output()
+
+
+def _render_verdict_banner(pdf, verdict, crit_n, warn_n, use_unicode):
+    """Coloured one-line status banner at the top of the report."""
+    if verdict not in ("ok", "warn", "crit"):
+        return
+    palette = {
+        "ok":   {"rgb": (200, 230, 201), "fg": (27, 94, 32),  "label": "OK",       "icon": "[OK]"},
+        "warn": {"rgb": (255, 236, 179), "fg": (160, 100, 0), "label": "WARNUNG",  "icon": "[!]"},
+        "crit": {"rgb": (255, 205, 210), "fg": (159, 30, 30), "label": "KRITISCH", "icon": "[X]"},
+    }[verdict]
+    if use_unicode:
+        palette["icon"] = {"ok": "✅", "warn": "⚠️", "crit": "\U0001F6A8"}[verdict]
+    detail = ""
+    if verdict == "crit" and crit_n is not None:
+        detail = f"  -  {crit_n} kritische Befund(e)"
+    elif verdict == "warn" and warn_n is not None:
+        detail = f"  -  {warn_n} Warnung(en)"
+    elif verdict == "ok":
+        detail = "  -  keine kritischen Befunde"
+    text = f"{palette['icon']}  Verdict: {palette['label']}{detail}"
+
+    pdf.set_fill_color(*palette["rgb"])
+    pdf.set_text_color(*palette["fg"])
+    pdf.set_font(pdf._fn, "B", 12)
+    pdf.cell(0, 10, text, ln=1, fill=True, align="L")
+    # Reset to default text colour for the body.
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
 
 
 # ---------------------------------------------------------------------------
