@@ -2,7 +2,128 @@
 
 import re
 import os
+import unicodedata
 from fpdf import FPDF
+
+
+# ---------------------------------------------------------------------------
+# Text sanitisation
+# ---------------------------------------------------------------------------
+# fpdf2's built-in Helvetica is Latin-1 only. Any character outside that
+# encoding becomes "?" in the output (the symptom: "10.?Mai?2026" -- the
+# LLM had emitted U+202F NARROW NO-BREAK SPACE around the month). We only
+# get full UTF-8 when the optional DejaVu TTF files are bundled in
+# app/static/fonts/. Until they are, sanitise the content first so common
+# Unicode punctuation that LLMs love (smart quotes, en/em-dashes, narrow
+# whitespace, ellipsis) doesn't degrade to placeholder boxes.
+#
+# Even with DejaVu loaded we still want to collapse the exotic whitespace
+# variants (U+202F, U+2009, U+200B, ...) -- those routinely break line
+# wrapping in fpdf2's word-splitter.
+
+# Whitespace characters that should become a regular ASCII space.
+_WHITESPACE_MAP = {
+    " ": " ",  # NO-BREAK SPACE
+    " ": " ",  # OGHAM SPACE MARK
+    " ": " ",  # EN QUAD
+    " ": " ",  # EM QUAD
+    " ": " ",  # EN SPACE
+    " ": " ",  # EM SPACE
+    " ": " ",  # THREE-PER-EM SPACE
+    " ": " ",  # FOUR-PER-EM SPACE
+    " ": " ",  # SIX-PER-EM SPACE
+    " ": " ",  # FIGURE SPACE
+    " ": " ",  # PUNCTUATION SPACE
+    " ": " ",  # THIN SPACE
+    " ": " ",  # HAIR SPACE
+    " ": " ",  # NARROW NO-BREAK SPACE  ← the "10.?Mai?2026" culprit
+    " ": " ",  # MEDIUM MATHEMATICAL SPACE
+    "　": " ",  # IDEOGRAPHIC SPACE
+}
+
+# Zero-width characters that should be removed entirely.
+_ZERO_WIDTH_MAP = {
+    "​": "",   # ZERO WIDTH SPACE
+    "‌": "",   # ZERO WIDTH NON-JOINER
+    "‍": "",   # ZERO WIDTH JOINER
+    "﻿": "",   # ZERO WIDTH NO-BREAK SPACE / BOM
+    "⁠": "",   # WORD JOINER
+}
+
+# Latin-1-safe replacements for common punctuation the LLM emits.
+_LATIN1_FALLBACK = {
+    "‐": "-",  # HYPHEN
+    "‑": "-",  # NON-BREAKING HYPHEN
+    "‒": "-",  # FIGURE DASH
+    "–": "-",  # EN DASH
+    "—": "-",  # EM DASH
+    "―": "-",  # HORIZONTAL BAR
+    "‘": "'",  # LEFT SINGLE QUOTATION MARK
+    "’": "'",  # RIGHT SINGLE QUOTATION MARK
+    "‚": "'",  # SINGLE LOW-9 QUOTATION MARK
+    "“": '"',  # LEFT DOUBLE QUOTATION MARK
+    "”": '"',  # RIGHT DOUBLE QUOTATION MARK
+    "„": '"',  # DOUBLE LOW-9 QUOTATION MARK (German „)
+    "•": "*",  # BULLET
+    "…": "...",  # HORIZONTAL ELLIPSIS
+    "→": "->",  # RIGHTWARDS ARROW
+    "←": "<-",  # LEFTWARDS ARROW
+    "✓": "[OK]",  # CHECK MARK
+    "✗": "[X]",   # BALLOT X
+    "✅": "[OK]",  # ✅ WHITE HEAVY CHECK MARK
+    "⚠": "[!]",   # ⚠ WARNING SIGN
+    "️": "",      # VARIATION SELECTOR-16 (emoji presentation hint)
+    "❌": "[X]",   # ❌ CROSS MARK
+    "\U0001F6A8": "[!]",  # 🚨 POLICE CAR LIGHT
+}
+
+
+def _sanitize_for_pdf(text: str, use_unicode: bool) -> str:
+    """Normalise text for fpdf2 output.
+
+    Always collapses exotic Unicode whitespace and strips zero-width chars
+    (they break fpdf2's word splitter regardless of font). When the bundled
+    DejaVu font is NOT loaded -- the common case in the shipped image --
+    additionally replaces non-Latin-1 punctuation with ASCII fallbacks so
+    nothing degrades to a "?".
+    """
+    if not text:
+        return text or ""
+    out = []
+    for ch in text:
+        if ch in _ZERO_WIDTH_MAP:
+            continue
+        if ch in _WHITESPACE_MAP:
+            out.append(_WHITESPACE_MAP[ch])
+            continue
+        if not use_unicode:
+            if ch in _LATIN1_FALLBACK:
+                out.append(_LATIN1_FALLBACK[ch])
+                continue
+            # Anything that isn't representable in Latin-1 (most emoji,
+            # arrows, box-drawing, asian scripts, etc.) -- try NFKD
+            # decomposition to peel off combining marks first, then drop
+            # anything that's still non-Latin-1. This keeps "ä" intact
+            # because Latin-1 contains it, but converts "✓" to "" rather
+            # than "?".
+            try:
+                ch.encode("latin-1")
+                out.append(ch)
+            except UnicodeEncodeError:
+                # Try to decompose & retry
+                decomposed = unicodedata.normalize("NFKD", ch)
+                for d in decomposed:
+                    try:
+                        d.encode("latin-1")
+                        out.append(d)
+                    except UnicodeEncodeError:
+                        pass
+                # If nothing made it through, the char just disappears
+                # (silently, like the previous "?" but visually cleaner).
+        else:
+            out.append(ch)
+    # Collapse runs of spaces that may have appeared after stripping ZWJs
+    return re.sub(r"  +", " ", "".join(out))
 
 # Directory for font files (bundled DejaVu for full UTF-8)
 FONT_DIR = os.path.join(os.path.dirname(__file__), "static", "fonts")
@@ -139,9 +260,12 @@ def generate_pdf(report):
     warn_n = report.get("warnings_count")
 
     host_str = ", ".join(host_names) if host_names else "?"
-    meta = f"{timestamp}  |  {provider} ({model})  |  Hosts: {host_str}"
-
     use_unicode = _has_dejavu()
+    meta = _sanitize_for_pdf(
+        f"{timestamp}  |  {provider} ({model})  |  Hosts: {host_str}",
+        use_unicode,
+    )
+
     pdf = ReportPDF(report_meta=meta, use_unicode=use_unicode)
     pdf.alias_nb_pages()
     pdf.add_page()
@@ -154,7 +278,12 @@ def generate_pdf(report):
     # silently skipped.
     _render_verdict_banner(pdf, verdict, crit_n, warn_n, use_unicode)
 
-    _render_markdown(pdf, content)
+    # Normalise whitespace + Latin-1-fall-back the LLM output once,
+    # centrally, so every downstream renderer (paragraph, list item,
+    # table cell) gets safe text to work with. Without this the user
+    # sees "10.?Mai?2026" because LLMs love U+202F NARROW NO-BREAK SPACE
+    # in dates and fpdf2's built-in Helvetica replaces it with "?".
+    _render_markdown(pdf, _sanitize_for_pdf(content, use_unicode))
 
     return pdf.output()
 
@@ -177,7 +306,10 @@ def _render_verdict_banner(pdf, verdict, crit_n, warn_n, use_unicode):
         detail = f"  -  {warn_n} Warnung(en)"
     elif verdict == "ok":
         detail = "  -  keine kritischen Befunde"
-    text = f"{palette['icon']}  Verdict: {palette['label']}{detail}"
+    text = _sanitize_for_pdf(
+        f"{palette['icon']}  Verdict: {palette['label']}{detail}",
+        use_unicode,
+    )
 
     pdf.set_fill_color(*palette["rgb"])
     pdf.set_text_color(*palette["fg"])
