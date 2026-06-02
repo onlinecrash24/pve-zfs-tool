@@ -67,15 +67,34 @@ jobs:
             type=sha,prefix=sha-,format=short
 
       # 5. Image bauen und pushen
+      #
+      # Cache-Strategie: GHA-Cache läuft als "continue-on-error" mit, weil
+      # der GitHub-Actions-Cache-Service phasenweise mit "buildkit cache
+      # export error" o.ä. ausfällt -- ohne den continue-on-error würde der
+      # ganze Release-Build daran scheitern. Bei Cache-Fehlern wird einfach
+      # ohne Cache neu gebaut.
       - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        continue-on-error: true
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Optional: Multi-Arch (amd64 + arm64, z.B. für Raspberry Pi)
+          # platforms: linux/amd64,linux/arm64
+
+      # 5b. Fallback ohne Cache, falls Schritt 5 wegen Cache-Problemen
+      # gescheitert ist. Wenn Schritt 5 sauber durchlief, wird dieser Step
+      # übersprungen.
+      - name: Build and push Docker image (no cache fallback)
+        if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v5
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Cache zwischen Builds wiederverwenden (schnellere CI)
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Optional: Multi-Arch (amd64 + arm64, z.B. für Raspberry Pi)
-          # platforms: linux/amd64,linux/arm64
