@@ -32,7 +32,7 @@ jobs:
     steps:
       # 1. Repo auschecken
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # 2. Docker Buildx einrichten (Multi-Plattform-Support)
       #
@@ -86,7 +86,7 @@ jobs:
       # ohne Cache neu gebaut.
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         continue-on-error: true
         with:
           context: .
@@ -103,7 +103,7 @@ jobs:
       # übersprungen.
       - name: Build and push Docker image (no cache fallback)
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
