@@ -180,12 +180,33 @@ class ReportPDF(FPDF):
         self.report_meta = report_meta
         self.use_unicode = use_unicode
         if use_unicode:
-            self.add_font("DejaVu", "", os.path.join(FONT_DIR, "DejaVuSans.ttf"), uni=True)
-            self.add_font("DejaVu", "B", os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"), uni=True)
-            self.add_font("DejaVu", "I", os.path.join(FONT_DIR, "DejaVuSans-Oblique.ttf"), uni=True)
-            self.add_font("DejaVuMono", "", os.path.join(FONT_DIR, "DejaVuSansMono.ttf"), uni=True)
+            # Load each TTF only if the file is actually on disk. Debian
+            # split the DejaVu family across `fonts-dejavu-core` (Sans,
+            # Bold, Mono) and `fonts-dejavu-extra` (Oblique etc.); we install
+            # the meta `fonts-dejavu` so all four should be present, but a
+            # missing file should still degrade gracefully instead of
+            # crashing the entire PDF render with "TTF Font file not found".
+            files = {
+                "":  "DejaVuSans.ttf",
+                "B": "DejaVuSans-Bold.ttf",
+                "I": "DejaVuSans-Oblique.ttf",
+            }
+            for style, fname in files.items():
+                path = os.path.join(FONT_DIR, fname)
+                if os.path.exists(path):
+                    self.add_font("DejaVu", style, path, uni=True)
+            # If a non-regular style is missing, fpdf2 picks the regular
+            # face automatically when set_font is called for that style.
+            mono_path = os.path.join(FONT_DIR, "DejaVuSansMono.ttf")
+            if os.path.exists(mono_path):
+                self.add_font("DejaVuMono", "", mono_path, uni=True)
+                self._fn_mono = "DejaVuMono"
+            else:
+                # No mono available; reuse the Sans face for code blocks
+                # rather than mixing in PDF core Courier (which would print
+                # "?" for non-Latin-1 chars and defeat the whole point).
+                self._fn_mono = "DejaVu"
             self._fn = "DejaVu"
-            self._fn_mono = "DejaVuMono"
         else:
             self._fn = "Helvetica"
             self._fn_mono = "Courier"
