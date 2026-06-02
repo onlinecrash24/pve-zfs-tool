@@ -125,8 +125,25 @@ def _sanitize_for_pdf(text: str, use_unicode: bool) -> str:
     # Collapse runs of spaces that may have appeared after stripping ZWJs
     return re.sub(r"  +", " ", "".join(out))
 
-# Directory for font files (bundled DejaVu for full UTF-8)
-FONT_DIR = os.path.join(os.path.dirname(__file__), "static", "fonts")
+# Directory for font files (DejaVu for full UTF-8). We try the system
+# location populated by Debian's ``fonts-dejavu-core`` package first --
+# the Dockerfile installs it there, no need to bundle 4 MB of TTF in the
+# repo. The in-repo ``app/static/fonts/`` path is a fallback for dev
+# environments without the apt package.
+_FONT_DIR_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu",
+    os.path.join(os.path.dirname(__file__), "static", "fonts"),
+)
+
+
+def _resolve_font_dir():
+    for d in _FONT_DIR_CANDIDATES:
+        if os.path.exists(os.path.join(d, "DejaVuSans.ttf")):
+            return d
+    return _FONT_DIR_CANDIDATES[-1]
+
+
+FONT_DIR = _resolve_font_dir()
 IMG_DIR = os.path.join(os.path.dirname(__file__), "static", "img")
 
 # Color scheme (adapted for print on white background)
