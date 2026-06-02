@@ -9,6 +9,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import smtplib
 import ssl
 import threading
@@ -371,36 +372,133 @@ def _send_email(cfg, subject, body_text, body_html=None, attachments=None):
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+_VERDICT_RE = re.compile(
+    r"\[\s*VERDICT\s*:\s*(ok|warn|crit)\s*\]", re.IGNORECASE
+)
+_CRIT_COUNT_RE = re.compile(
+    r"\[\s*CRITICAL_FINDINGS\s*:\s*(\d+)\s*\]", re.IGNORECASE
+)
+_WARN_COUNT_RE = re.compile(
+    r"\[\s*WARNINGS\s*:\s*(\d+)\s*\]", re.IGNORECASE
+)
+
+
+def _parse_llm_verdict(content: str):
+    """Look for the structured verdict block the system prompt asks the
+    LLM to emit at the end of the report. Returns (verdict, crit, warn)
+    or None if the block is missing / malformed."""
+    if not content:
+        return None
+    m = _VERDICT_RE.search(content)
+    if not m:
+        return None
+    verdict = m.group(1).lower()
+    crit = 0
+    warn = 0
+    mc = _CRIT_COUNT_RE.search(content)
+    if mc:
+        try:
+            crit = int(mc.group(1))
+        except ValueError:
+            pass
+    mw = _WARN_COUNT_RE.search(content)
+    if mw:
+        try:
+            warn = int(mw.group(1))
+        except ValueError:
+            pass
+    return verdict, crit, warn
+
+
+def _heuristic_verdict(content: str):
+    """Negation-aware fallback when the LLM forgets the verdict block.
+
+    The previous naive substring counter raised false positives every time
+    the LLM wrote "keine kritischen Probleme" or echoed the section header
+    "❌ Kritisch" from the legend. Filter those before counting:
+      - skip lines that look like headers (start with #, *, -, or are
+        markdown emphasis)
+      - skip lines containing a negation immediately before the keyword
+        ("keine kritisch...", "no critical...", "kein kritischer", "0
+        critical", etc.)
+      - skip lines that mention the keyword as a definition or example
+        rather than a finding ("kritisch:", "= kritisch", "z. B. kritisch")
+    """
+    if not content:
+        return "ok", 0, 0
+    crit_kw = ("critical", "kritisch", "🚨", "❌",
+               "action required", "handlung erforderlich",
+               "handlung zwingend", "immediate action")
+    warn_kw = ("warning", "warnung", "achtung", "⚠")
+    # Negations that disqualify a line. Order matters — we want the
+    # negation to appear BEFORE the keyword.
+    neg_prefixes = ("keine", "kein", "no ", "0 ", "zero", "nicht",
+                    "not critical", "not crit", "not kritisch")
+    crit = 0
+    warn = 0
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        low = line.lower()
+        # Strip markdown emphasis / list markers so the legend line
+        # "**❌ Kritisch**" doesn't get a free hit.
+        stripped = low.lstrip("#*-> ").strip("*_ ")
+        # Skip pure legend / header lines that just enumerate emoji
+        # meanings.
+        if stripped in ("✅ ok", "⚠️ warnung", "⚠️ warning",
+                        "❌ kritisch", "❌ critical"):
+            continue
+        # Skip the verdict block lines themselves
+        if stripped.startswith("[verdict:") or stripped.startswith("[critical_findings") or stripped.startswith("[warnings"):
+            continue
+        is_negated = any(n in stripped for n in neg_prefixes)
+        has_crit = any(k in low for k in crit_kw)
+        has_warn = any(k in low for k in warn_kw)
+        if has_crit and not is_negated:
+            # Definitions of severity levels are not findings.
+            if not (": kritisch" in low or "= kritisch" in low
+                    or ": critical" in low or "= critical" in low):
+                crit += 1
+        if has_warn and not is_negated and not has_crit:
+            if not (": warnung" in low or "= warnung" in low
+                    or ": warning" in low or "= warning" in low):
+                warn += 1
+    if crit > 0:
+        return "crit", crit, warn
+    if warn > 0:
+        return "warn", 0, warn
+    return "ok", 0, 0
+
+
 def _summarize_ai_report(content: str, lang: str = "en"):
     """Return (verdict, short_text) for an AI report body.
 
-    Heuristic: count critical / warning markers in the report. Returns one of
-    three verdicts ('ok', 'warn', 'crit') and a single-sentence summary that
-    fits a notification email body. The full report itself goes as PDF
-    attachment, so we don't repeat it here.
+    Preferred path: the LLM ends its report with the structured
+    ``[VERDICT: …]`` block our system prompts now demand. We trust
+    those values directly. If the block is missing (legacy reports or
+    a non-compliant model), fall back to a negation-aware keyword
+    heuristic that ignores headers, legend lines and the verdict
+    block itself -- avoids the "5 critical findings" false positive
+    that triggered when the LLM wrote "keine kritischen Probleme".
     """
-    low = (content or "").lower()
-    crit_kw = ["critical", "kritisch", "sofort", "urgent", "🚨", "❌",
-               "action required", "handlung erforderlich",
-               "handlung zwingend", "immediate action"]
-    warn_kw = ["warning", "warnung", "achtung", "attention", "⚠"]
-    crit_hits = sum(low.count(k.lower()) for k in crit_kw)
-    warn_hits = sum(low.count(k.lower()) for k in warn_kw)
-    if crit_hits > 0:
-        verdict = "crit"
-    elif warn_hits > 0:
-        verdict = "warn"
+    parsed = _parse_llm_verdict(content)
+    if parsed:
+        verdict, crit_hits, warn_hits = parsed
     else:
-        verdict = "ok"
+        verdict, crit_hits, warn_hits = _heuristic_verdict(content or "")
+
     de = (lang or "").lower().startswith("de")
     if verdict == "crit":
-        txt = (f"🚨 Handlung zwingend nötig — {crit_hits} kritische Hinweise im Bericht."
+        n = max(crit_hits, 1)
+        txt = (f"🚨 Handlung zwingend nötig — {n} kritische(r) Hinweis(e) im Bericht."
                if de else
-               f"🚨 Action required — {crit_hits} critical finding(s) in the report.")
+               f"🚨 Action required — {n} critical finding(s) in the report.")
     elif verdict == "warn":
-        txt = (f"⚠️ Aufmerksamkeit empfohlen — {warn_hits} Warnung(en) im Bericht."
+        n = max(warn_hits, 1)
+        txt = (f"⚠️ Aufmerksamkeit empfohlen — {n} Warnung(en) im Bericht."
                if de else
-               f"⚠️ Attention recommended — {warn_hits} warning(s) in the report.")
+               f"⚠️ Attention recommended — {n} warning(s) in the report.")
     else:
         txt = ("✅ Alles im grünen Bereich — keine kritischen Hinweise gefunden."
                if de else
