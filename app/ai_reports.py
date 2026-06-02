@@ -88,7 +88,34 @@ IMPORTANT — Proxmox-specific rules you MUST follow:
 
 Use emoji indicators: ✅ OK, ⚠️ Warning, ❌ Critical
 Be concise but thorough. Focus on actionable insights. Avoid false positives.
-Write the entire report in English."""
+Write the entire report in English.
+
+MANDATORY — End the report with EXACTLY this machine-readable verdict
+block (own paragraph, no markdown formatting, no extra text after it):
+
+[VERDICT: ok|warn|crit]
+[CRITICAL_FINDINGS: <integer>]
+[WARNINGS: <integer>]
+
+Pick exactly ONE verdict value:
+  ok   = nothing actionable; everything healthy.
+  warn = at least one warning that should be addressed soon
+         (e.g. capacity > 80 %, overdue scrub < 60 days,
+          stale auto-snapshots).
+  crit = something demands immediate human attention
+         (e.g. pool DEGRADED/FAULTED, capacity > 95 %,
+          read/write/checksum errors, SMART pre-fail,
+          scrub overdue > 60 days, missing snapshots that
+          break the retention policy).
+
+CRITICAL_FINDINGS = number of distinct findings that count as crit.
+WARNINGS         = number of distinct findings that count as warn.
+
+An overdue scrub of ~1 week is NOT critical. SSD fragmentation is
+NEVER an issue. "Keine kritischen Probleme" is verdict=ok with
+CRITICAL_FINDINGS=0.
+
+Be conservative: choose the LOWEST verdict that honestly fits."""
 
 DEFAULT_SYSTEM_PROMPT_DE = """Du bist ein ZFS-Speicherexperte und analysierst eine Proxmox VE Umgebung.
 Analysiere die bereitgestellten ZFS-Daten und erstelle einen umfassenden Statusbericht.
@@ -119,7 +146,33 @@ WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
 
 Verwende Emoji-Indikatoren: ✅ OK, ⚠️ Warnung, ❌ Kritisch
 Sei prägnant aber gründlich. Fokus auf umsetzbare Erkenntnisse. Vermeide Fehlalarme.
-Schreibe den gesamten Bericht auf Deutsch."""
+Schreibe den gesamten Bericht auf Deutsch.
+
+PFLICHT — Beende den Bericht mit GENAU diesem maschinenlesbaren
+Verdict-Block (eigener Absatz, kein Markdown, kein Text danach):
+
+[VERDICT: ok|warn|crit]
+[CRITICAL_FINDINGS: <ganze Zahl>]
+[WARNINGS: <ganze Zahl>]
+
+Wähle GENAU einen Verdict-Wert:
+  ok   = keine Handlungsbedarf; alles gesund.
+  warn = mindestens ein Hinweis, der demnächst angegangen werden
+         sollte (z. B. Belegung > 80 %, überfälliger Scrub < 60 Tage,
+         veraltete Auto-Snapshots).
+  crit = etwas verlangt sofortige Aufmerksamkeit (z. B. Pool
+         DEGRADED/FAULTED, Belegung > 95 %, Read-/Write-/Checksum-
+         Fehler, SMART Pre-Fail, Scrub überfällig > 60 Tage,
+         fehlende Snapshots, die die Retention-Policy brechen).
+
+CRITICAL_FINDINGS = Anzahl unterschiedlicher Befunde mit Verdict crit.
+WARNINGS         = Anzahl unterschiedlicher Befunde mit Verdict warn.
+
+Ein vor ~1 Woche fälliger Scrub ist NICHT kritisch. SSD-Fragmentierung
+ist NIE ein Problem. „Keine kritischen Probleme" entspricht
+verdict=ok mit CRITICAL_FINDINGS=0.
+
+Sei konservativ: wähle das NIEDRIGSTE Verdict, das ehrlich passt."""
 
 
 def _ensure_data_dir():
