@@ -35,8 +35,19 @@ jobs:
         uses: actions/checkout@v4
 
       # 2. Docker Buildx einrichten (Multi-Plattform-Support)
+      #
+      # Mit Docker-Hub-Mirror "mirror.gcr.io" konfiguriert. Direkte Pulls
+      # gegen registry-1.docker.io brechen auf den GHA-Runnern regelmaessig
+      # mit "Client.Timeout exceeded while awaiting headers" ab (Docker-Hub-
+      # Rate-Limit pro IP, transiente Ausfaelle). mirror.gcr.io ist Googles
+      # offizieller, hochverfuegbarer Mirror -- buildx zieht das Base-Image
+      # `python:3.12-slim` zuerst dort und nur als Fallback bei Docker Hub.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       # 3. Login bei ghcr.io (automatisch mit GITHUB_TOKEN)
       - name: Log in to GitHub Container Registry
