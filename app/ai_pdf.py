@@ -2,10 +2,148 @@
 
 import re
 import os
+import unicodedata
 from fpdf import FPDF
 
-# Directory for font files (bundled DejaVu for full UTF-8)
-FONT_DIR = os.path.join(os.path.dirname(__file__), "static", "fonts")
+
+# ---------------------------------------------------------------------------
+# Text sanitisation
+# ---------------------------------------------------------------------------
+# fpdf2's built-in Helvetica is Latin-1 only. Any character outside that
+# encoding becomes "?" in the output (the symptom: "10.?Mai?2026" -- the
+# LLM had emitted U+202F NARROW NO-BREAK SPACE around the month). We only
+# get full UTF-8 when the optional DejaVu TTF files are bundled in
+# app/static/fonts/. Until they are, sanitise the content first so common
+# Unicode punctuation that LLMs love (smart quotes, en/em-dashes, narrow
+# whitespace, ellipsis) doesn't degrade to placeholder boxes.
+#
+# Even with DejaVu loaded we still want to collapse the exotic whitespace
+# variants (U+202F, U+2009, U+200B, ...) -- those routinely break line
+# wrapping in fpdf2's word-splitter.
+
+# Whitespace characters that should become a regular ASCII space.
+_WHITESPACE_MAP = {
+    " ": " ",  # NO-BREAK SPACE
+    " ": " ",  # OGHAM SPACE MARK
+    " ": " ",  # EN QUAD
+    " ": " ",  # EM QUAD
+    " ": " ",  # EN SPACE
+    " ": " ",  # EM SPACE
+    " ": " ",  # THREE-PER-EM SPACE
+    " ": " ",  # FOUR-PER-EM SPACE
+    " ": " ",  # SIX-PER-EM SPACE
+    " ": " ",  # FIGURE SPACE
+    " ": " ",  # PUNCTUATION SPACE
+    " ": " ",  # THIN SPACE
+    " ": " ",  # HAIR SPACE
+    " ": " ",  # NARROW NO-BREAK SPACE  ← the "10.?Mai?2026" culprit
+    " ": " ",  # MEDIUM MATHEMATICAL SPACE
+    "　": " ",  # IDEOGRAPHIC SPACE
+}
+
+# Zero-width characters that should be removed entirely.
+_ZERO_WIDTH_MAP = {
+    "​": "",   # ZERO WIDTH SPACE
+    "‌": "",   # ZERO WIDTH NON-JOINER
+    "‍": "",   # ZERO WIDTH JOINER
+    "﻿": "",   # ZERO WIDTH NO-BREAK SPACE / BOM
+    "⁠": "",   # WORD JOINER
+}
+
+# Latin-1-safe replacements for common punctuation the LLM emits.
+_LATIN1_FALLBACK = {
+    "‐": "-",  # HYPHEN
+    "‑": "-",  # NON-BREAKING HYPHEN
+    "‒": "-",  # FIGURE DASH
+    "–": "-",  # EN DASH
+    "—": "-",  # EM DASH
+    "―": "-",  # HORIZONTAL BAR
+    "‘": "'",  # LEFT SINGLE QUOTATION MARK
+    "’": "'",  # RIGHT SINGLE QUOTATION MARK
+    "‚": "'",  # SINGLE LOW-9 QUOTATION MARK
+    "“": '"',  # LEFT DOUBLE QUOTATION MARK
+    "”": '"',  # RIGHT DOUBLE QUOTATION MARK
+    "„": '"',  # DOUBLE LOW-9 QUOTATION MARK (German „)
+    "•": "*",  # BULLET
+    "…": "...",  # HORIZONTAL ELLIPSIS
+    "→": "->",  # RIGHTWARDS ARROW
+    "←": "<-",  # LEFTWARDS ARROW
+    "✓": "[OK]",  # CHECK MARK
+    "✗": "[X]",   # BALLOT X
+    "✅": "[OK]",  # ✅ WHITE HEAVY CHECK MARK
+    "⚠": "[!]",   # ⚠ WARNING SIGN
+    "️": "",      # VARIATION SELECTOR-16 (emoji presentation hint)
+    "❌": "[X]",   # ❌ CROSS MARK
+    "\U0001F6A8": "[!]",  # 🚨 POLICE CAR LIGHT
+}
+
+
+def _sanitize_for_pdf(text: str, use_unicode: bool) -> str:
+    """Normalise text for fpdf2 output.
+
+    Always collapses exotic Unicode whitespace and strips zero-width chars
+    (they break fpdf2's word splitter regardless of font). When the bundled
+    DejaVu font is NOT loaded -- the common case in the shipped image --
+    additionally replaces non-Latin-1 punctuation with ASCII fallbacks so
+    nothing degrades to a "?".
+    """
+    if not text:
+        return text or ""
+    out = []
+    for ch in text:
+        if ch in _ZERO_WIDTH_MAP:
+            continue
+        if ch in _WHITESPACE_MAP:
+            out.append(_WHITESPACE_MAP[ch])
+            continue
+        if not use_unicode:
+            if ch in _LATIN1_FALLBACK:
+                out.append(_LATIN1_FALLBACK[ch])
+                continue
+            # Anything that isn't representable in Latin-1 (most emoji,
+            # arrows, box-drawing, asian scripts, etc.) -- try NFKD
+            # decomposition to peel off combining marks first, then drop
+            # anything that's still non-Latin-1. This keeps "ä" intact
+            # because Latin-1 contains it, but converts "✓" to "" rather
+            # than "?".
+            try:
+                ch.encode("latin-1")
+                out.append(ch)
+            except UnicodeEncodeError:
+                # Try to decompose & retry
+                decomposed = unicodedata.normalize("NFKD", ch)
+                for d in decomposed:
+                    try:
+                        d.encode("latin-1")
+                        out.append(d)
+                    except UnicodeEncodeError:
+                        pass
+                # If nothing made it through, the char just disappears
+                # (silently, like the previous "?" but visually cleaner).
+        else:
+            out.append(ch)
+    # Collapse runs of spaces that may have appeared after stripping ZWJs
+    return re.sub(r"  +", " ", "".join(out))
+
+# Directory for font files (DejaVu for full UTF-8). We try the system
+# location populated by Debian's ``fonts-dejavu-core`` package first --
+# the Dockerfile installs it there, no need to bundle 4 MB of TTF in the
+# repo. The in-repo ``app/static/fonts/`` path is a fallback for dev
+# environments without the apt package.
+_FONT_DIR_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu",
+    os.path.join(os.path.dirname(__file__), "static", "fonts"),
+)
+
+
+def _resolve_font_dir():
+    for d in _FONT_DIR_CANDIDATES:
+        if os.path.exists(os.path.join(d, "DejaVuSans.ttf")):
+            return d
+    return _FONT_DIR_CANDIDATES[-1]
+
+
+FONT_DIR = _resolve_font_dir()
 IMG_DIR = os.path.join(os.path.dirname(__file__), "static", "img")
 
 # Color scheme (adapted for print on white background)
@@ -42,12 +180,33 @@ class ReportPDF(FPDF):
         self.report_meta = report_meta
         self.use_unicode = use_unicode
         if use_unicode:
-            self.add_font("DejaVu", "", os.path.join(FONT_DIR, "DejaVuSans.ttf"), uni=True)
-            self.add_font("DejaVu", "B", os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"), uni=True)
-            self.add_font("DejaVu", "I", os.path.join(FONT_DIR, "DejaVuSans-Oblique.ttf"), uni=True)
-            self.add_font("DejaVuMono", "", os.path.join(FONT_DIR, "DejaVuSansMono.ttf"), uni=True)
+            # Load each TTF only if the file is actually on disk. Debian
+            # split the DejaVu family across `fonts-dejavu-core` (Sans,
+            # Bold, Mono) and `fonts-dejavu-extra` (Oblique etc.); we install
+            # the meta `fonts-dejavu` so all four should be present, but a
+            # missing file should still degrade gracefully instead of
+            # crashing the entire PDF render with "TTF Font file not found".
+            files = {
+                "":  "DejaVuSans.ttf",
+                "B": "DejaVuSans-Bold.ttf",
+                "I": "DejaVuSans-Oblique.ttf",
+            }
+            for style, fname in files.items():
+                path = os.path.join(FONT_DIR, fname)
+                if os.path.exists(path):
+                    self.add_font("DejaVu", style, path, uni=True)
+            # If a non-regular style is missing, fpdf2 picks the regular
+            # face automatically when set_font is called for that style.
+            mono_path = os.path.join(FONT_DIR, "DejaVuSansMono.ttf")
+            if os.path.exists(mono_path):
+                self.add_font("DejaVuMono", "", mono_path, uni=True)
+                self._fn_mono = "DejaVuMono"
+            else:
+                # No mono available; reuse the Sans face for code blocks
+                # rather than mixing in PDF core Courier (which would print
+                # "?" for non-Latin-1 chars and defeat the whole point).
+                self._fn_mono = "DejaVu"
             self._fn = "DejaVu"
-            self._fn_mono = "DejaVuMono"
         else:
             self._fn = "Helvetica"
             self._fn_mono = "Courier"
@@ -134,19 +293,69 @@ def generate_pdf(report):
     model = report.get("model", "")
     host_names = report.get("host_names", [])
     content = report.get("content", "")
+    verdict = (report.get("verdict") or "").lower()
+    crit_n = report.get("critical_findings")
+    warn_n = report.get("warnings_count")
 
     host_str = ", ".join(host_names) if host_names else "?"
-    meta = f"{timestamp}  |  {provider} ({model})  |  Hosts: {host_str}"
-
     use_unicode = _has_dejavu()
+    meta = _sanitize_for_pdf(
+        f"{timestamp}  |  {provider} ({model})  |  Hosts: {host_str}",
+        use_unicode,
+    )
+
     pdf = ReportPDF(report_meta=meta, use_unicode=use_unicode)
     pdf.alias_nb_pages()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=20)
 
-    _render_markdown(pdf, content)
+    # Render the structured verdict as a coloured banner at the very top so
+    # the user can grasp the report severity at a glance, without having to
+    # scan for the raw [VERDICT:...] block (which we now strip from the
+    # body text). Verdicts are 'ok' / 'warn' / 'crit'; anything else is
+    # silently skipped.
+    _render_verdict_banner(pdf, verdict, crit_n, warn_n, use_unicode)
+
+    # Normalise whitespace + Latin-1-fall-back the LLM output once,
+    # centrally, so every downstream renderer (paragraph, list item,
+    # table cell) gets safe text to work with. Without this the user
+    # sees "10.?Mai?2026" because LLMs love U+202F NARROW NO-BREAK SPACE
+    # in dates and fpdf2's built-in Helvetica replaces it with "?".
+    _render_markdown(pdf, _sanitize_for_pdf(content, use_unicode))
 
     return pdf.output()
+
+
+def _render_verdict_banner(pdf, verdict, crit_n, warn_n, use_unicode):
+    """Coloured one-line status banner at the top of the report."""
+    if verdict not in ("ok", "warn", "crit"):
+        return
+    palette = {
+        "ok":   {"rgb": (200, 230, 201), "fg": (27, 94, 32),  "label": "OK",       "icon": "[OK]"},
+        "warn": {"rgb": (255, 236, 179), "fg": (160, 100, 0), "label": "WARNUNG",  "icon": "[!]"},
+        "crit": {"rgb": (255, 205, 210), "fg": (159, 30, 30), "label": "KRITISCH", "icon": "[X]"},
+    }[verdict]
+    if use_unicode:
+        palette["icon"] = {"ok": "✅", "warn": "⚠️", "crit": "\U0001F6A8"}[verdict]
+    detail = ""
+    if verdict == "crit" and crit_n is not None:
+        detail = f"  -  {crit_n} kritische Befund(e)"
+    elif verdict == "warn" and warn_n is not None:
+        detail = f"  -  {warn_n} Warnung(en)"
+    elif verdict == "ok":
+        detail = "  -  keine kritischen Befunde"
+    text = _sanitize_for_pdf(
+        f"{palette['icon']}  Verdict: {palette['label']}{detail}",
+        use_unicode,
+    )
+
+    pdf.set_fill_color(*palette["rgb"])
+    pdf.set_text_color(*palette["fg"])
+    pdf.set_font(pdf._fn, "B", 12)
+    pdf.cell(0, 10, text, ln=1, fill=True, align="L")
+    # Reset to default text colour for the body.
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
 
 
 # ---------------------------------------------------------------------------

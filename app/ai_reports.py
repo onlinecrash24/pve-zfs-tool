@@ -631,6 +631,69 @@ def test_connection():
 # Report generation
 # ---------------------------------------------------------------------------
 
+# Regex set that picks out the trailing verdict block our system prompts
+# require the LLM to emit. We tolerate ``**[VERDICT: ...]**``, code-fenced
+# variants and stray whitespace so a non-pedantic model still gets parsed.
+import re as _re
+_VERDICT_BLOCK_RE = _re.compile(
+    r"""(?ix)               # case-insensitive, verbose
+    (?:\*{0,2}|`{0,3})      # optional bold/code wrapper
+    \[\s*VERDICT\s*:\s*(?P<verdict>ok|warn|crit)\s*\]
+    (?:\*{0,2}|`{0,3})
+    \s*
+    (?:\*{0,2}|`{0,3})
+    \[\s*CRITICAL_FINDINGS\s*:\s*(?P<crit>\d+)\s*\]
+    (?:\*{0,2}|`{0,3})
+    \s*
+    (?:\*{0,2}|`{0,3})
+    \[\s*WARNINGS\s*:\s*(?P<warn>\d+)\s*\]
+    (?:\*{0,2}|`{0,3})
+    """,
+)
+# Fallback: standalone verdict line(s) when the LLM split the three keys.
+_VERDICT_LINE_RE = _re.compile(
+    r"(?im)^\s*(?:\*{0,2}|`{0,3})\[\s*(?:VERDICT|CRITICAL_FINDINGS|WARNINGS)\s*:[^\]]*\]\s*(?:\*{0,2}|`{0,3})\s*$"
+)
+
+
+def _extract_and_strip_verdict_block(content: str):
+    """Return ``(cleaned_content, {verdict, critical_findings, warnings})``.
+
+    Pulls the structured verdict the system prompt asks the LLM to emit at
+    the end of the report, strips it (and the surrounding heading like
+    "## Verdict-Block:" the LLM sometimes writes), and returns the rest as
+    the visible report text. If the block is missing or malformed, the
+    metadata dict is empty and the original content is returned unchanged
+    -- the notification side then falls back to its heuristic verdict.
+    """
+    if not content:
+        return content or "", {}
+    meta = {}
+    # 1) Try the compact "all three keys near each other" pattern first.
+    m = _VERDICT_BLOCK_RE.search(content)
+    if m:
+        meta = {
+            "verdict": m.group("verdict").lower(),
+            "critical_findings": int(m.group("crit")),
+            "warnings": int(m.group("warn")),
+        }
+    # 2) Strip every standalone verdict / critical_findings / warnings
+    #    line individually so leftover stragglers don't show up.
+    cleaned = _VERDICT_LINE_RE.sub("", content)
+    # 3) Remove a now-empty trailing heading like "## Verdict" / "**Status**"
+    #    that introduced the block.
+    heading_patterns = [
+        r"(?im)^\s*#{1,6}\s*(verdict|status|machine[- ]readable[- ]?status)[:\s]*$",
+        r"(?im)^\s*\*{1,3}\s*(verdict|status|machine[- ]readable[- ]?status)\s*\*{1,3}\s*:?\s*$",
+    ]
+    for pat in heading_patterns:
+        cleaned = _re.sub(pat, "", cleaned)
+    # 4) Collapse runs of >2 blank lines into exactly one blank line so the
+    #    PDF doesn't end on three empty paragraphs.
+    cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
+    return cleaned, meta
+
+
 def generate_report(host_address=None, lang_override=None):
     """Collect ZFS data and generate an AI analysis report."""
     config = load_config()
@@ -679,16 +742,30 @@ def generate_report(host_address=None, lang_override=None):
 
     host_names = [h.get("name", h.get("address", "?")) for h in data.get("hosts", [])]
     host_addresses = [h.get("address", "") for h in data.get("hosts", [])]
+
+    # Pull the structured verdict block out of the raw LLM response, store
+    # it as first-class fields on the report, and strip it from the visible
+    # content so the PDF / UI doesn't show "[VERDICT: warn] [CRITICAL_…]" as
+    # raw text at the bottom. The notification path then receives the
+    # already-parsed verdict instead of re-parsing it from a stripped body.
+    raw_content = result.get("content", "")
+    cleaned_content, verdict_meta = _extract_and_strip_verdict_block(raw_content)
+
     report = {
         "id": str(uuid.uuid4())[:8],
         "timestamp": tz_now().strftime("%Y-%m-%d %H:%M:%S"),
         "provider": provider,
         "model": model,
-        "content": result.get("content", ""),
+        "content": cleaned_content,
         "host_count": len(data.get("hosts", [])),
         "host_names": host_names,
         "host_addresses": host_addresses,
         "usage": result.get("usage", {}),
+        # Structured verdict (or None if the LLM forgot the block). The
+        # notification side falls back to its heuristic when verdict is None.
+        "verdict": verdict_meta.get("verdict"),
+        "critical_findings": verdict_meta.get("critical_findings"),
+        "warnings_count": verdict_meta.get("warnings"),
     }
 
     _add_report(report)
@@ -701,7 +778,7 @@ def generate_report(host_address=None, lang_override=None):
         notify_summary["enabled"] = True
         try:
             from app.notifications import send_notification
-            content_text = result.get("content", "")
+            content_text = cleaned_content
             # Send the full report (truncated to 4000 chars for message limits)
             report_text = content_text[:4000]
             if len(content_text) > 4000:
@@ -732,9 +809,40 @@ def generate_report(host_address=None, lang_override=None):
                 except Exception as e:
                     log.warning("PDF generation for notification failed: %s", e)
 
+            # Build the short email body from the verdict we already
+            # parsed. This bypasses the heuristic in _summarize_ai_report
+            # (which used to re-parse the verdict line we just stripped
+            # from the report content). Falls back to None when the LLM
+            # didn't emit a verdict block -- the notification side will
+            # then run its heuristic on the cleaned content.
+            email_short = None
+            v = verdict_meta.get("verdict")
+            if v:
+                de = (lang or "").lower().startswith("de")
+                cf = verdict_meta.get("critical_findings", 0) or 0
+                wn = verdict_meta.get("warnings", 0) or 0
+                if v == "crit":
+                    email_short = (
+                        f"🚨 Handlung zwingend nötig — {max(cf,1)} kritische(r) Hinweis(e) im Bericht."
+                        if de else
+                        f"🚨 Action required — {max(cf,1)} critical finding(s) in the report."
+                    )
+                elif v == "warn":
+                    email_short = (
+                        f"⚠️ Aufmerksamkeit empfohlen — {max(wn,1)} Warnung(en) im Bericht."
+                        if de else
+                        f"⚠️ Attention recommended — {max(wn,1)} warning(s) in the report."
+                    )
+                else:
+                    email_short = (
+                        "✅ Alles im grünen Bereich — keine kritischen Hinweise gefunden."
+                        if de else
+                        "✅ All clear — no critical findings."
+                    )
+
             log.info(
-                "ai_report: dispatching notification (hosts=%d, lang=%s, pdf=%s)",
-                len(host_names or []), lang, bool(pdf_attachment),
+                "ai_report: dispatching notification (hosts=%d, lang=%s, pdf=%s, verdict=%s)",
+                len(host_names or []), lang, bool(pdf_attachment), v or "(heuristic)",
             )
             results = send_notification(
                 "ai_report",
@@ -742,6 +850,7 @@ def generate_report(host_address=None, lang_override=None):
                 f"Provider: {provider} ({model})\n\n{report_text}",
                 pdf_attachment=pdf_attachment,
                 lang=lang,
+                email_short=email_short,
             )
             # send_notification returns either {"skipped": True, ...} when
             # the event is disabled, or {channel: result_dict} per active
