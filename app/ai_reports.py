@@ -1025,6 +1025,16 @@ def _scheduler_loop():
     while not _scheduler_stop.is_set():
         try:
             now = tz_now()
+            # First pass: which entries want to fire in this tick?
+            # We collect the full set up-front so the second pass can
+            # de-duplicate overlapping schedules -- specifically, when the
+            # all-hosts entry fires it already covers every host, so any
+            # per-host entry that would fire in the same tick is redundant
+            # (user reported receiving two near-identical emails 60 s apart
+            # with conflicting LLM verdicts because both daily-at-06:00
+            # schedules were active and we ran the LLM twice on the same
+            # data).
+            due_entries = []
             for entry in get_active_schedules():
                 if not entry["enabled"]:
                     continue
@@ -1032,7 +1042,6 @@ def _scheduler_loop():
                 interval = entry["interval"]
                 target_hour = entry["hour"]
 
-                # Build a run-key unique per scheduled period
                 if interval == "weekly":
                     run_key = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
                 else:
@@ -1045,6 +1054,38 @@ def _scheduler_loop():
                     elif interval == "weekly" and now.weekday() == entry["weekday"]:
                         should_run = True
 
+                if should_run:
+                    due_entries.append((entry, run_key))
+
+            # Dedup: if the all-hosts entry fires in this tick, suppress
+            # every per-host entry that also fires in the same tick. The
+            # all-hosts run covers their hosts already; firing per-host on
+            # top would send a second email with the same data. We still
+            # mark the per-host entries' last_run_keys so they don't
+            # re-trigger seconds later in the next 30 s tick.
+            all_hosts_due = any(e["key"] == "__all__" for e, _ in due_entries)
+            suppressed_keys = set()
+            if all_hosts_due:
+                for entry, run_key in due_entries:
+                    if entry["key"] == "__all__":
+                        continue
+                    suppressed_keys.add(entry["key"])
+                    _last_run_keys[entry["key"]] = run_key
+                    log.info(
+                        "Scheduled AI report: skipping per-host entry %s "
+                        "(host=%s) -- already covered by today's all-hosts "
+                        "run (key=%s)",
+                        entry["label"], entry["host"], run_key,
+                    )
+
+            # Second pass: actually fire the survivors. We re-derive
+            # should_run / run_key from the captured tuple so the rest of
+            # the original body keeps working unchanged.
+            for entry, run_key in due_entries:
+                if entry["key"] in suppressed_keys:
+                    continue
+                should_run = True
+                target_hour = entry.get("hour", 0)
                 if should_run:
                     log.info(
                         "Scheduled AI report triggered for %s (key=%s, hour=%s, host=%s)",
