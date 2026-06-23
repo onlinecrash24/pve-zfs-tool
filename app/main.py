@@ -1681,15 +1681,26 @@ def api_cache_invalidate():
 
 # ---------------------------------------------------------------------------
 
-# Start background services
+# Start background services.
+#
+# This runs at import time. Because gunicorn runs WITHOUT --preload (see
+# entrypoint.sh), the module is imported inside the single worker process,
+# so these threads start exactly once in the process that also serves
+# requests -- not in the master (which would not survive the fork). Both
+# start_* helpers are idempotent and lock-guarded, so the defensive
+# re-arm in POST /api/ai/config is a same-process no-op rather than a
+# second scheduler.
+#
+# Failures are logged rather than silently swallowed -- a dead scheduler
+# or sampler should be visible in `docker compose logs`, not invisible.
 try:
     start_ai_scheduler()
 except Exception:
-    pass
+    log.exception("Failed to start AI report scheduler")
 try:
     start_metrics_sampler()
 except Exception:
-    pass
+    log.exception("Failed to start metrics sampler")
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0")

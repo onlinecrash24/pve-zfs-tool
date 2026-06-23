@@ -17,6 +17,7 @@ AI_REPORTS_FILE = os.path.join(DATA_DIR, "ai_reports.json")
 
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
+_scheduler_start_lock = threading.Lock()
 _scheduler_thread = None
 _scheduler_stop = threading.Event()
 _last_run_key = None  # Legacy: single-schedule last-run (kept for backwards compat)
@@ -1132,20 +1133,27 @@ def _scheduler_loop():
 
 
 def start_scheduler():
-    """Start the scheduler thread (always runs, checks config each cycle)."""
+    """Start the scheduler thread (idempotent, thread-safe).
+
+    The lock guards against two gthread request-threads racing into the
+    starter concurrently (import-time start vs. the defensive re-arm in
+    POST /api/ai/config) and spawning two scheduler threads.
+    """
     global _scheduler_thread, _last_run_key
-    # Only start a new thread if one isn't already running
-    if _scheduler_thread and _scheduler_thread.is_alive():
-        return
-    # Seed last_run for all known schedules so we don't immediately trigger on startup
-    today = tz_now().strftime("%Y-%m-%d")
-    if _last_run_key is None:
-        _last_run_key = today
-    for entry in get_active_schedules():
-        _last_run_keys.setdefault(entry["key"], today)
-    _scheduler_stop.clear()
-    _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
-    _scheduler_thread.start()
+    with _scheduler_start_lock:
+        # Only start a new thread if one isn't already running
+        if _scheduler_thread and _scheduler_thread.is_alive():
+            return
+        # Seed last_run for all known schedules so we don't immediately
+        # trigger on startup
+        today = tz_now().strftime("%Y-%m-%d")
+        if _last_run_key is None:
+            _last_run_key = today
+        for entry in get_active_schedules():
+            _last_run_keys.setdefault(entry["key"], today)
+        _scheduler_stop.clear()
+        _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
+        _scheduler_thread.start()
 
 
 def stop_scheduler():
