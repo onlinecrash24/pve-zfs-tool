@@ -1,5 +1,6 @@
 """AI-powered ZFS report generation supporting OpenAI, Anthropic, Ollama, and custom providers."""
 
+import datetime
 import json
 import os
 import re
@@ -635,8 +636,7 @@ def test_connection():
 # Regex set that picks out the trailing verdict block our system prompts
 # require the LLM to emit. We tolerate ``**[VERDICT: ...]**``, code-fenced
 # variants and stray whitespace so a non-pedantic model still gets parsed.
-import re as _re
-_VERDICT_BLOCK_RE = _re.compile(
+_VERDICT_BLOCK_RE = re.compile(
     r"""(?ix)               # case-insensitive, verbose
     (?:\*{0,2}|`{0,3})      # optional bold/code wrapper
     \[\s*VERDICT\s*:\s*(?P<verdict>ok|warn|crit)\s*\]
@@ -652,7 +652,7 @@ _VERDICT_BLOCK_RE = _re.compile(
     """,
 )
 # Fallback: standalone verdict line(s) when the LLM split the three keys.
-_VERDICT_LINE_RE = _re.compile(
+_VERDICT_LINE_RE = re.compile(
     r"(?im)^\s*(?:\*{0,2}|`{0,3})\[\s*(?:VERDICT|CRITICAL_FINDINGS|WARNINGS)\s*:[^\]]*\]\s*(?:\*{0,2}|`{0,3})\s*$"
 )
 
@@ -688,10 +688,10 @@ def _extract_and_strip_verdict_block(content: str):
         r"(?im)^\s*\*{1,3}\s*(verdict|status|machine[- ]readable[- ]?status)\s*\*{1,3}\s*:?\s*$",
     ]
     for pat in heading_patterns:
-        cleaned = _re.sub(pat, "", cleaned)
+        cleaned = re.sub(pat, "", cleaned)
     # 4) Collapse runs of >2 blank lines into exactly one blank line so the
     #    PDF doesn't end on three empty paragraphs.
-    cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
     return cleaned, meta
 
 
@@ -998,7 +998,6 @@ def get_active_schedules():
 
 def _compute_next_run(now, entry):
     """Return a human-readable next-run time for a schedule entry."""
-    import datetime as _dt
     hour = entry.get("hour", 6)
     interval = entry.get("interval", "daily")
     weekday = entry.get("weekday", 0)
@@ -1006,12 +1005,12 @@ def _compute_next_run(now, entry):
     candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if interval == "weekly":
         days_ahead = (weekday - now.weekday()) % 7
-        candidate = candidate + _dt.timedelta(days=days_ahead)
+        candidate = candidate + datetime.timedelta(days=days_ahead)
         if candidate <= now:
-            candidate = candidate + _dt.timedelta(days=7)
+            candidate = candidate + datetime.timedelta(days=7)
     else:  # daily
         if candidate <= now:
-            candidate = candidate + _dt.timedelta(days=1)
+            candidate = candidate + datetime.timedelta(days=1)
     return candidate.strftime("%Y-%m-%d %H:%M")
 
 
