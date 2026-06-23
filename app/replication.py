@@ -15,6 +15,7 @@ intentionally out-of-scope for Phase 1.
 
 from __future__ import annotations
 
+import base64
 import re
 import shlex
 from typing import Any, Dict, List, Optional
@@ -342,7 +343,6 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
     new_text = _serialize_config(cleaned, existing_lines)
 
     # Encode as base64 to transport safely
-    import base64
     b64 = base64.b64encode(new_text.encode("utf-8")).decode("ascii")
     script = (
         f"mkdir -p {shlex.quote(CONFIG_DIR)} && "
@@ -1134,7 +1134,6 @@ def set_cron(host: Dict[str, Any], schedule: str,
     new_line = f"{schedule.strip()} {BINARY_NAME} -c {cfg_path} >> {log_path} 2>&1"
     # Build a small awk filter that drops existing zsync lines for THIS config
     # but keeps everything else. Then append the new line.
-    import base64
     appended = base64.b64encode(new_line.encode("utf-8")).decode("ascii")
     marker_b64 = base64.b64encode(marker.encode("utf-8")).decode("ascii")
     # IMPORTANT: cron requires a trailing newline on the last line, otherwise
@@ -1170,7 +1169,6 @@ def remove_cron(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str,
     """Remove the zsync cron entry for the given config file."""
     cfg_path = config_path_for(source)
     marker = _cron_marker(cfg_path)
-    import base64
     marker_b64 = base64.b64encode(marker.encode("utf-8")).decode("ascii")
     script = (
         f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "

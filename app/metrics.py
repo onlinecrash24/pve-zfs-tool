@@ -20,6 +20,7 @@ _FIRST_DELAY = 30       # wait 30s after startup before first sample
 
 _thread = None
 _stop = threading.Event()
+_start_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -222,15 +223,21 @@ def _loop():
 
 
 def start_sampler():
-    """Start the background sampler thread (idempotent)."""
+    """Start the background sampler thread (idempotent, thread-safe).
+
+    The lock guards against two gthread request-threads racing into the
+    starter concurrently (e.g. import-time start vs. a request that also
+    triggers it) and creating two sampler threads.
+    """
     global _thread
-    if _thread is not None and _thread.is_alive():
-        return
-    _stop.clear()
-    _thread = threading.Thread(target=_loop, daemon=True, name="metrics-sampler")
-    _thread.start()
-    log.info("Metrics sampler started (interval=%ss, retention=%sd)",
-             SAMPLE_INTERVAL, RETENTION_DAYS)
+    with _start_lock:
+        if _thread is not None and _thread.is_alive():
+            return
+        _stop.clear()
+        _thread = threading.Thread(target=_loop, daemon=True, name="metrics-sampler")
+        _thread.start()
+        log.info("Metrics sampler started (interval=%ss, retention=%sd)",
+                 SAMPLE_INTERVAL, RETENTION_DAYS)
 
 
 def stop_sampler():

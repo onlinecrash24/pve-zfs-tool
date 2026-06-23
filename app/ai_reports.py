@@ -1,5 +1,6 @@
 """AI-powered ZFS report generation supporting OpenAI, Anthropic, Ollama, and custom providers."""
 
+import datetime
 import json
 import os
 import re
@@ -17,6 +18,7 @@ AI_REPORTS_FILE = os.path.join(DATA_DIR, "ai_reports.json")
 
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
+_scheduler_start_lock = threading.Lock()
 _scheduler_thread = None
 _scheduler_stop = threading.Event()
 _last_run_key = None  # Legacy: single-schedule last-run (kept for backwards compat)
@@ -634,8 +636,7 @@ def test_connection():
 # Regex set that picks out the trailing verdict block our system prompts
 # require the LLM to emit. We tolerate ``**[VERDICT: ...]**``, code-fenced
 # variants and stray whitespace so a non-pedantic model still gets parsed.
-import re as _re
-_VERDICT_BLOCK_RE = _re.compile(
+_VERDICT_BLOCK_RE = re.compile(
     r"""(?ix)               # case-insensitive, verbose
     (?:\*{0,2}|`{0,3})      # optional bold/code wrapper
     \[\s*VERDICT\s*:\s*(?P<verdict>ok|warn|crit)\s*\]
@@ -651,7 +652,7 @@ _VERDICT_BLOCK_RE = _re.compile(
     """,
 )
 # Fallback: standalone verdict line(s) when the LLM split the three keys.
-_VERDICT_LINE_RE = _re.compile(
+_VERDICT_LINE_RE = re.compile(
     r"(?im)^\s*(?:\*{0,2}|`{0,3})\[\s*(?:VERDICT|CRITICAL_FINDINGS|WARNINGS)\s*:[^\]]*\]\s*(?:\*{0,2}|`{0,3})\s*$"
 )
 
@@ -687,10 +688,10 @@ def _extract_and_strip_verdict_block(content: str):
         r"(?im)^\s*\*{1,3}\s*(verdict|status|machine[- ]readable[- ]?status)\s*\*{1,3}\s*:?\s*$",
     ]
     for pat in heading_patterns:
-        cleaned = _re.sub(pat, "", cleaned)
+        cleaned = re.sub(pat, "", cleaned)
     # 4) Collapse runs of >2 blank lines into exactly one blank line so the
     #    PDF doesn't end on three empty paragraphs.
-    cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n"
     return cleaned, meta
 
 
@@ -997,7 +998,6 @@ def get_active_schedules():
 
 def _compute_next_run(now, entry):
     """Return a human-readable next-run time for a schedule entry."""
-    import datetime as _dt
     hour = entry.get("hour", 6)
     interval = entry.get("interval", "daily")
     weekday = entry.get("weekday", 0)
@@ -1005,12 +1005,12 @@ def _compute_next_run(now, entry):
     candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if interval == "weekly":
         days_ahead = (weekday - now.weekday()) % 7
-        candidate = candidate + _dt.timedelta(days=days_ahead)
+        candidate = candidate + datetime.timedelta(days=days_ahead)
         if candidate <= now:
-            candidate = candidate + _dt.timedelta(days=7)
+            candidate = candidate + datetime.timedelta(days=7)
     else:  # daily
         if candidate <= now:
-            candidate = candidate + _dt.timedelta(days=1)
+            candidate = candidate + datetime.timedelta(days=1)
     return candidate.strftime("%Y-%m-%d %H:%M")
 
 
@@ -1132,20 +1132,27 @@ def _scheduler_loop():
 
 
 def start_scheduler():
-    """Start the scheduler thread (always runs, checks config each cycle)."""
+    """Start the scheduler thread (idempotent, thread-safe).
+
+    The lock guards against two gthread request-threads racing into the
+    starter concurrently (import-time start vs. the defensive re-arm in
+    POST /api/ai/config) and spawning two scheduler threads.
+    """
     global _scheduler_thread, _last_run_key
-    # Only start a new thread if one isn't already running
-    if _scheduler_thread and _scheduler_thread.is_alive():
-        return
-    # Seed last_run for all known schedules so we don't immediately trigger on startup
-    today = tz_now().strftime("%Y-%m-%d")
-    if _last_run_key is None:
-        _last_run_key = today
-    for entry in get_active_schedules():
-        _last_run_keys.setdefault(entry["key"], today)
-    _scheduler_stop.clear()
-    _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
-    _scheduler_thread.start()
+    with _scheduler_start_lock:
+        # Only start a new thread if one isn't already running
+        if _scheduler_thread and _scheduler_thread.is_alive():
+            return
+        # Seed last_run for all known schedules so we don't immediately
+        # trigger on startup
+        today = tz_now().strftime("%Y-%m-%d")
+        if _last_run_key is None:
+            _last_run_key = today
+        for entry in get_active_schedules():
+            _last_run_keys.setdefault(entry["key"], today)
+        _scheduler_stop.clear()
+        _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
+        _scheduler_thread.start()
 
 
 def stop_scheduler():

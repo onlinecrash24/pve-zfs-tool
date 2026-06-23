@@ -13,6 +13,7 @@ import re
 import smtplib
 import ssl
 import threading
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -196,7 +197,6 @@ def _send_gotify(server_url, token, title, message, priority=5):
 
 def _send_matrix(homeserver, access_token, room_id, message, html_message=None):
     """Send a text message to a Matrix room via the Client-Server API v3."""
-    import time
     hs = homeserver.rstrip("/")
     room_encoded = urllib.parse.quote(room_id, safe="")
     txn_id = str(int(time.time() * 1000))
@@ -259,7 +259,6 @@ def _matrix_upload_media(homeserver, access_token, file_bytes, filename, content
 def _send_matrix_file(homeserver, access_token, room_id, file_bytes, filename,
                       content_type="application/pdf", caption=""):
     """Upload file to Matrix media and post as m.file message."""
-    import time
     mxc_uri = _matrix_upload_media(homeserver, access_token, file_bytes, filename, content_type)
     if not mxc_uri:
         return {"success": False, "detail": "Media upload failed"}

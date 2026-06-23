@@ -1,10 +1,12 @@
 import os
 import time
+import json
 import secrets
 import functools
 import hashlib
 import hmac
 import logging
+import traceback
 from datetime import timedelta
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, make_response
 
@@ -1039,7 +1041,6 @@ def api_ai_raw_data():
     data = collect_host_data(host_address if host_address else None)
     if not data:
         return jsonify({"error": "No data collected"}), 404
-    import json
     json_str = json.dumps(data, indent=2, ensure_ascii=False, default=str)
     response = make_response(json_str)
     response.headers["Content-Type"] = "application/json; charset=utf-8"
@@ -1063,8 +1064,7 @@ def api_ai_report_pdf(report_id):
         from app.ai_pdf import generate_pdf
         pdf_bytes = generate_pdf(report)
     except Exception as e:
-        import logging, traceback
-        logging.getLogger(__name__).error("PDF generation failed: %s\n%s", e, traceback.format_exc())
+        log.error("PDF generation failed: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
 
     from flask import send_file
@@ -1681,15 +1681,26 @@ def api_cache_invalidate():
 
 # ---------------------------------------------------------------------------
 
-# Start background services
+# Start background services.
+#
+# This runs at import time. Because gunicorn runs WITHOUT --preload (see
+# entrypoint.sh), the module is imported inside the single worker process,
+# so these threads start exactly once in the process that also serves
+# requests -- not in the master (which would not survive the fork). Both
+# start_* helpers are idempotent and lock-guarded, so the defensive
+# re-arm in POST /api/ai/config is a same-process no-op rather than a
+# second scheduler.
+#
+# Failures are logged rather than silently swallowed -- a dead scheduler
+# or sampler should be visible in `docker compose logs`, not invisible.
 try:
     start_ai_scheduler()
 except Exception:
-    pass
+    log.exception("Failed to start AI report scheduler")
 try:
     start_metrics_sampler()
 except Exception:
-    pass
+    log.exception("Failed to start metrics sampler")
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0")
