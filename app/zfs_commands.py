@@ -981,27 +981,58 @@ def zvol_partition_mount(host, device, fstype=""):
     if not mkdir["success"]:
         return {"success": False, "error": f"Failed to create mount dir: {mkdir.get('stderr', '')}"}
 
-    # Mount read-only; use ntfs-3g for NTFS
+    # Build an ordered list of mount commands to try. A snapshot of a LIVE
+    # VM disk is crash-consistent only: the guest filesystem was never
+    # cleanly unmounted, so its journal is "dirty". A plain read-only mount
+    # cannot replay the journal and fails with "cannot mount ... read-only".
+    # The fix is filesystem-specific:
+    #   ext2/3/4, xfs  -> add `norecovery` (skip journal replay)
+    #   btrfs          -> add `rescue=nologreplay` (newer kernels)
+    #   ntfs           -> ntfs-3g handles the $LogFile itself; just ro
+    # We try the journal-skipping option first, then fall back to a plain
+    # `-o ro` in case the kernel/fs build doesn't accept the option.
+    qdev = shlex.quote(device)
+    qmp = shlex.quote(mount_path)
+    attempts = []
     if fstype in ("ntfs", "ntfs3"):
         ntfs_check = run_command(host, "which ntfs-3g")
         if not ntfs_check["success"] or not ntfs_check["stdout"].strip():
-            run_command(host, f"rmdir {shlex.quote(mount_path)} 2>/dev/null")
+            run_command(host, f"rmdir {qmp} 2>/dev/null")
             return {"success": False, "error": "ntfs-3g is not installed on the Proxmox host. Install it with: apt install ntfs-3g"}
-        mount_cmd = f"mount -t ntfs-3g -o ro {shlex.quote(device)} {shlex.quote(mount_path)}"
+        # ntfs-3g replays the journal in-memory for ro mounts automatically.
+        attempts.append(f"mount -t ntfs-3g -o ro {qdev} {qmp}")
+    elif fstype in ("ext2", "ext3", "ext4", "ext"):
+        attempts.append(f"mount -o ro,norecovery {qdev} {qmp}")
+        attempts.append(f"mount -o ro {qdev} {qmp}")
+    elif fstype == "xfs":
+        # xfs refuses a dirty ro mount without norecovery outright.
+        attempts.append(f"mount -o ro,norecovery {qdev} {qmp}")
+        attempts.append(f"mount -t xfs -o ro,norecovery {qdev} {qmp}")
+    elif fstype == "btrfs":
+        attempts.append(f"mount -o ro,rescue=nologreplay {qdev} {qmp}")
+        attempts.append(f"mount -o ro {qdev} {qmp}")
     else:
-        mount_cmd = f"mount -o ro {shlex.quote(device)} {shlex.quote(mount_path)}"
+        # Unknown / vfat / etc.: try norecovery first (harmless on fs that
+        # ignore it via -t auto? no -- norecovery is rejected by vfat), so
+        # plain ro first here, then norecovery as a long shot.
+        attempts.append(f"mount -o ro {qdev} {qmp}")
+        attempts.append(f"mount -o ro,norecovery {qdev} {qmp}")
 
-    mount_result = run_command(host, mount_cmd)
-    if not mount_result["success"]:
-        run_command(host, f"rmdir {shlex.quote(mount_path)} 2>/dev/null")
-        return {"success": False, "error": f"Mount failed: {mount_result.get('stderr', '')}"}
+    last_err = ""
+    for cmd in attempts:
+        r = run_command(host, cmd)
+        if r["success"]:
+            return {
+                "success": True,
+                "mount_path": mount_path,
+                "device": device,
+                "fstype": fstype,
+                "mount_cmd": cmd,
+            }
+        last_err = r.get("stderr", "") or r.get("stdout", "") or last_err
 
-    return {
-        "success": True,
-        "mount_path": mount_path,
-        "device": device,
-        "fstype": fstype,
-    }
+    run_command(host, f"rmdir {qmp} 2>/dev/null")
+    return {"success": False, "error": f"Mount failed: {last_err}"}
 
 
 def zvol_unmount(host, mount_path, zvol_dev=""):
