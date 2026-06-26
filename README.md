@@ -62,7 +62,18 @@
 - **Cron Schedule Manager** -- Preset dropdown (bashclub default `20 0-22 * * *`, every 15/30 min, hourly, 2h, 6h, daily 03:00, custom) with live preview, idempotent install/replace/remove, explicit reload across cron / cronie / systemd-cron
 - **checkzfs Health Panel** -- Runs `checkzfs --source <ip>` on the target and renders an OK/WARN/CRIT summary plus a grouped table; ANSI-stripped, replicated-only filter on by default
 - **Multi-Pair Overview** -- Lists every configured pair across the fleet (scans `/etc/bashclub/*.conf` on every registered host); per-row "Open" loads it into the wizard
+- **Replication Health Monitor** -- Per-pair status (OK / WARN / CRIT / pending / no-cron), last-sync timestamp and lag are shown right in the overview, derived from the newest replica snapshot vs. the cron interval. Runs every 15 min on the existing sampler and fires a `replication_lag` notification on status transitions
+- **Same-Host Replication** -- Source and target may be the same machine for cross-pool backups (e.g. `rpool` → `sata-pool/repl`); a same-pool target is refused (a replica on the same vdevs is not a backup)
 - **Safe Delete** -- Removes cron entry + config (with timestamped backup); optional checkbox additionally destroys all `zfs-auto-snap_*` snapshots under the replica target -- datasets and zsync baseline snapshots are kept, top-level pools refused
+
+### Disaster Recovery
+- **Reverse Sync** -- Send a replica back to a rebuilt source host with `zfs send -R | ssh <source> zfs recv`, reusing the SSH trust established during replication setup
+- **Replica Discovery** -- Scans every registered host for replica roots and lists the replicated datasets and their snapshots
+- **Flexible Target** -- Pick a registered host or a free-form address/port/user (a rebuilt host may have a new IP); the destination dataset defaults to the original source path
+- **Snapshot Choice** -- Send the newest replica snapshot (default) or any older one; `zfs send -R` carries all descendants and properties
+- **Guarded Force** -- Optional `zfs recv -F` (rollback to match the stream) is off by default and gated behind a typed confirmation
+- **Background Task** -- The (potentially multi-hour) resend runs as a background job with live progress, so the UI stays responsive
+- **File-Level Recovery** -- Individual files are restored through the existing Snapshots view (mount any replica snapshot read-only, browse, preview, restore)
 
 ### Snapshot Check
 - **Retention Policy Overview** -- Displays configured `--keep=N` values per label from cron
@@ -113,6 +124,7 @@
   - `health_warning` -- capacity crosses 90 %, or read/write/checksum errors appear
   - `host_offline` -- SSH probe fails where it previously succeeded (and recovery)
   - `auto_snapshot` -- newest auto-snap per label (frequent/hourly/daily/weekly/monthly) older than expected (throttled to once per day per host/label)
+  - `replication_lag` -- a replication pair's last sync exceeds its expected interval (WARN/CRIT), and on recovery
 - **Test Notifications** -- Send test messages per channel to verify configuration
 - **Configurable Events** -- Enable/disable notifications per event type:
   - Scrub started/finished
@@ -130,10 +142,14 @@
 - **Ollama Model Discovery** -- Automatically query and select available models from your Ollama instance
 - **Per-Host & Combined Schedules** -- Independent daily/weekly plans per host, plus an optional combined "all hosts" report
 - **Comprehensive Analysis** -- Pool health, storage capacity, scrub status, snapshot coverage, SMART health, anomalies
+- **Fixed Seven-Section Layout** -- Every report has the same structure (Overall, Capacity, Scrub, Snapshots, SMART, Anomalies, Recommendations) so reports are comparable run to run
+- **Colored Status Markers** -- Each section heading carries a green / amber / red marker in both the PDF and the web viewer, with a status banner at the top of the PDF
+- **Fact-Based Verdict** -- The per-section status and the overall verdict are computed from the collected facts (pool health, capacity %, scrub age, SMART, retention), not the LLM prose, so the e-mail verdict can never contradict a green report. The notification e-mail carries a one-line verdict (✅ / ⚠️ / 🚨) and the full report as a PDF attachment
 - **Snapshot Retention Analysis** -- Per-dataset per-label retention check, gap detection, stale snapshot warnings
 - **ZDB Diagnostics** -- Automatic deep analysis triggered for degraded/faulted pools
 - **Actionable Recommendations** -- Prioritized suggestions for scrubs, cleanup, capacity planning
 - **Interactive Chat** -- Ask follow-up questions about your ZFS data
+- **Scope Toggle & Dispatch Feedback** -- Generate a single-host or combined "all hosts" report on demand; per-card "Test now" buttons report which channels actually received the message
 - **Notification Integration** -- Send reports via Telegram, Gotify, Matrix or Email -- PDF attachment supported on Email, Telegram and Matrix
 - **Bilingual Reports** -- Reports follow the global UI language (English/German)
 - **Customizable System Prompt** -- Edit the AI prompt to reduce false positives for your environment
@@ -366,6 +382,9 @@ pve-zfs-tool/
     ├── timezone.py          # Timezone helper (TZ environment variable)
     ├── notifications.py     # Telegram, Gotify, Matrix & Email notifications
     ├── replication.py       # bashclub-zsync integration (install, config, cron, checkzfs)
+    ├── replication_monitor.py # Replication lag detection + status (sampler hook)
+    ├── dr.py                # Disaster recovery (replica discovery, reverse sync)
+    ├── tasks.py             # In-memory async task registry (long-running ops)
     ├── templates/
     │   ├── index.html       # Single-page application
     │   └── login.html       # Login page

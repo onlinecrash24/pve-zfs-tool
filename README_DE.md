@@ -62,7 +62,18 @@
 - **Cron-Zeitplan-Verwaltung** -- Vorlagen-Dropdown (bashclub-Standard `20 0-22 * * *`, alle 15/30 Min, stündlich, 2h, 6h, täglich 03:00, frei konfigurierbar) mit Live-Preview, idempotentem Anlegen/Ersetzen/Entfernen, expliziter Reload für cron / cronie / systemd-cron
 - **checkzfs-Statuspanel** -- Führt `checkzfs --source <ip>` auf dem Ziel aus und zeigt eine OK/WARN/CRIT-Übersicht plus gruppierte Tabelle; ANSI bereinigt, Filter „nur replizierte" standardmäßig aktiv
 - **Multi-Paar-Übersicht** -- Listet alle konfigurierten Paare des Bestands (scannt auf jedem registrierten Host `/etc/bashclub/*.conf`); pro Zeile lädt „Öffnen" das Paar in den Wizard
+- **Replikations-Monitor** -- Pro Paar werden Status (OK / WARN / CRIT / wartet / kein Cron), letzter Sync und Lag direkt in der Übersicht angezeigt, abgeleitet aus dem neuesten Replikat-Snapshot gegenüber dem Cron-Intervall. Läuft alle 15 Min im bestehenden Sampler und feuert bei Statuswechsel eine `replication_lag`-Benachrichtigung
+- **Replikation auf demselben Host** -- Quelle und Ziel dürfen dieselbe Maschine sein (Cross-Pool-Backup, z. B. `rpool` → `sata-pool/repl`); ein Ziel auf dem gleichen Pool wird abgelehnt (ein Replikat auf den gleichen vdevs ist kein Backup)
 - **Sicheres Löschen** -- Entfernt Cron-Eintrag + Config (mit Zeitstempel-Backup); optionale Checkbox löscht zusätzlich alle `zfs-auto-snap_*`-Snapshots unterhalb des Replikat-Ziels -- Datasets und zsync-Basis-Snapshots bleiben erhalten, Top-Level-Pools werden abgelehnt
+
+### Disaster Recovery
+- **Reverse-Sync** -- Sendet ein Replikat zurück an einen wiederhergestellten Quell-Host via `zfs send -R | ssh <quelle> zfs recv` und nutzt das beim Replikations-Setup eingerichtete SSH-Vertrauen weiter
+- **Replikat-Erkennung** -- Scannt jeden registrierten Host nach Replikat-Wurzeln und listet die replizierten Datasets samt ihren Snapshots
+- **Flexibles Ziel** -- Registrierten Host wählen oder freie Adresse/Port/User angeben (ein neu aufgesetzter Host hat evtl. eine neue IP); das Ziel-Dataset ist mit dem Original-Quellpfad vorbelegt
+- **Snapshot-Auswahl** -- Neuesten Replikat-Snapshot (Standard) oder einen älteren senden; `zfs send -R` nimmt alle Unterhierarchien und Properties mit
+- **Abgesichertes Force** -- Optionales `zfs recv -F` (Rollback passend zum Stream) ist standardmäßig aus und hinter einer Bestätigung verriegelt
+- **Hintergrund-Task** -- Das (ggf. stundenlange) Zurücksenden läuft als Hintergrund-Job mit Live-Fortschritt, die Oberfläche bleibt bedienbar
+- **Datei-Wiederherstellung** -- Einzelne Dateien werden über die bestehende Snapshots-Ansicht wiederhergestellt (beliebigen Replikat-Snapshot read-only mounten, durchsuchen, ansehen, wiederherstellen)
 
 ### Snapshot-Check
 - **Retention-Policy-Übersicht** -- Zeigt konfigurierte `--keep=N`-Werte pro Label aus Cron
@@ -113,6 +124,7 @@
   - `health_warning` -- Kapazität überschreitet 90 % bzw. Read/Write/Checksum-Errors treten auf
   - `host_offline` -- SSH-Probe schlägt fehl, wo sie zuvor erfolgreich war (inkl. Recovery)
   - `auto_snapshot` -- Neuester Auto-Snap pro Label (frequent/hourly/daily/weekly/monthly) älter als erwartet (pro Host/Label auf einmal täglich begrenzt)
+  - `replication_lag` -- Der letzte Sync eines Replikations-Paars überschreitet sein erwartetes Intervall (WARN/CRIT), und bei Recovery
 - **Test-Benachrichtigungen** -- Testnachricht pro Kanal senden, um die Konfiguration zu prüfen
 - **Konfigurierbare Events** -- Benachrichtigungen pro Event-Typ aktivieren/deaktivieren:
   - Scrub gestartet/abgeschlossen
@@ -130,10 +142,14 @@
 - **Ollama-Modell-Erkennung** -- Verfügbare Modelle automatisch aus der Ollama-Instanz abfragen und auswählen
 - **Per-Host- und kombinierte Schedules** -- Unabhängige tägliche/wöchentliche Pläne pro Host plus ein optionaler „All-Hosts"-Report
 - **Umfassende Analyse** -- Pool-Health, Speicherkapazität, Scrub-Status, Snapshot-Abdeckung, SMART-Health, Anomalien
+- **Feste 7-Sektionen-Struktur** -- Jeder Bericht hat denselben Aufbau (Gesamtstatus, Kapazität, Scrub, Snapshots, SMART, Anomalien, Empfehlungen), sodass Berichte Lauf für Lauf vergleichbar sind
+- **Farbige Status-Marker** -- Jede Sektions-Überschrift trägt einen grün/gelb/rot-Marker in PDF und Web-Ansicht, plus ein Status-Banner oben im PDF
+- **Fakten-basiertes Verdict** -- Sektions-Status und Gesamt-Verdict werden aus den gesammelten Fakten berechnet (Pool-Health, Belegung %, Scrub-Alter, SMART, Retention), nicht aus der LLM-Prosa -- das E-Mail-Verdict kann einem grünen Bericht also nie widersprechen. Die Benachrichtigungs-Mail enthält ein Einzeiler-Verdict (✅ / ⚠️ / 🚨) und den vollständigen Bericht als PDF-Anhang
 - **Snapshot-Retention-Analyse** -- Per-Dataset-per-Label Retention-Check, Gap-Erkennung, Warnungen für veraltete Snapshots
 - **ZDB-Diagnose** -- Automatische Tiefenanalyse bei degraded/faulted Pools
 - **Umsetzbare Empfehlungen** -- Priorisierte Vorschläge zu Scrubs, Cleanup, Kapazitätsplanung
 - **Interaktiver Chat** -- Rückfragen zu deinen ZFS-Daten stellen
+- **Umfang-Schalter & Versand-Feedback** -- Einzel-Host- oder kombinierten „Alle Hosts"-Bericht auf Knopfdruck erzeugen; „Jetzt testen"-Buttons pro Karte melden, welche Kanäle die Nachricht tatsächlich erhalten haben
 - **Notification-Integration** -- Reports via Telegram, Gotify, Matrix oder Email; PDF-Anhang auf Email, Telegram und Matrix unterstützt
 - **Zweisprachige Reports** -- Reports folgen der globalen UI-Sprache (Englisch/Deutsch)
 - **Anpassbarer System-Prompt** -- AI-Prompt bearbeiten, um Fehlalarme in deiner Umgebung zu reduzieren
@@ -366,6 +382,9 @@ pve-zfs-tool/
     ├── timezone.py          # Zeitzonen-Helper (TZ-Umgebungsvariable)
     ├── notifications.py     # Telegram, Gotify, Matrix & Email Notifications
     ├── replication.py       # bashclub-zsync-Integration (Install, Config, Cron, checkzfs)
+    ├── replication_monitor.py # Replikations-Lag-Erkennung + Status (Sampler-Hook)
+    ├── dr.py                # Disaster Recovery (Replikat-Erkennung, Reverse-Sync)
+    ├── tasks.py             # In-Memory-Async-Task-Registry (lang laufende Ops)
     ├── templates/
     │   ├── index.html       # Single-Page-Application
     │   └── login.html       # Login-Seite
