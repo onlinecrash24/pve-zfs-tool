@@ -710,56 +710,105 @@ def _extract_and_strip_verdict_block(content: str):
     return cleaned, meta
 
 
-# Matches a section heading that begins with a status tag, e.g.
-#   "## [OK] 1. Overall Health Summary"  /  "### [CRIT] Anomalien"
-# Tolerant of bold wrappers and missing space after the tag.
-_SECTION_STATUS_RE = re.compile(
-    r"(?im)^\s*#{1,4}\s*\*{0,2}\s*\[\s*(OK|WARN|WARNING|CRIT|CRITICAL)\s*\]"
-)
-
-_STATUS_RANK = {"ok": 0, "warn": 1, "crit": 2}
-
-
-def _normalize_status(raw: str) -> str:
-    r = (raw or "").strip().lower()
-    if r in ("crit", "critical"):
-        return "crit"
-    if r in ("warn", "warning"):
-        return "warn"
-    return "ok"
+# Maps the fixed 7-section layout to a status computed from FACTS (not LLM
+# prose), keyed by the section's leading number. Smaller LLMs (e.g.
+# glm-5.2:cloud via Ollama) routinely ignore the "## [OK] N. Title" tag
+# instruction, so we can't rely on the model emitting the tags. Instead we
+# derive each section's status from the collected data and inject the tag
+# ourselves -- model-independent, and it can't contradict the facts.
+_STATUS_ORDER = {"ok": 0, "warn": 1, "crit": 2}
 
 
-def _derive_status_from_sections(content: str):
-    """Compute the overall verdict from the per-section status tags.
+def _pct(s):
+    try:
+        return float(str(s).replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
 
-    Returns ``{verdict, critical_findings, warnings, section_count}`` or
-    ``None`` if the report carries no tagged section headings (then the
-    caller falls back to the [VERDICT] block / heuristic).
 
-    The overall verdict is the WORST section tag -- this is deterministic
-    and tied to what the reader sees inline, so an all-[OK] report can never
-    produce a "critical" email (the bug that prompted this: a fully green
-    pve1 report shipped a "1 kritischer Hinweis" mail).
+def _compute_section_statuses(data):
+    """Return ``(status_by_section_number, overall)`` from collected facts.
+
+    Sections: 1 Overall, 2 Capacity, 3 Scrub, 4 Snapshots, 5 SMART,
+    6 Anomalies, 7 Recommendations. Conservative: a section is ``ok`` unless
+    a fact clearly pushes it to warn/crit, so a healthy host stays green.
     """
+    cap = scrub = snap = smart = anom = "ok"
+
+    def worsen(cur, new):
+        return new if _STATUS_ORDER[new] > _STATUS_ORDER[cur] else cur
+
+    for h in (data.get("hosts") or []):
+        for p in (h.get("pools") or []):
+            c = _pct(p.get("cap"))
+            if c is not None:
+                if c >= 95:
+                    cap = worsen(cap, "crit")
+                elif c >= 80:
+                    cap = worsen(cap, "warn")
+            health = str(p.get("health", "")).upper()
+            if health in ("DEGRADED", "FAULTED", "UNAVAIL", "SUSPENDED", "REMOVED"):
+                anom = worsen(anom, "crit")
+            ls = str(p.get("last_scan", "")).lower()
+            if "none requested" in ls:
+                scrub = worsen(scrub, "warn")
+
+        smart_data = h.get("smart") or {}
+        for pool_disks in (smart_data.get("pools") or {}).values():
+            for d in (pool_disks or []):
+                st = str(d.get("status", "")).upper()
+                if "FAIL" in st:
+                    smart = worsen(smart, "crit")
+                elif st and "PASS" not in st:
+                    smart = worsen(smart, "warn")
+
+        ra = h.get("retention_analysis") or {}
+        snap_issue = False
+        for lg in (ra.get("per_label") or {}).values():
+            if lg.get("stale_datasets") or lg.get("count_mismatches") or lg.get("gaps"):
+                snap_issue = True
+        if ra.get("missing_labels"):
+            snap_issue = True
+        if snap_issue:
+            snap = worsen(snap, "warn")
+
+        if h.get("errors"):
+            anom = worsen(anom, "warn")
+
+    statuses = {2: cap, 3: scrub, 4: snap, 5: smart, 6: anom, 7: "ok"}
+    overall = "ok"
+    for k in (2, 3, 4, 5, 6):
+        overall = worsen(overall, statuses[k])
+    statuses[1] = overall
+    return statuses, overall
+
+
+# Heading line with a leading section number, optionally already carrying a
+# status tag (which we override with the fact-based one).
+_HEADING_NUM_RE = re.compile(
+    r"^(#{1,4})\s+(?:\*{0,2}\s*)?(?:\[\s*(?:OK|WARN|WARNING|CRIT|CRITICAL)\s*\]\s*)?(\d+)\.\s+(.*)$",
+    re.IGNORECASE,
+)
+_TAG_FOR_STATUS = {"ok": "OK", "warn": "WARN", "crit": "CRIT"}
+
+
+def _inject_section_tags(content, statuses):
+    """Rewrite numbered section headings to carry the fact-based status tag,
+    e.g. ``## 1. Gesamtstatus`` -> ``## [OK] 1. Gesamtstatus``. Any existing
+    tag the LLM emitted is replaced so the marker always matches the facts."""
     if not content:
-        return None
-    statuses = [_normalize_status(m) for m in _SECTION_STATUS_RE.findall(content)]
-    if not statuses:
-        return None
-    crit = statuses.count("crit")
-    warn = statuses.count("warn")
-    if crit:
-        overall = "crit"
-    elif warn:
-        overall = "warn"
-    else:
-        overall = "ok"
-    return {
-        "verdict": overall,
-        "critical_findings": crit,
-        "warnings": warn,
-        "section_count": len(statuses),
-    }
+        return content or ""
+    out = []
+    for line in content.split("\n"):
+        m = _HEADING_NUM_RE.match(line.strip())
+        if m:
+            hashes, num, title = m.group(1), int(m.group(2)), m.group(3)
+            st = statuses.get(num)
+            if st:
+                out.append(f"{hashes} [{_TAG_FOR_STATUS[st]}] {num}. {title}")
+                continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def generate_report(host_address=None, lang_override=None):
@@ -819,22 +868,29 @@ def generate_report(host_address=None, lang_override=None):
     raw_content = result.get("content", "")
     cleaned_content, verdict_meta = _extract_and_strip_verdict_block(raw_content)
 
-    # Overall verdict precedence:
-    #   1. Per-section status tags (deterministic worst-of, tied to what the
-    #      reader sees inline) -- the authoritative source.
-    #   2. The trailing [VERDICT] block the LLM emitted.
-    #   3. Nothing here -> the notification heuristic decides downstream.
-    # (1) beats (2) so a self-contradicting model -- green sections but a
-    # stray [VERDICT: crit] line -- can no longer ship a "critical" email.
-    section_meta = _derive_status_from_sections(cleaned_content)
-    if section_meta:
-        verdict = section_meta["verdict"]
-        crit_count = section_meta["critical_findings"]
-        warn_count = section_meta["warnings"]
-    else:
-        verdict = verdict_meta.get("verdict")
-        crit_count = verdict_meta.get("critical_findings")
-        warn_count = verdict_meta.get("warnings")
+    # Section status + overall verdict are computed from FACTS (collected
+    # data), not the LLM prose, because smaller models routinely ignore the
+    # "## [OK] N. Title" tag instruction -> no colored markers and an
+    # inconsistent verdict (a green report shipping a "warning" email). We
+    # derive each section's status from the data and inject the tag into the
+    # headings ourselves, so the markers always render and always match the
+    # facts. The LLM's own tags / [VERDICT] block are ignored for the
+    # verdict but kept as a fallback if fact computation yields nothing.
+    section_status_map, fact_overall = _compute_section_statuses(data)
+    cleaned_content = _inject_section_tags(cleaned_content, section_status_map)
+
+    crit_count = sum(1 for k in (2, 3, 4, 5, 6) if section_status_map.get(k) == "crit")
+    warn_count = sum(1 for k in (2, 3, 4, 5, 6) if section_status_map.get(k) == "warn")
+    verdict = fact_overall
+    verdict_source = "facts"
+    # Defensive fallback: if for some reason facts produced nothing useful
+    # AND the LLM emitted a verdict block, honor that instead.
+    if verdict == "ok" and crit_count == 0 and warn_count == 0 and not (data.get("hosts")):
+        if verdict_meta.get("verdict"):
+            verdict = verdict_meta["verdict"]
+            crit_count = verdict_meta.get("critical_findings") or 0
+            warn_count = verdict_meta.get("warnings") or 0
+            verdict_source = "block"
 
     report = {
         "id": str(uuid.uuid4())[:8],
@@ -846,13 +902,14 @@ def generate_report(host_address=None, lang_override=None):
         "host_names": host_names,
         "host_addresses": host_addresses,
         "usage": result.get("usage", {}),
-        # Structured verdict (or None if neither sections nor the block
-        # yielded one). The notification side falls back to its heuristic
-        # when verdict is None.
+        # Fact-derived verdict + per-section status map (1..7 -> ok/warn/crit)
+        # so the PDF/UI can render markers even on a model that ignored the
+        # heading-tag instruction.
         "verdict": verdict,
         "critical_findings": crit_count,
         "warnings_count": warn_count,
-        "verdict_source": "sections" if section_meta else ("block" if verdict_meta.get("verdict") else "heuristic"),
+        "verdict_source": verdict_source,
+        "section_statuses": section_status_map,
     }
 
     _add_report(report)
