@@ -436,12 +436,20 @@ def _render_markdown(pdf, content):
             i += 1
             continue
 
-        # Headers (## Section)
+        # Headers (## Section), optionally prefixed with a status tag the
+        # system prompt asks for, e.g. "## [OK] 1. Overall Health Summary".
         hdr_match = re.match(r'^(#{1,4})\s+(.+)', stripped)
         if hdr_match:
             level = len(hdr_match.group(1))
-            text = _strip_md(hdr_match.group(2))
-            _render_heading(pdf, text, level)
+            raw_text = hdr_match.group(2)
+            status = None
+            tag_match = re.match(r'^\s*\*{0,2}\s*\[\s*(OK|WARN|WARNING|CRIT|CRITICAL)\s*\]\s*\*{0,2}\s*(.*)', raw_text, re.IGNORECASE)
+            if tag_match:
+                s = tag_match.group(1).lower()
+                status = "crit" if s.startswith("crit") else ("warn" if s.startswith("warn") else "ok")
+                raw_text = tag_match.group(2)
+            text = _strip_md(raw_text)
+            _render_heading(pdf, text, level, status=status)
             i += 1
             continue
 
@@ -559,34 +567,67 @@ def _parse_inline(text):
 # Section headings
 # ---------------------------------------------------------------------------
 
-def _render_heading(pdf, text, level):
-    """Render a section heading with colored accent."""
+# Status colors for the per-section markers (green / amber / red).
+_STATUS_COLORS = {
+    "ok":   (46, 164, 79),    # green
+    "warn": (210, 153, 34),   # amber
+    "crit": (207, 34, 46),    # red
+}
+
+
+def _render_heading(pdf, text, level, status=None):
+    """Render a section heading with colored accent.
+
+    When ``status`` is one of ok/warn/crit a colored status dot is drawn to
+    the left of the heading and the accent bar is tinted in the status
+    color, so the reader sees at a glance whether the section is healthy,
+    a warning, or critical.
+    """
     sizes = {1: 14, 2: 12, 3: 11, 4: 10}
     font_size = sizes.get(level, 10)
+    status_rgb = _STATUS_COLORS.get(status)
 
     if level <= 2:
         pdf.ln(5)
-        # Colored accent bar + heading
-        pdf.set_fill_color(*COLORS["accent_light"])
-        pdf.set_text_color(*COLORS["accent"])
+        bar_rgb = status_rgb or COLORS["accent"]
+        text_rgb = status_rgb or COLORS["accent"]
         pdf._f("B", font_size)
-        pdf.set_x(pdf.l_margin)
-        # Draw accent bar on left
         y = pdf.get_y()
-        pdf.set_fill_color(*COLORS["accent"])
-        pdf.rect(pdf.l_margin, y, 2.5, font_size * 0.55, "F")
-        pdf.set_x(pdf.l_margin + 5)
-        pdf.cell(0, font_size * 0.55, pdf._s(text))
-        pdf.ln(font_size * 0.55)
-        # Thin line under heading
-        pdf.set_draw_color(*COLORS["accent"])
+        bar_h = font_size * 0.55
+        # Accent bar on the left, tinted with the status color.
+        pdf.set_fill_color(*bar_rgb)
+        pdf.rect(pdf.l_margin, y, 2.5, bar_h, "F")
+        # Status dot between the bar and the text.
+        if status_rgb:
+            r = 1.6
+            cx = pdf.l_margin + 5 + r
+            cy = y + bar_h / 2
+            pdf.set_fill_color(*status_rgb)
+            pdf.ellipse(cx - r, cy - r, 2 * r, 2 * r, "F")
+            text_x = pdf.l_margin + 5 + 2 * r + 2
+        else:
+            text_x = pdf.l_margin + 5
+        pdf.set_text_color(*text_rgb)
+        pdf.set_xy(text_x, y)
+        pdf.cell(0, bar_h, pdf._s(text))
+        pdf.ln(bar_h)
+        # Thin line under heading, tinted with the status color.
+        pdf.set_draw_color(*bar_rgb)
         pdf.set_line_width(0.15)
         pdf.line(pdf.l_margin, pdf.get_y() + 0.5, pdf.w - pdf.r_margin, pdf.get_y() + 0.5)
         pdf.set_line_width(0.2)
         pdf.ln(3)
     else:
         pdf.ln(3)
-        pdf.set_text_color(*COLORS["text"])
+        if status_rgb:
+            y = pdf.get_y()
+            r = 1.4
+            pdf.set_fill_color(*status_rgb)
+            pdf.ellipse(pdf.l_margin, y + 1.5, 2 * r, 2 * r, "F")
+            pdf.set_x(pdf.l_margin + 2 * r + 2)
+            pdf.set_text_color(*status_rgb)
+        else:
+            pdf.set_text_color(*COLORS["text"])
         pdf._f("B", font_size)
         pdf.multi_cell(0, 5.5, pdf._s(text))
         pdf.ln(1.5)

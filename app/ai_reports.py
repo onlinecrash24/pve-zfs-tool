@@ -64,14 +64,33 @@ DEFAULT_CONFIG = {
 DEFAULT_SYSTEM_PROMPT_EN = """You are a ZFS storage expert analyzing a Proxmox VE environment.
 Analyze the provided ZFS data and generate a comprehensive status report.
 
-Structure your report with these sections:
-1. **Overall Health Summary** - Quick status of all pools across all hosts
-2. **Storage Capacity** - Usage per pool with warnings if above 80%
-3. **Scrub Status** - Last scrub results, overdue scrubs (recommend monthly)
-4. **Snapshot Analysis** - Total counts, auto-snapshot coverage, datasets without snapshots, retention concerns
-5. **SMART Disk Health** - Status of all drives
-6. **Anomalies & Warnings** - Anything unusual or concerning
-7. **Recommendations** - Actionable items sorted by priority
+Structure your report with EXACTLY these seven sections, in this order, with
+these exact titles and NO additional sections (fold fragmentation, ARC, events
+etc. into the relevant section below — do not invent an 8th section). Each
+section heading MUST be a level-2 markdown heading that BEGINS with a status
+tag in square brackets, like this:
+
+## [OK] 1. Overall Health Summary
+## [OK] 2. Storage Capacity
+## [OK] 3. Scrub Status
+## [OK] 4. Snapshot Analysis
+## [OK] 5. SMART Disk Health
+## [OK] 6. Anomalies & Warnings
+## [OK] 7. Recommendations
+
+The status tag is exactly one of [OK], [WARN], [CRIT] and reflects THIS section
+only:
+  [OK]   = nothing actionable in this area.
+  [WARN] = something to address soon (capacity > 80 %, overdue scrub < 60 days,
+           stale auto-snapshots, only low-priority recommendations exist).
+  [CRIT] = immediate attention (pool DEGRADED/FAULTED, capacity > 95 %, read/
+           write/checksum errors, SMART pre-fail, scrub overdue > 60 days,
+           retention gaps that break the policy).
+Be conservative: a healthy area is [OK]. Tag the Recommendations section [OK]
+when its only items are optional/low-priority; use [WARN]/[CRIT] there only if
+you are genuinely recommending an urgent action. The overall verdict is the
+WORST section tag, so do not tag a section [CRIT]/[WARN] unless that section
+really contains a critical/warning finding.
 
 IMPORTANT — Proxmox-specific rules you MUST follow:
 - **Snapshot freshness**: The data includes per-dataset snapshot details (per_dataset). To determine the most recent snapshot, you MUST check the "newest" date across ALL child datasets (e.g. rpool/data/subvol-*, rpool/ROOT/pve-1, tank/data/vm-*), not just the root pool dataset. Parent dataset snapshots often show 0B used — this is normal because actual data lives in child datasets.
@@ -88,48 +107,55 @@ IMPORTANT — Proxmox-specific rules you MUST follow:
 - **ZDB deep diagnostics**: If a pool is DEGRADED, FAULTED, or has data errors, the data may include a "zdb_diagnostics" section with low-level pool internals (block stats, vdev tree, disk labels). Use this data to provide detailed root-cause analysis: which vdev failed, txg state, block allocation issues. If zdb_diagnostics is absent, the pools are healthy — do NOT recommend running zdb manually.
 - **Fragmentation on SSD/NVMe is NORMAL**: ZFS fragmentation percentage reflects free-space fragmentation, not file fragmentation. On SSD/NVMe pools (which is the vast majority of Proxmox installations), high fragmentation (even 50–90%) has NO measurable performance impact because SSDs have no seek time. Do NOT flag fragmentation as an issue unless the pool is demonstrably on spinning rust (HDDs) AND fragmentation exceeds 50%. Never recommend "defragmentation" — ZFS cannot defragment in-place; the only remedy is send/recv to a fresh pool, which is almost always unnecessary. When in doubt, assume SSD/NVMe and ignore fragmentation entirely.
 
-Use emoji indicators: ✅ OK, ⚠️ Warning, ❌ Critical
 Be concise but thorough. Focus on actionable insights. Avoid false positives.
 Write the entire report in English.
 
-MANDATORY — End the report with EXACTLY this machine-readable verdict
-block (own paragraph, no markdown formatting, no extra text after it):
+MANDATORY — After the seven sections, end the report with EXACTLY this
+machine-readable verdict block (own paragraph, no markdown formatting, no
+extra text after it). It MUST equal the worst section tag above:
 
 [VERDICT: ok|warn|crit]
 [CRITICAL_FINDINGS: <integer>]
 [WARNINGS: <integer>]
 
-Pick exactly ONE verdict value:
-  ok   = nothing actionable; everything healthy.
-  warn = at least one warning that should be addressed soon
-         (e.g. capacity > 80 %, overdue scrub < 60 days,
-          stale auto-snapshots).
-  crit = something demands immediate human attention
-         (e.g. pool DEGRADED/FAULTED, capacity > 95 %,
-          read/write/checksum errors, SMART pre-fail,
-          scrub overdue > 60 days, missing snapshots that
-          break the retention policy).
+CRITICAL_FINDINGS = number of sections you tagged [CRIT].
+WARNINGS         = number of sections you tagged [WARN].
 
-CRITICAL_FINDINGS = number of distinct findings that count as crit.
-WARNINGS         = number of distinct findings that count as warn.
-
-An overdue scrub of ~1 week is NOT critical. SSD fragmentation is
-NEVER an issue. "Keine kritischen Probleme" is verdict=ok with
-CRITICAL_FINDINGS=0.
-
-Be conservative: choose the LOWEST verdict that honestly fits."""
+An overdue scrub of ~1 week is NOT critical. SSD fragmentation is NEVER an
+issue. If every section is [OK], the verdict is ok with both counts 0. Be
+conservative: choose the LOWEST verdict that honestly fits the section tags."""
 
 DEFAULT_SYSTEM_PROMPT_DE = """Du bist ein ZFS-Speicherexperte und analysierst eine Proxmox VE Umgebung.
 Analysiere die bereitgestellten ZFS-Daten und erstelle einen umfassenden Statusbericht.
 
-Strukturiere den Bericht mit diesen Abschnitten:
-1. **Gesamtstatus** - Schnellübersicht aller Pools auf allen Hosts
-2. **Speicherkapazität** - Belegung pro Pool mit Warnung ab 80%
-3. **Scrub-Status** - Letzte Scrub-Ergebnisse, überfällige Scrubs (monatlich empfohlen)
-4. **Snapshot-Analyse** - Gesamtanzahl, Auto-Snapshot-Abdeckung, Datasets ohne Snapshots, Aufbewahrungshinweise
-5. **SMART-Festplattenzustand** - Status aller Laufwerke
-6. **Anomalien & Warnungen** - Auffälligkeiten oder Bedenken
-7. **Empfehlungen** - Handlungsempfehlungen nach Priorität sortiert
+Strukturiere den Bericht mit GENAU diesen sieben Abschnitten, in dieser
+Reihenfolge, mit genau diesen Titeln und KEINEN zusätzlichen Abschnitten
+(Fragmentierung, ARC, Events usw. in den passenden Abschnitt unten einbauen —
+erfinde keinen 8. Abschnitt). Jede Abschnitts-Überschrift MUSS eine Level-2-
+Markdown-Überschrift sein, die mit einem Status-Tag in eckigen Klammern
+BEGINNT, so:
+
+## [OK] 1. Gesamtstatus
+## [OK] 2. Speicherkapazität
+## [OK] 3. Scrub-Status
+## [OK] 4. Snapshot-Analyse
+## [OK] 5. SMART-Festplattenzustand
+## [OK] 6. Anomalien & Warnungen
+## [OK] 7. Empfehlungen
+
+Das Status-Tag ist genau eines von [OK], [WARN], [CRIT] und bezieht sich NUR
+auf diesen Abschnitt:
+  [OK]   = in diesem Bereich kein Handlungsbedarf.
+  [WARN] = demnächst angehen (Belegung > 80 %, überfälliger Scrub < 60 Tage,
+           veraltete Auto-Snapshots, nur niedrigpriorisierte Empfehlungen).
+  [CRIT] = sofortige Aufmerksamkeit (Pool DEGRADED/FAULTED, Belegung > 95 %,
+           Read-/Write-/Checksum-Fehler, SMART Pre-Fail, Scrub überfällig
+           > 60 Tage, Retention-Lücken, die die Policy brechen).
+Sei konservativ: ein gesunder Bereich ist [OK]. Den Empfehlungs-Abschnitt nur
+dann [WARN]/[CRIT] taggen, wenn du wirklich eine dringende Maßnahme empfiehlst;
+sonst [OK]. Das Gesamt-Verdict ist das SCHLECHTESTE Abschnitts-Tag — tagge
+einen Abschnitt also nur [CRIT]/[WARN], wenn er wirklich einen kritischen/
+Warn-Befund enthält.
 
 WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
 - **Snapshot-Aktualität**: Die Daten enthalten Snapshot-Details pro Dataset (per_dataset). Um den neuesten Snapshot zu bestimmen, MUSST du das "newest"-Datum über ALLE Child-Datasets prüfen (z.B. rpool/data/subvol-*, rpool/ROOT/pve-1, tank/data/vm-*), nicht nur das Root-Pool-Dataset. Snapshots auf Parent-Datasets zeigen oft 0B used — das ist normal, da die eigentlichen Daten in Child-Datasets liegen.
@@ -146,35 +172,24 @@ WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
 - **ZDB-Tiefendiagnose**: Falls ein Pool DEGRADED, FAULTED oder Datenfehler hat, können die Daten eine "zdb_diagnostics"-Sektion enthalten mit Low-Level Pool-Internals (Block-Statistiken, vdev-Baum, Disk-Labels). Nutze diese Daten für eine detaillierte Ursachenanalyse: welches vdev ausgefallen ist, txg-Status, Block-Allokationsprobleme. Falls zdb_diagnostics fehlt, sind die Pools gesund — empfehle NICHT, zdb manuell auszuführen.
 - **Fragmentierung auf SSD/NVMe ist NORMAL**: Der ZFS-Fragmentierungs-Prozentsatz bezieht sich auf die Fragmentierung des freien Speichers, nicht auf Datei-Fragmentierung. Auf SSD/NVMe-Pools (der absolute Großteil aller Proxmox-Installationen) hat hohe Fragmentierung (auch 50–90 %) KEINEN messbaren Performance-Einfluss, da SSDs keine Suchzeit haben. Melde Fragmentierung NICHT als Problem, außer der Pool läuft nachweislich auf rotierenden HDDs UND die Fragmentierung übersteigt 50 %. Empfehle NIEMALS "Defragmentierung" — ZFS kann nicht in-place defragmentieren; die einzige Abhilfe wäre send/recv auf einen neuen Pool, was fast nie nötig ist. Im Zweifel: SSD/NVMe annehmen und Fragmentierung ignorieren.
 
-Verwende Emoji-Indikatoren: ✅ OK, ⚠️ Warnung, ❌ Kritisch
 Sei prägnant aber gründlich. Fokus auf umsetzbare Erkenntnisse. Vermeide Fehlalarme.
 Schreibe den gesamten Bericht auf Deutsch.
 
-PFLICHT — Beende den Bericht mit GENAU diesem maschinenlesbaren
-Verdict-Block (eigener Absatz, kein Markdown, kein Text danach):
+PFLICHT — Beende den Bericht NACH den sieben Abschnitten mit GENAU diesem
+maschinenlesbaren Verdict-Block (eigener Absatz, kein Markdown, kein Text
+danach). Er MUSS dem schlechtesten Abschnitts-Tag oben entsprechen:
 
 [VERDICT: ok|warn|crit]
 [CRITICAL_FINDINGS: <ganze Zahl>]
 [WARNINGS: <ganze Zahl>]
 
-Wähle GENAU einen Verdict-Wert:
-  ok   = keine Handlungsbedarf; alles gesund.
-  warn = mindestens ein Hinweis, der demnächst angegangen werden
-         sollte (z. B. Belegung > 80 %, überfälliger Scrub < 60 Tage,
-         veraltete Auto-Snapshots).
-  crit = etwas verlangt sofortige Aufmerksamkeit (z. B. Pool
-         DEGRADED/FAULTED, Belegung > 95 %, Read-/Write-/Checksum-
-         Fehler, SMART Pre-Fail, Scrub überfällig > 60 Tage,
-         fehlende Snapshots, die die Retention-Policy brechen).
+CRITICAL_FINDINGS = Anzahl der mit [CRIT] getaggten Abschnitte.
+WARNINGS         = Anzahl der mit [WARN] getaggten Abschnitte.
 
-CRITICAL_FINDINGS = Anzahl unterschiedlicher Befunde mit Verdict crit.
-WARNINGS         = Anzahl unterschiedlicher Befunde mit Verdict warn.
-
-Ein vor ~1 Woche fälliger Scrub ist NICHT kritisch. SSD-Fragmentierung
-ist NIE ein Problem. „Keine kritischen Probleme" entspricht
-verdict=ok mit CRITICAL_FINDINGS=0.
-
-Sei konservativ: wähle das NIEDRIGSTE Verdict, das ehrlich passt."""
+Ein vor ~1 Woche fälliger Scrub ist NICHT kritisch. SSD-Fragmentierung ist NIE
+ein Problem. Wenn jeder Abschnitt [OK] ist, ist das Verdict ok mit beiden
+Zählern 0. Sei konservativ: wähle das NIEDRIGSTE Verdict, das ehrlich zu den
+Abschnitts-Tags passt."""
 
 
 def _ensure_data_dir():
@@ -695,6 +710,58 @@ def _extract_and_strip_verdict_block(content: str):
     return cleaned, meta
 
 
+# Matches a section heading that begins with a status tag, e.g.
+#   "## [OK] 1. Overall Health Summary"  /  "### [CRIT] Anomalien"
+# Tolerant of bold wrappers and missing space after the tag.
+_SECTION_STATUS_RE = re.compile(
+    r"(?im)^\s*#{1,4}\s*\*{0,2}\s*\[\s*(OK|WARN|WARNING|CRIT|CRITICAL)\s*\]"
+)
+
+_STATUS_RANK = {"ok": 0, "warn": 1, "crit": 2}
+
+
+def _normalize_status(raw: str) -> str:
+    r = (raw or "").strip().lower()
+    if r in ("crit", "critical"):
+        return "crit"
+    if r in ("warn", "warning"):
+        return "warn"
+    return "ok"
+
+
+def _derive_status_from_sections(content: str):
+    """Compute the overall verdict from the per-section status tags.
+
+    Returns ``{verdict, critical_findings, warnings, section_count}`` or
+    ``None`` if the report carries no tagged section headings (then the
+    caller falls back to the [VERDICT] block / heuristic).
+
+    The overall verdict is the WORST section tag -- this is deterministic
+    and tied to what the reader sees inline, so an all-[OK] report can never
+    produce a "critical" email (the bug that prompted this: a fully green
+    pve1 report shipped a "1 kritischer Hinweis" mail).
+    """
+    if not content:
+        return None
+    statuses = [_normalize_status(m) for m in _SECTION_STATUS_RE.findall(content)]
+    if not statuses:
+        return None
+    crit = statuses.count("crit")
+    warn = statuses.count("warn")
+    if crit:
+        overall = "crit"
+    elif warn:
+        overall = "warn"
+    else:
+        overall = "ok"
+    return {
+        "verdict": overall,
+        "critical_findings": crit,
+        "warnings": warn,
+        "section_count": len(statuses),
+    }
+
+
 def generate_report(host_address=None, lang_override=None):
     """Collect ZFS data and generate an AI analysis report."""
     config = load_config()
@@ -752,6 +819,23 @@ def generate_report(host_address=None, lang_override=None):
     raw_content = result.get("content", "")
     cleaned_content, verdict_meta = _extract_and_strip_verdict_block(raw_content)
 
+    # Overall verdict precedence:
+    #   1. Per-section status tags (deterministic worst-of, tied to what the
+    #      reader sees inline) -- the authoritative source.
+    #   2. The trailing [VERDICT] block the LLM emitted.
+    #   3. Nothing here -> the notification heuristic decides downstream.
+    # (1) beats (2) so a self-contradicting model -- green sections but a
+    # stray [VERDICT: crit] line -- can no longer ship a "critical" email.
+    section_meta = _derive_status_from_sections(cleaned_content)
+    if section_meta:
+        verdict = section_meta["verdict"]
+        crit_count = section_meta["critical_findings"]
+        warn_count = section_meta["warnings"]
+    else:
+        verdict = verdict_meta.get("verdict")
+        crit_count = verdict_meta.get("critical_findings")
+        warn_count = verdict_meta.get("warnings")
+
     report = {
         "id": str(uuid.uuid4())[:8],
         "timestamp": tz_now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -762,11 +846,13 @@ def generate_report(host_address=None, lang_override=None):
         "host_names": host_names,
         "host_addresses": host_addresses,
         "usage": result.get("usage", {}),
-        # Structured verdict (or None if the LLM forgot the block). The
-        # notification side falls back to its heuristic when verdict is None.
-        "verdict": verdict_meta.get("verdict"),
-        "critical_findings": verdict_meta.get("critical_findings"),
-        "warnings_count": verdict_meta.get("warnings"),
+        # Structured verdict (or None if neither sections nor the block
+        # yielded one). The notification side falls back to its heuristic
+        # when verdict is None.
+        "verdict": verdict,
+        "critical_findings": crit_count,
+        "warnings_count": warn_count,
+        "verdict_source": "sections" if section_meta else ("block" if verdict_meta.get("verdict") else "heuristic"),
     }
 
     _add_report(report)
@@ -810,29 +896,28 @@ def generate_report(host_address=None, lang_override=None):
                 except Exception as e:
                     log.warning("PDF generation for notification failed: %s", e)
 
-            # Build the short email body from the verdict we already
-            # parsed. This bypasses the heuristic in _summarize_ai_report
-            # (which used to re-parse the verdict line we just stripped
-            # from the report content). Falls back to None when the LLM
-            # didn't emit a verdict block -- the notification side will
-            # then run its heuristic on the cleaned content.
+            # Build the short email body from the verdict we already derived
+            # (section tags first, then the [VERDICT] block). This bypasses
+            # the heuristic in _summarize_ai_report. Falls back to None when
+            # neither source produced a verdict -- the notification side then
+            # runs its heuristic on the cleaned content.
             email_short = None
-            v = verdict_meta.get("verdict")
+            v = verdict
             if v:
                 de = (lang or "").lower().startswith("de")
-                cf = verdict_meta.get("critical_findings", 0) or 0
-                wn = verdict_meta.get("warnings", 0) or 0
+                cf = crit_count or 0
+                wn = warn_count or 0
                 if v == "crit":
                     email_short = (
-                        f"🚨 Handlung zwingend nötig — {max(cf,1)} kritische(r) Hinweis(e) im Bericht."
+                        f"🚨 Handlung zwingend nötig — {max(cf,1)} kritische(r) Bereich(e) im Bericht."
                         if de else
-                        f"🚨 Action required — {max(cf,1)} critical finding(s) in the report."
+                        f"🚨 Action required — {max(cf,1)} critical section(s) in the report."
                     )
                 elif v == "warn":
                     email_short = (
-                        f"⚠️ Aufmerksamkeit empfohlen — {max(wn,1)} Warnung(en) im Bericht."
+                        f"⚠️ Aufmerksamkeit empfohlen — {max(wn,1)} Bereich(e) mit Warnung."
                         if de else
-                        f"⚠️ Attention recommended — {max(wn,1)} warning(s) in the report."
+                        f"⚠️ Attention recommended — {max(wn,1)} section(s) with warnings."
                     )
                 else:
                     email_short = (
@@ -842,8 +927,9 @@ def generate_report(host_address=None, lang_override=None):
                     )
 
             log.info(
-                "ai_report: dispatching notification (hosts=%d, lang=%s, pdf=%s, verdict=%s)",
-                len(host_names or []), lang, bool(pdf_attachment), v or "(heuristic)",
+                "ai_report: dispatching notification (hosts=%d, lang=%s, pdf=%s, verdict=%s, source=%s)",
+                len(host_names or []), lang, bool(pdf_attachment),
+                v or "(heuristic)", report.get("verdict_source"),
             )
             results = send_notification(
                 "ai_report",
