@@ -4402,7 +4402,23 @@ function renderMarkdown(text) {
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     // Italic
     html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    // Headers
+    // Section headings carrying a status tag: "## [OK] 1. Title" ->
+    // colored dot + status-colored heading. Handled before the generic
+    // header rules so the tag is consumed here.
+    const _statusColor = (raw) => {
+        const r = raw.toLowerCase();
+        const s = r.startsWith("crit") ? "crit" : r.startsWith("warn") ? "warn" : "ok";
+        return { crit: "#cf222e", warn: "#d29922", ok: "#2ea44f" }[s];
+    };
+    html = html.replace(/^(#{1,4})\s*\[(OK|WARN|WARNING|CRIT|CRITICAL)\]\s*(.+)$/gim, (m, hashes, st, title) => {
+        const color = _statusColor(st);
+        const dot = `<span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${color};margin-right:8px;vertical-align:middle"></span>`;
+        const lvl = hashes.length;
+        const tag = lvl >= 3 ? "h4" : "h3";
+        const margin = lvl >= 3 ? "16px 0 6px" : "18px 0 8px";
+        return `<${tag} style="color:${color};margin:${margin}">${dot}${title}</${tag}>`;
+    });
+    // Headers (untagged)
     html = html.replace(/^#### (.+)$/gm, '<h5 style="color:var(--accent);margin:12px 0 4px">$1</h5>');
     html = html.replace(/^### (.+)$/gm, '<h4 style="color:var(--accent);margin:16px 0 6px">$1</h4>');
     html = html.replace(/^## (.+)$/gm, '<h3 style="color:var(--accent);margin:18px 0 8px">$1</h3>');
