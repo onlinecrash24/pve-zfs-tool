@@ -194,12 +194,12 @@ class ReportPDF(FPDF):
             for style, fname in files.items():
                 path = os.path.join(FONT_DIR, fname)
                 if os.path.exists(path):
-                    self.add_font("DejaVu", style, path, uni=True)
+                    self.add_font("DejaVu", style, path)
             # If a non-regular style is missing, fpdf2 picks the regular
             # face automatically when set_font is called for that style.
             mono_path = os.path.join(FONT_DIR, "DejaVuSansMono.ttf")
             if os.path.exists(mono_path):
-                self.add_font("DejaVuMono", "", mono_path, uni=True)
+                self.add_font("DejaVuMono", "", mono_path)
                 self._fn_mono = "DejaVuMono"
             else:
                 # No mono available; reuse the Sans face for code blocks
