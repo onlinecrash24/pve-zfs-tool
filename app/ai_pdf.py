@@ -588,12 +588,21 @@ def _render_heading(pdf, text, level, status=None):
     status_rgb = _STATUS_COLORS.get(status)
 
     if level <= 2:
-        pdf.ln(5)
+        bar_h = font_size * 0.55
+        # Keep the whole heading block (leading gap + bar + dot + text +
+        # underline) together on one page. Without this, the manually drawn
+        # rect()/ellipse() land at the bottom of the page while the text is
+        # pushed to the next by auto-page-break -- leaving the colored dot
+        # orphaned at the page break.
+        needed = 5 + bar_h + 5
+        if pdf.get_y() + needed > pdf.page_break_trigger:
+            pdf.add_page()
+        else:
+            pdf.ln(5)
         bar_rgb = status_rgb or COLORS["accent"]
         text_rgb = status_rgb or COLORS["accent"]
         pdf._f("B", font_size)
         y = pdf.get_y()
-        bar_h = font_size * 0.55
         # Accent bar on the left, tinted with the status color.
         pdf.set_fill_color(*bar_rgb)
         pdf.rect(pdf.l_margin, y, 2.5, bar_h, "F")
@@ -618,7 +627,12 @@ def _render_heading(pdf, text, level, status=None):
         pdf.set_line_width(0.2)
         pdf.ln(3)
     else:
-        pdf.ln(3)
+        # Same keep-together guard for sub-headings so the dot can't get
+        # split from its text across a page break.
+        if pdf.get_y() + 3 + 5.5 > pdf.page_break_trigger:
+            pdf.add_page()
+        else:
+            pdf.ln(3)
         if status_rgb:
             y = pdf.get_y()
             r = 1.4
