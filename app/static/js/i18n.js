@@ -245,6 +245,16 @@ const TRANSLATIONS = {
         hb_download: "Download",
         hb_delete_confirm: "Delete this backup?",
         hb_deleted: "Backup deleted",
+        hb_all_title: "All host backups",
+        hb_col_host: "Host",
+        stale_block_title: "Stale snapshots",
+        stale_block_intro: "Datasets whose newest snapshot for a label is past its threshold. Open a host's Snapshot Check for the full per-label analysis.",
+        stale_block_open: "Open Snapshot Check",
+        stale_block_datasets: "dataset(s)",
+        stale_block_dataset: "Dataset",
+        stale_block_age: "Newest age",
+        stale_block_threshold: "Threshold",
+        stale_block_cleared: "No longer stale — the monitor count will refresh on the next sample.",
 
         // Pools
         zfs_pools: "ZFS Pools",
@@ -1060,6 +1070,16 @@ const TRANSLATIONS = {
         hb_download: "Herunterladen",
         hb_delete_confirm: "Dieses Backup löschen?",
         hb_deleted: "Backup gelöscht",
+        hb_all_title: "Alle Host-Backups",
+        hb_col_host: "Host",
+        stale_block_title: "Veraltete Snapshots",
+        stale_block_intro: "Datasets, deren neuester Snapshot für ein Label die Schwelle überschritten hat. Für die vollständige Per-Label-Analyse den Snapshot-Check des Hosts öffnen.",
+        stale_block_open: "Snapshot-Check öffnen",
+        stale_block_datasets: "Dataset(s)",
+        stale_block_dataset: "Dataset",
+        stale_block_age: "Neuestes Alter",
+        stale_block_threshold: "Schwelle",
+        stale_block_cleared: "Nicht mehr veraltet — der Monitor-Zähler aktualisiert sich beim nächsten Sample.",
 
         // Pools
         zfs_pools: "ZFS Pools",

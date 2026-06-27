@@ -402,20 +402,10 @@ function _renderDashboard(d) {
     root.appendChild(tiles);
 
     const tiles2 = h("div", { className: "grid grid-3", style: "gap:12px;margin-bottom:16px" });
-    const staleTile = tile(t("dash_stale_labels"),
+    tiles2.appendChild(tile(t("dash_stale_labels"),
         String(agg.stale_snap_labels || 0),
         t("dash_stale_labels_sub"),
-        (agg.stale_snap_labels || 0) === 0 ? true : false);
-    // Click-through to "where do I find them" when there are stale labels.
-    if ((agg.stale_snap_labels || 0) > 0 && (agg.stale_snap_detail || []).length) {
-        staleTile.style.cursor = "pointer";
-        staleTile.title = t("dash_stale_click_hint");
-        staleTile.appendChild(h("div", {
-            style: "font-size:11px;color:var(--accent);margin-top:4px"
-        }, "→ " + t("dash_stale_click_hint")));
-        staleTile.onclick = () => openStaleLabelsModal(agg.stale_snap_detail);
-    }
-    tiles2.appendChild(staleTile);
+        (agg.stale_snap_labels || 0) === 0 ? true : false));
     tiles2.appendChild(tile(t("dash_audit_failures"),
         String(agg.recent_audit_failures_24h || 0),
         t("dash_audit_failures_sub"),
@@ -425,6 +415,18 @@ function _renderDashboard(d) {
         "",
         (agg.pools_degraded || 0) === 0 ? true : false));
     root.appendChild(tiles2);
+
+    // Inline stale-snapshots block: when labels are behind schedule, show
+    // WHERE -- the affected datasets per host:label with age/threshold --
+    // right on the dashboard instead of hiding it behind a click.
+    if ((agg.stale_snap_detail || []).length) {
+        const staleCard = h("div", { className: "card", style: "margin-bottom:16px" });
+        staleCard.appendChild(h("div", { className: "card-header" }, "⚠️ " + t("stale_block_title")));
+        const staleBody = h("div", { className: "card-body" }, loading());
+        staleCard.appendChild(staleBody);
+        root.appendChild(staleCard);
+        renderStaleSnapshotsBlock(staleBody, agg.stale_snap_detail);
+    }
 
     // Per-host breakdown
     const hostsCard = h("div", { className: "card" });
@@ -682,9 +684,21 @@ async function viewHosts() {
         tableCard.appendChild(table);
     }
     container.appendChild(tableCard);
+
+    // Consolidated backups across all hosts.
+    const allBackupsCard = h("div", { className: "card", style: "margin-top:16px" });
+    const allBkRefresh = h("button", { className: "btn btn-sm" }, t("refresh"));
+    allBackupsCard.appendChild(h("div", { className: "card-header" },
+        [h("span", {}, t("hb_all_title")), allBkRefresh]));
+    const allBkBody = h("div", { className: "card-body" }, loading());
+    allBackupsCard.appendChild(allBkBody);
+    container.appendChild(allBackupsCard);
+
     setContent(container);
 
     document.getElementById("add-host-btn").addEventListener("click", addHost);
+    allBkRefresh.onclick = () => renderAllHostBackups(allBkBody);
+    renderAllHostBackups(allBkBody);
 
     // Auto-probe each host in parallel so the "unknown" badge resolves
     // without requiring a manual click. Uses the same /api/hosts/test
@@ -692,6 +706,57 @@ async function viewHosts() {
     for (const host of hosts) {
         _probeHostBadge(host.address);
     }
+}
+
+// Consolidated table of every stored host-config backup across all hosts.
+async function renderAllHostBackups(mount) {
+    mount.innerHTML = loading();
+    let data;
+    try { data = await API.get("/api/host-backup/list-all"); }
+    catch (e) { mount.innerHTML = `<p class="muted">${escapeHtml(e.message || "")}</p>`; return; }
+    const items = data.backups || [];
+    if (!items.length) {
+        mount.innerHTML = "";
+        mount.appendChild(h("p", { className: "muted", style: "margin:0" }, t("hb_no_backups")));
+        return;
+    }
+    const fmtBytes = (n) => n == null ? "—" : (n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(2) + " MB");
+    const fmtDate = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
+
+    const tbl = h("table", { className: "data-table", style: "margin:0;width:100%;font-size:13px" });
+    tbl.appendChild(h("thead", {}, h("tr", {}, [
+        h("th", {}, t("hb_col_host")),
+        h("th", {}, t("hb_col_date")),
+        h("th", {}, t("hb_col_size")),
+        h("th", {}, "priv"),
+        h("th", { style: "text-align:right" }, ""),
+    ])));
+    const tb = h("tbody");
+    items.forEach(it => {
+        const qs = "?host=" + encodeURIComponent(it.host_address);
+        const dlBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("hb_download"));
+        dlBtn.onclick = () => window.open("/api/host-backup/download" + qs + "&file=" + encodeURIComponent(it.filename), "_blank");
+        const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete"));
+        delBtn.onclick = async () => {
+            if (!confirm(t("hb_delete_confirm"))) return;
+            const dr = await API.post("/api/host-backup/delete" + qs, { filename: it.filename });
+            if (dr.success) { toast(t("hb_deleted"), "success"); renderAllHostBackups(mount); }
+            else toast(dr.error || t("failed"), "error");
+        };
+        tb.appendChild(h("tr", {}, [
+            h("td", { style: "font-weight:600" }, [
+                it.host_name,
+                h("span", { style: "font-size:11px;color:var(--text-secondary);margin-left:6px" }, it.host_address),
+            ]),
+            h("td", {}, fmtDate(it.created_ts)),
+            h("td", {}, fmtBytes(it.bytes)),
+            h("td", {}, it.include_priv ? "⚠ yes" : "no"),
+            h("td", { style: "text-align:right" }, [dlBtn, delBtn]),
+        ]));
+    });
+    tbl.appendChild(tb);
+    mount.innerHTML = "";
+    mount.appendChild(tbl);
 }
 
 async function _probeHostBadge(addr) {
@@ -932,46 +997,76 @@ function gotoSnapshotCheckForHost(addr) {
     navigate("snapshot-check");
 }
 
-// "Where do I find them" for the dashboard's stale-snapshot-labels tile:
-// list the host:label entries; clicking one jumps to that host's Snapshot
-// Check (where the per-label stale datasets are listed with age/threshold).
-function openStaleLabelsModal(detail) {
-    detail = detail || [];
-    const body = h("div");
-    body.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin:0 0 12px 0" },
-        t("stale_modal_intro")));
+// Inline "where do I find them" block for the dashboard: for every host the
+// monitor flagged with stale labels, fetch its Snapshot Check analysis and
+// list the affected datasets per label (with age + threshold). Each host gets
+// an "Open Snapshot Check" shortcut.
+async function renderStaleSnapshotsBlock(mount, detail) {
+    const addrs = [...new Set((detail || []).map(d => d.host_address))];
+    const nameByAddr = {};
+    (detail || []).forEach(d => { nameByAddr[d.host_address] = d.host_name || d.host_address; });
 
-    // Group by host for readability.
-    const byHost = {};
-    detail.forEach(d => { (byHost[d.host_address] = byHost[d.host_address] || []).push(d); });
+    mount.innerHTML = "";
+    mount.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin:0 0 12px 0" },
+        t("stale_block_intro")));
 
-    Object.keys(byHost).forEach(addr => {
-        const entries = byHost[addr];
-        const hostName = entries[0].host_name || addr;
-        const card = h("div", { className: "card", style: "margin-bottom:10px" });
-        card.appendChild(h("div", { className: "card-header", style: "display:flex;justify-content:space-between;align-items:center" }, [
-            h("span", {}, hostName + "  ", h("span", { style: "font-size:11px;color:var(--text-secondary)" }, "(" + addr + ")")),
-            h("button", { className: "btn btn-sm btn-primary", onClick: () => gotoSnapshotCheckForHost(addr) }, t("stale_modal_open")),
+    // Fetch each affected host's snapshot-check in parallel (cached server-side).
+    const results = await Promise.all(addrs.map(async (addr) => {
+        try {
+            const d = await API.get("/api/health/snapshot-check?host=" + encodeURIComponent(addr));
+            return { addr, data: d };
+        } catch (e) {
+            return { addr, error: e.message || "failed" };
+        }
+    }));
+
+    results.forEach(({ addr, data, error }) => {
+        const hostName = nameByAddr[addr] || addr;
+        const card = h("div", { style: "border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px" });
+        card.appendChild(h("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px" }, [
+            h("span", { style: "font-weight:600" }, [
+                hostName, h("span", { style: "font-size:11px;color:var(--text-secondary);margin-left:6px" }, addr),
+            ]),
+            h("button", { className: "btn btn-sm btn-primary", onClick: () => gotoSnapshotCheckForHost(addr) }, t("stale_block_open")),
         ]));
-        const cb = h("div", { className: "card-body", style: "display:flex;flex-wrap:wrap;gap:8px" });
-        entries.forEach(e => {
-            cb.appendChild(h("span", { className: "badge badge-warning", style: "padding:4px 10px" },
-                e.label + (e.count != null ? " · " + e.count + " " + t("stale_modal_datasets") : "")));
+
+        if (error) {
+            card.appendChild(h("p", { className: "muted", style: "margin:0" }, error));
+            mount.appendChild(card);
+            return;
+        }
+
+        // Collect stale datasets across all labels for this host.
+        const perLabel = (data && data.per_label) || {};
+        let any = false;
+        Object.keys(perLabel).forEach(label => {
+            const stale = (perLabel[label].stale_datasets || []).filter(s => !s.note);
+            if (!stale.length) return;
+            any = true;
+            card.appendChild(h("div", { style: "font-size:12px;font-weight:600;color:var(--warning,#d4a017);margin:6px 0 4px" },
+                label + " — " + stale.length + " " + t("stale_block_datasets")));
+            const tbl = h("table", { className: "data-table", style: "margin:0 0 6px 0;width:100%;font-size:12px" });
+            tbl.appendChild(h("thead", {}, h("tr", {}, [
+                h("th", {}, t("stale_block_dataset")),
+                h("th", { style: "width:120px;text-align:right" }, t("stale_block_age")),
+                h("th", { style: "width:120px;text-align:right" }, t("stale_block_threshold")),
+            ])));
+            const tb = h("tbody");
+            stale.forEach(s => {
+                tb.appendChild(h("tr", {}, [
+                    h("td", { style: "font-family:monospace" }, s.dataset || "—"),
+                    h("td", { style: "text-align:right" }, s.age || s.newest_age_human || "—"),
+                    h("td", { style: "text-align:right;color:var(--text-secondary)" }, s.threshold || "—"),
+                ]));
+            });
+            tbl.appendChild(tb);
+            card.appendChild(tbl);
         });
-        card.appendChild(cb);
-        body.appendChild(card);
+        if (!any) {
+            card.appendChild(h("p", { className: "muted", style: "margin:0;font-size:12px" }, t("stale_block_cleared")));
+        }
+        mount.appendChild(card);
     });
-
-    if (!detail.length) {
-        body.appendChild(h("p", { className: "muted" }, t("stale_modal_none")));
-    }
-
-    openModal(t("stale_modal_title"), "");
-    const mb = document.getElementById("modal-body");
-    const mf = document.getElementById("modal-footer");
-    mb.innerHTML = ""; mb.appendChild(body);
-    mf.innerHTML = "";
-    mf.appendChild(h("button", { className: "btn", onClick: closeModal }, t("close")));
 }
 
 

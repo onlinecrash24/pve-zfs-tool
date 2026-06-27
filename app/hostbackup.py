@@ -195,6 +195,26 @@ def list_backups(host):
     return {"backups": items}
 
 
+def list_all_backups(hosts):
+    """Aggregate stored backups across all registered hosts, newest first.
+
+    ``hosts`` is the list of host dicts (from load_hosts). Each item carries
+    the host address+name so the consolidated UI block can show who was
+    backed up.
+    """
+    out = []
+    for h in hosts or []:
+        addr = h.get("address", "")
+        name = h.get("name") or addr
+        for b in list_backups(h).get("backups", []):
+            out.append({**b, "host_address": addr, "host_name": name})
+    # The filename embeds the backup timestamp (pve-backup-<YYYYMMDD-HHMMSS>),
+    # so lexicographic-desc on the name is chronological + deterministic
+    # regardless of file mtime.
+    out.sort(key=lambda x: x.get("filename", ""), reverse=True)
+    return {"backups": out}
+
+
 def delete_backup(host, filename):
     if not is_valid_backup_name(filename):
         return {"success": False, "error": "invalid filename"}

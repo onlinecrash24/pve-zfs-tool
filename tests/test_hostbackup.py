@@ -86,6 +86,34 @@ def test_script_captures_expected_commands():
         assert cmd in s
 
 
+# --- list_all_backups aggregation ----------------------------------------
+
+def test_list_all_backups_aggregates_and_sorts(tmp_path, monkeypatch):
+    monkeypatch.setattr(hb, "BACKUP_DIR", str(tmp_path))
+    # two hosts, each with backups at different times
+    h1 = {"address": "10.0.0.1", "name": "pve1"}
+    h2 = {"address": "10.0.0.2", "name": "pve2"}
+    import os
+    for host, names in [
+        (h1, ["pve-backup-20260101-000000.tar.gz"]),
+        (h2, ["pve-backup-20260201-000000.tar.gz", "pve-backup-20260115-000000.tar.gz"]),
+    ]:
+        d = hb.host_backup_dir(host["address"])
+        os.makedirs(d, exist_ok=True)
+        for n in names:
+            with open(os.path.join(d, n), "wb") as f:
+                f.write(b"x")
+    out = hb.list_all_backups([h1, h2])["backups"]
+    # every backup carries its host, newest first across hosts
+    assert [b["filename"] for b in out] == [
+        "pve-backup-20260201-000000.tar.gz",
+        "pve-backup-20260115-000000.tar.gz",
+        "pve-backup-20260101-000000.tar.gz",
+    ]
+    assert out[0]["host_name"] == "pve2"
+    assert out[-1]["host_address"] == "10.0.0.1"
+
+
 # --- run-key (schedule period) -------------------------------------------
 
 def test_run_key_periods():

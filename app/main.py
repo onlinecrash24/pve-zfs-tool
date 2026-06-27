@@ -675,6 +675,15 @@ def api_host_backup_list():
     return jsonify(list_backups(host))
 
 
+@app.route("/api/host-backup/list-all")
+@login_required
+def api_host_backup_list_all():
+    """Consolidated list of stored backups across every registered host."""
+    from app.hostbackup import list_all_backups
+    from app.ssh_manager import load_hosts
+    return jsonify(list_all_backups(load_hosts()))
+
+
 @app.route("/api/host-backup/delete", methods=["POST"])
 @login_required
 def api_host_backup_delete():
