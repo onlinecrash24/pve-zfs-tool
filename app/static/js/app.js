@@ -657,6 +657,10 @@ async function viewHosts() {
                 onClick: () => testHost(host.address),
             }, t("test")));
             btnGroup.appendChild(h("button", {
+                className: "btn btn-sm",
+                onClick: () => openHostBackupModal(host),
+            }, t("hb_backup")));
+            btnGroup.appendChild(h("button", {
                 className: "btn btn-sm btn-danger",
                 onClick: () => deleteHost(host.address),
             }, t("remove")));
@@ -726,6 +730,187 @@ async function deleteHost(addr) {
     toast(r.message, r.success ? "success" : "error");
     loadHostSelector();
     viewHosts();
+}
+
+// Host config backup modal: create now, schedule, and the stored-backup list.
+function openHostBackupModal(host) {
+    const addr = host.address;
+    const qs = "?host=" + encodeURIComponent(addr);
+    const fmtBytes = (n) => {
+        if (n == null) return "—";
+        if (n < 1024) return n + " B";
+        if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+        return (n / 1048576).toFixed(2) + " MB";
+    };
+    const fmtDate = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
+    const weekdays = t("ai_weekdays").split(",");
+
+    const body = h("div");
+
+    // Security warning
+    body.appendChild(h("div", {
+        style: "padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;font-size:12px;margin-bottom:14px"
+    }, [
+        h("b", { style: "color:var(--danger)" }, "⚠ " + t("hb_security_title")),
+        h("div", { style: "color:var(--text-secondary);margin-top:4px" }, t("hb_security_text")),
+    ]));
+
+    // --- Create now ---
+    const createCard = h("div", { className: "card", style: "margin-bottom:14px" });
+    createCard.appendChild(h("div", { className: "card-header" }, t("hb_create_now")));
+    const createBody = h("div", { className: "card-body" });
+    const privCb = h("input", { type: "checkbox" });
+    const createBtn = h("button", { className: "btn btn-primary" }, t("hb_create_btn"));
+    const createStatus = h("span", { style: "font-size:12px;color:var(--text-secondary);margin-left:8px" });
+    createBody.appendChild(h("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-bottom:10px" }, [
+        privCb, h("span", {}, t("hb_include_priv")),
+    ]));
+    createBody.appendChild(h("div", { style: "display:flex;align-items:center" }, [createBtn, createStatus]));
+    createCard.appendChild(createBody);
+    body.appendChild(createCard);
+
+    // --- Schedule ---
+    const schedCard = h("div", { className: "card", style: "margin-bottom:14px" });
+    schedCard.appendChild(h("div", { className: "card-header" }, t("hb_schedule")));
+    const schedBody = h("div", { className: "card-body" }, loading());
+    schedCard.appendChild(schedBody);
+    body.appendChild(schedCard);
+
+    // --- Backup list ---
+    const listCard = h("div", { className: "card" });
+    const listRefresh = h("button", { className: "btn btn-sm" }, t("refresh"));
+    listCard.appendChild(h("div", { className: "card-header" }, [h("span", {}, t("hb_existing")), listRefresh]));
+    const listBody = h("div", { className: "card-body" }, loading());
+    listCard.appendChild(listBody);
+    body.appendChild(listCard);
+
+    async function refreshList() {
+        listBody.innerHTML = loading();
+        try {
+            const r = await API.get("/api/host-backup/list" + qs);
+            const items = r.backups || [];
+            if (!items.length) {
+                listBody.innerHTML = "";
+                listBody.appendChild(h("p", { className: "muted", style: "margin:0" }, t("hb_no_backups")));
+                return;
+            }
+            const tbl = h("table", { className: "data-table", style: "margin:0;width:100%;font-size:13px" });
+            tbl.appendChild(h("thead", {}, h("tr", {}, [
+                h("th", {}, t("hb_col_date")),
+                h("th", {}, t("hb_col_size")),
+                h("th", {}, "priv"),
+                h("th", { style: "text-align:right" }, ""),
+            ])));
+            const tb = h("tbody");
+            items.forEach(it => {
+                const dlBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("hb_download"));
+                dlBtn.onclick = () => window.open("/api/host-backup/download" + qs + "&file=" + encodeURIComponent(it.filename), "_blank");
+                const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete"));
+                delBtn.onclick = async () => {
+                    if (!confirm(t("hb_delete_confirm"))) return;
+                    const dr = await API.post("/api/host-backup/delete" + qs, { filename: it.filename });
+                    if (dr.success) { toast(t("hb_deleted"), "success"); refreshList(); }
+                    else toast(dr.error || t("failed"), "error");
+                };
+                tb.appendChild(h("tr", {}, [
+                    h("td", {}, fmtDate(it.created_ts)),
+                    h("td", {}, fmtBytes(it.bytes)),
+                    h("td", {}, it.include_priv ? "⚠ yes" : "no"),
+                    h("td", { style: "text-align:right" }, [dlBtn, delBtn]),
+                ]));
+            });
+            tbl.appendChild(tb);
+            listBody.innerHTML = "";
+            listBody.appendChild(tbl);
+        } catch (e) { listBody.innerHTML = `<p class="muted">${escapeHtml(e.message || "")}</p>`; }
+    }
+    listRefresh.onclick = refreshList;
+
+    createBtn.onclick = async () => {
+        createBtn.disabled = true;
+        createStatus.textContent = t("hb_creating");
+        try {
+            const r = await API.post("/api/host-backup/create" + qs, { include_priv: privCb.checked });
+            if (r.success) {
+                toast(t("hb_created").replace("{size}", fmtBytes(r.bytes)), "success");
+                createStatus.textContent = "";
+                refreshList();
+            } else {
+                toast(r.error || t("failed"), "error");
+                createStatus.textContent = "";
+            }
+        } catch (e) { toast(e.message, "error"); createStatus.textContent = ""; }
+        finally { createBtn.disabled = false; }
+    };
+
+    async function renderSchedule() {
+        let s;
+        try { s = await API.get("/api/host-backup/schedule" + qs); }
+        catch (e) { schedBody.innerHTML = `<p class="muted">${escapeHtml(e.message || "")}</p>`; return; }
+        schedBody.innerHTML = "";
+        const enabledCb = h("input", { type: "checkbox" }); enabledCb.checked = !!s.enabled;
+        const intervalSel = h("select", { className: "form-control" }, [
+            h("option", { value: "daily" }, t("ai_schedule_daily")),
+            h("option", { value: "weekly" }, t("ai_schedule_weekly")),
+            h("option", { value: "monthly" }, t("hb_monthly")),
+        ]);
+        intervalSel.value = s.interval || "weekly";
+        const hourInput = h("input", { type: "number", min: "0", max: "23", className: "form-control", value: String(s.hour ?? 3) });
+        const weekdaySel = h("select", { className: "form-control" },
+            weekdays.map((d, i) => h("option", { value: String(i) }, d)));
+        weekdaySel.value = String(s.weekday ?? 0);
+        const keepInput = h("input", { type: "number", min: "0", max: "1000", className: "form-control", value: String(s.keep ?? 8) });
+        const schedPrivCb = h("input", { type: "checkbox" }); schedPrivCb.checked = !!s.include_priv;
+        const weekdayWrap = h("div", {}, [
+            h("label", {}, t("ai_schedule_weekday")), weekdaySel,
+        ]);
+        const updateWeekdayVis = () => { weekdayWrap.style.display = intervalSel.value === "weekly" ? "" : "none"; };
+        intervalSel.onchange = updateWeekdayVis;
+
+        const grid = h("div", { className: "grid grid-2", style: "gap:12px" }, [
+            h("div", { style: "grid-column:1/-1" }, h("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer" }, [
+                enabledCb, h("span", {}, t("hb_schedule_enable")),
+            ])),
+            h("div", {}, [h("label", {}, t("ai_schedule_interval")), intervalSel]),
+            h("div", {}, [h("label", {}, t("ai_schedule_hour")), hourInput]),
+            weekdayWrap,
+            h("div", {}, [h("label", {}, t("hb_keep")), keepInput]),
+            h("div", { style: "grid-column:1/-1" }, h("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer" }, [
+                schedPrivCb, h("span", {}, t("hb_include_priv")),
+            ])),
+        ]);
+        schedBody.appendChild(grid);
+        updateWeekdayVis();
+        const saveBtn = h("button", { className: "btn btn-primary", style: "margin-top:12px" }, t("save"));
+        const saveStatus = h("span", { style: "font-size:12px;margin-left:8px;color:var(--text-secondary)" });
+        saveBtn.onclick = async () => {
+            saveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/host-backup/schedule" + qs, {
+                    enabled: enabledCb.checked,
+                    interval: intervalSel.value,
+                    hour: parseInt(hourInput.value, 10) || 0,
+                    weekday: parseInt(weekdaySel.value, 10) || 0,
+                    keep: parseInt(keepInput.value, 10) || 0,
+                    include_priv: schedPrivCb.checked,
+                });
+                toast(r.success ? t("hb_schedule_saved") : t("failed"), r.success ? "success" : "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { saveBtn.disabled = false; }
+        };
+        schedBody.appendChild(h("div", { style: "margin-top:4px" }, [saveBtn, saveStatus]));
+    }
+
+    openModal(t("hb_title").replace("{host}", host.name || addr), "");
+    const mb = document.getElementById("modal-body");
+    const mf = document.getElementById("modal-footer");
+    mb.innerHTML = ""; mb.appendChild(body);
+    mf.innerHTML = "";
+    mf.appendChild(h("button", { className: "btn", onClick: closeModal }, t("close")));
+    const modal = document.querySelector("#modal-overlay .modal");
+    if (modal) modal.style.maxWidth = "720px";
+    renderSchedule();
+    refreshList();
 }
 
 // -- Pools -----------------------------------------------------------------

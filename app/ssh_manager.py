@@ -164,8 +164,32 @@ def run_command(host, command, timeout=30, cache_ttl=0):
     if cache_ttl > 0 and result.get("success"):
         from app.cache import set as _cache_set
         _cache_set(host["address"], command, result, cache_ttl)
-
     return result
+
+
+def fetch_file(host, remote_path, local_path, timeout=60):
+    """Download a file from a remote host via SFTP into local_path.
+
+    Used for binary payloads (e.g. host config backup tarballs) that don't
+    fit the text-only exec path. Returns {success, bytes, error}.
+    """
+    client = None
+    try:
+        client = get_ssh_client(host)
+        sftp = client.open_sftp()
+        sftp.get_channel().settimeout(timeout)
+        sftp.get(remote_path, local_path)
+        sftp.close()
+        size = os.path.getsize(local_path)
+        return {"success": True, "bytes": size, "error": ""}
+    except Exception as e:
+        return {"success": False, "bytes": 0, "error": str(e)}
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def test_connection(host):

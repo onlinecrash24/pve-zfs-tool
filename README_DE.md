@@ -136,6 +136,7 @@
   - Host offline
   - Datei-Restore-Aktionen
   - AI-Report generiert (mit PDF-Anhang)
+  - Host-Config-Backup fehlgeschlagen (geplant)
 
 ### AI-Reports & Analyse
 - **Multi-Provider** -- OpenAI (GPT), Anthropic (Claude), Ollama (lokal) oder jede OpenAI-kompatible API
@@ -177,6 +178,13 @@
 - **Public-Key-Anzeige** -- Auf der Startseite mit Copy-Button (funktioniert unter HTTP und HTTPS)
 - **Mehrere Hosts** -- Mehrere Proxmox-VE-Nodes hinzufügen und verwalten
 - **Connection-Test** -- SSH-Konnektivität pro Host prüfen
+
+### Host-Config-Backup
+- **Config-Snapshot** -- Ein-Klick-Backup der Proxmox-Host-Konfiguration (NICHT der VM-Disks): das `/etc/pve`-Cluster-Dateisystem, Netzwerk-Config (`interfaces`, `hosts`, `resolv.conf`) plus Befehlsausgaben (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs`-Status)
+- **Ins Tool geholt** -- Das Archiv wird per SFTP ins Daten-Volume geladen und kann jederzeit für den Worst-Case heruntergeladen werden
+- **Geplant** -- Pro-Host-Zeitplan täglich/wöchentlich/monatlich mit „behalte N"-Retention; ein fehlgeschlagenes geplantes Backup löst eine `host_backup_failed`-Benachrichtigung aus
+- **Geheimnisse opt-in** -- `/etc/pve/priv` (Cluster-CA-Private-Key etc.) ist **standardmäßig ausgeschlossen**; ein expliziter Schalter schließt es ein, mit Warnung im UI, dass solche Archive hochsensibel sind. Alle Downloads sind login-geschützt
+- **Unter Hosts** -- Eine „Backup"-Aktion pro Host öffnet Jetzt-erstellen, Zeitplan und die Liste gespeicherter Backups (Download / Löschen)
 
 ## Quick Start
 
@@ -380,6 +388,7 @@ pve-zfs-tool/
     ├── ai_pdf.py            # PDF-Report-Erzeugung
     ├── snapshot_analysis.py # Gemeinsame Snapshot-Health-Analyse (UI + AI)
     ├── autosnap.py          # zfs-auto-snapshot Retention-Editor (Cron-Dateien)
+    ├── hostbackup.py        # Proxmox-Host-Config-Backups (erstellen/planen/prunen)
     ├── timezone.py          # Zeitzonen-Helper (TZ-Umgebungsvariable)
     ├── notifications.py     # Telegram, Gotify, Matrix & Email Notifications
     ├── replication.py       # bashclub-zsync-Integration (Install, Config, Cron, checkzfs)

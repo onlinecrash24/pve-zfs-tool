@@ -136,6 +136,7 @@
   - Host offline
   - File restore actions
   - AI report generated (delivered with PDF attachment)
+  - Host config backup failed (scheduled)
 
 ### AI Reports & Analysis
 - **Multi-Provider Support** -- OpenAI (GPT), Anthropic (Claude), Ollama (local), or any OpenAI-compatible API
@@ -177,6 +178,13 @@
 - **Public Key Display** -- Shown on the home page with copy button (works on HTTP and HTTPS)
 - **Multiple Hosts** -- Add and manage multiple Proxmox VE nodes
 - **Connection Test** -- Verify SSH connectivity per host
+
+### Host Config Backup
+- **Config-Level Snapshot** -- One-click backup of a Proxmox host's configuration (NOT VM disks): the `/etc/pve` cluster filesystem, network config (`interfaces`, `hosts`, `resolv.conf`), plus command captures (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs` state)
+- **Pulled Into the Tool** -- The archive is fetched into the data volume via SFTP and can be downloaded any time for a worst-case recovery
+- **Scheduled** -- Per-host daily/weekly/monthly schedule with a keep-N retention; a failed scheduled backup raises a `host_backup_failed` notification
+- **Secrets Opt-In** -- `/etc/pve/priv` (cluster CA private key etc.) is **excluded by default**; an explicit toggle includes it, with an in-UI warning that those archives are highly sensitive. All downloads are login-gated
+- **Under Hosts** -- A per-host "Backup" action opens create-now, schedule, and the stored-backup list (download / delete)
 
 ## Quick Start
 
@@ -380,6 +388,7 @@ pve-zfs-tool/
     ├── ai_pdf.py            # PDF report generation
     ├── snapshot_analysis.py # Shared snapshot health analysis (UI + AI)
     ├── autosnap.py          # zfs-auto-snapshot retention editor (cron files)
+    ├── hostbackup.py        # Proxmox host config backups (create/schedule/prune)
     ├── timezone.py          # Timezone helper (TZ environment variable)
     ├── notifications.py     # Telegram, Gotify, Matrix & Email notifications
     ├── replication.py       # bashclub-zsync integration (install, config, cron, checkzfs)
