@@ -402,10 +402,20 @@ function _renderDashboard(d) {
     root.appendChild(tiles);
 
     const tiles2 = h("div", { className: "grid grid-3", style: "gap:12px;margin-bottom:16px" });
-    tiles2.appendChild(tile(t("dash_stale_labels"),
+    const staleTile = tile(t("dash_stale_labels"),
         String(agg.stale_snap_labels || 0),
         t("dash_stale_labels_sub"),
-        (agg.stale_snap_labels || 0) === 0 ? true : false));
+        (agg.stale_snap_labels || 0) === 0 ? true : false);
+    // Click-through to "where do I find them" when there are stale labels.
+    if ((agg.stale_snap_labels || 0) > 0 && (agg.stale_snap_detail || []).length) {
+        staleTile.style.cursor = "pointer";
+        staleTile.title = t("dash_stale_click_hint");
+        staleTile.appendChild(h("div", {
+            style: "font-size:11px;color:var(--accent);margin-top:4px"
+        }, "→ " + t("dash_stale_click_hint")));
+        staleTile.onclick = () => openStaleLabelsModal(agg.stale_snap_detail);
+    }
+    tiles2.appendChild(staleTile);
     tiles2.appendChild(tile(t("dash_audit_failures"),
         String(agg.recent_audit_failures_24h || 0),
         t("dash_audit_failures_sub"),
@@ -912,6 +922,58 @@ function openHostBackupModal(host) {
     renderSchedule();
     refreshList();
 }
+
+// Switch the active host and jump to its Snapshot Check view.
+function gotoSnapshotCheckForHost(addr) {
+    const sel = document.getElementById("host-select");
+    if (sel) sel.value = addr;
+    currentHost = addr;
+    closeModal();
+    navigate("snapshot-check");
+}
+
+// "Where do I find them" for the dashboard's stale-snapshot-labels tile:
+// list the host:label entries; clicking one jumps to that host's Snapshot
+// Check (where the per-label stale datasets are listed with age/threshold).
+function openStaleLabelsModal(detail) {
+    detail = detail || [];
+    const body = h("div");
+    body.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin:0 0 12px 0" },
+        t("stale_modal_intro")));
+
+    // Group by host for readability.
+    const byHost = {};
+    detail.forEach(d => { (byHost[d.host_address] = byHost[d.host_address] || []).push(d); });
+
+    Object.keys(byHost).forEach(addr => {
+        const entries = byHost[addr];
+        const hostName = entries[0].host_name || addr;
+        const card = h("div", { className: "card", style: "margin-bottom:10px" });
+        card.appendChild(h("div", { className: "card-header", style: "display:flex;justify-content:space-between;align-items:center" }, [
+            h("span", {}, hostName + "  ", h("span", { style: "font-size:11px;color:var(--text-secondary)" }, "(" + addr + ")")),
+            h("button", { className: "btn btn-sm btn-primary", onClick: () => gotoSnapshotCheckForHost(addr) }, t("stale_modal_open")),
+        ]));
+        const cb = h("div", { className: "card-body", style: "display:flex;flex-wrap:wrap;gap:8px" });
+        entries.forEach(e => {
+            cb.appendChild(h("span", { className: "badge badge-warning", style: "padding:4px 10px" },
+                e.label + (e.count != null ? " · " + e.count + " " + t("stale_modal_datasets") : "")));
+        });
+        card.appendChild(cb);
+        body.appendChild(card);
+    });
+
+    if (!detail.length) {
+        body.appendChild(h("p", { className: "muted" }, t("stale_modal_none")));
+    }
+
+    openModal(t("stale_modal_title"), "");
+    const mb = document.getElementById("modal-body");
+    const mf = document.getElementById("modal-footer");
+    mb.innerHTML = ""; mb.appendChild(body);
+    mf.innerHTML = "";
+    mf.appendChild(h("button", { className: "btn", onClick: closeModal }, t("close")));
+}
+
 
 // -- Pools -----------------------------------------------------------------
 async function viewPools() {

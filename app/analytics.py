@@ -10,6 +10,7 @@
   Home-page dashboard and the Prometheus exporter.
 """
 
+import json
 import logging
 import time
 
@@ -137,6 +138,30 @@ def _monitor_state_map(scope):
         conn.close()
 
 
+def build_stale_detail(stale_state, name_by_addr):
+    """Turn the ``stale_snap`` monitor-state map (key ``addr:label`` ->
+    {value: '{"count": N}', updated_ts}) into the per-host:label list the
+    Home tile clicks through to. Newest first, then host/label for stable
+    display. Pure (no DB) so it's unit-tested."""
+    out = []
+    for key, v in (stale_state or {}).items():
+        host_addr, _, label = key.partition(":")
+        count = None
+        try:
+            count = json.loads(v.get("value") or "{}").get("count")
+        except Exception:
+            pass
+        out.append({
+            "host_address": host_addr,
+            "host_name": (name_by_addr or {}).get(host_addr, host_addr),
+            "label": label,
+            "count": count,
+            "updated_ts": v.get("updated_ts"),
+        })
+    out.sort(key=lambda d: (-(d["updated_ts"] or 0), d["host_name"], d["label"]))
+    return out
+
+
 def dashboard():
     """Return a compact status snapshot for the Home-page widget."""
     from app.ssh_manager import load_hosts
@@ -211,8 +236,11 @@ def dashboard():
             "pools": pools_here,
         })
 
-    # Count stale-snap labels
+    # Count stale-snap labels + build the per-host:label breakdown so the
+    # Home tile can be clicked through to "where do I find them".
     agg["stale_snap_labels"] = len(stale_state)
+    name_by_addr = {h["address"]: (h.get("name") or h["address"]) for h in hosts_cfg}
+    agg["stale_snap_detail"] = build_stale_detail(stale_state, name_by_addr)
 
     # Recent audit failures (last 24 h)
     since = int(time.time()) - 24 * 3600
