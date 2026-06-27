@@ -98,24 +98,51 @@ def forecast_days_until_full(host_addr, pool, window_days=FORECAST_WINDOW_DAYS):
 # Latest per-pool metrics
 # ---------------------------------------------------------------------------
 
-def latest_pool_rows():
-    """Return the most recent pool_metrics row per (host, pool).
+# Only treat a pool as "current" if it was sampled within this window. The
+# sampler writes a fresh row for every existing pool every ~15 min, so a pool
+# that hasn't appeared in 6 h has been destroyed (or its host has been offline
+# that long, in which case it shows as offline anyway). Without this filter a
+# destroyed pool lingered in the dashboard/Prometheus for the full 90-day
+# metrics retention.
+LATEST_POOL_MAX_AGE = 6 * 3600
+
+
+def latest_pool_rows(max_age_seconds=LATEST_POOL_MAX_AGE):
+    """Return the most recent pool_metrics row per (host, pool), restricted to
+    pools seen within ``max_age_seconds`` so destroyed pools don't linger.
 
     Used by both the dashboard and the Prometheus exporter so each data
     point comes from the same sample. Rows are dicts (sqlite3.Row-like).
+    Pass ``max_age_seconds=None`` to disable the recency filter.
     """
     conn = get_conn()
     try:
-        rows = conn.execute(
-            """SELECT pm.* FROM pool_metrics pm
-               JOIN (
-                 SELECT host, pool, MAX(timestamp) AS ts
-                 FROM pool_metrics GROUP BY host, pool
-               ) latest
-               ON pm.host = latest.host
-                 AND pm.pool = latest.pool
-                 AND pm.timestamp = latest.ts"""
-        ).fetchall()
+        if max_age_seconds is None:
+            rows = conn.execute(
+                """SELECT pm.* FROM pool_metrics pm
+                   JOIN (
+                     SELECT host, pool, MAX(timestamp) AS ts
+                     FROM pool_metrics GROUP BY host, pool
+                   ) latest
+                   ON pm.host = latest.host
+                     AND pm.pool = latest.pool
+                     AND pm.timestamp = latest.ts"""
+            ).fetchall()
+        else:
+            since = int(time.time()) - int(max_age_seconds)
+            rows = conn.execute(
+                """SELECT pm.* FROM pool_metrics pm
+                   JOIN (
+                     SELECT host, pool, MAX(timestamp) AS ts
+                     FROM pool_metrics
+                     WHERE timestamp >= ?
+                     GROUP BY host, pool
+                   ) latest
+                   ON pm.host = latest.host
+                     AND pm.pool = latest.pool
+                     AND pm.timestamp = latest.ts""",
+                (since,),
+            ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
