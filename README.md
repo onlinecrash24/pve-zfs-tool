@@ -76,7 +76,7 @@
 - **File-Level Recovery** -- Individual files are restored through the existing Snapshots view (mount any replica snapshot read-only, browse, preview, restore)
 
 ### Snapshot Check
-- **Retention Policy Overview** -- Displays configured `--keep=N` values per label from cron
+- **Retention Policy Editor** -- View and **edit** the configured `--keep=N` value per level (frequent/hourly/daily/weekly/monthly) and enable/disable individual levels, written straight back to the zfs-auto-snapshot cron files with a timestamped backup
 - **Per-Label Analysis** -- Total snapshots, dataset count, per-dataset average, newest age
 - **Gap Detection** -- Identifies gaps in snapshot chains exceeding `MAX_AGE * 1.5`
 - **Stale Datasets** -- Warns when snapshots exceed age thresholds (frequent >1h, hourly >2h, daily >25h, weekly >8d, monthly >32d)
@@ -379,6 +379,7 @@ pve-zfs-tool/
     ├── ai_reports.py        # AI-powered ZFS analysis & reports
     ├── ai_pdf.py            # PDF report generation
     ├── snapshot_analysis.py # Shared snapshot health analysis (UI + AI)
+    ├── autosnap.py          # zfs-auto-snapshot retention editor (cron files)
     ├── timezone.py          # Timezone helper (TZ environment variable)
     ├── notifications.py     # Telegram, Gotify, Matrix & Email notifications
     ├── replication.py       # bashclub-zsync integration (install, config, cron, checkzfs)

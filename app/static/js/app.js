@@ -1341,6 +1341,107 @@ async function destroySnap(snap) {
     viewSnapshots();
 }
 
+// Editable zfs-auto-snapshot retention table. Loads per-level keep/enabled
+// from /api/auto-snapshot/retention and writes changed rows back.
+async function renderRetentionEditor(mount) {
+    let data;
+    try {
+        data = await API.get("/api/auto-snapshot/retention?host=" + encodeURIComponent(currentHost));
+    } catch (e) {
+        mount.innerHTML = "";
+        mount.appendChild(h("p", { className: "muted" }, e.message || "Failed to load retention"));
+        return;
+    }
+    const levels = data.levels || [];
+    if (!data.installed) {
+        mount.innerHTML = "";
+        mount.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("retention_not_installed")));
+        return;
+    }
+
+    const rows = {};
+    const table = h("table", { className: "data-table", style: "margin:0;width:100%" });
+    table.appendChild(h("thead", {}, h("tr", {}, [
+        h("th", {}, t("retention_level")),
+        h("th", {}, t("retention_interval")),
+        h("th", { style: "width:120px" }, t("retention_keep")),
+        h("th", { style: "width:90px;text-align:center" }, t("retention_enabled")),
+    ])));
+    const tb = h("tbody");
+    levels.forEach(lv => {
+        if (!lv.installed) {
+            tb.appendChild(h("tr", { style: "opacity:0.5" }, [
+                h("td", { style: "font-weight:600" }, lv.label),
+                h("td", { style: "color:var(--text-secondary)" }, lv.interval),
+                h("td", { style: "font-size:12px;color:var(--text-secondary)" }, t("retention_level_missing")),
+                h("td", {}, ""),
+            ]));
+            return;
+        }
+        const keepInput = h("input", { type: "number", min: "0", max: "100000",
+            className: "form-input", style: "max-width:100px",
+            value: String(lv.keep != null ? lv.keep : "") });
+        const enabledCb = h("input", { type: "checkbox" });
+        enabledCb.checked = !!lv.enabled;
+        rows[lv.label] = { keepInput, enabledCb, orig: { keep: lv.keep, enabled: lv.enabled } };
+        tb.appendChild(h("tr", {}, [
+            h("td", { style: "font-weight:600" }, lv.label),
+            h("td", { style: "color:var(--text-secondary)" }, lv.interval),
+            h("td", {}, keepInput),
+            h("td", { style: "text-align:center" }, enabledCb),
+        ]));
+    });
+    table.appendChild(tb);
+
+    mount.innerHTML = "";
+    mount.appendChild(table);
+    mount.appendChild(h("p", { style: "font-size:11px;color:var(--text-secondary);margin-top:8px" }, t("retention_edit_hint")));
+    const btnRow = h("div", { style: "margin-top:10px;display:flex;gap:8px;align-items:center" });
+    const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
+    const statusEl = h("span", { style: "font-size:12px;color:var(--text-secondary)" });
+    btnRow.appendChild(saveBtn);
+    btnRow.appendChild(statusEl);
+    mount.appendChild(btnRow);
+
+    saveBtn.onclick = async () => {
+        const changes = [];
+        for (const label of Object.keys(rows)) {
+            const r = rows[label];
+            const keep = parseInt(r.keepInput.value, 10);
+            if (isNaN(keep) || keep < 0) {
+                toast(t("retention_keep_invalid").replace("{level}", label), "error");
+                return;
+            }
+            const enabled = r.enabledCb.checked;
+            if (keep !== r.orig.keep || enabled !== r.orig.enabled) {
+                changes.push({ label, keep, enabled });
+            }
+        }
+        if (!changes.length) { toast(t("retention_no_changes"), "info"); return; }
+        if (!confirm(t("retention_confirm"))) return;
+        saveBtn.disabled = true;
+        statusEl.textContent = t("saving") || "…";
+        try {
+            const r = await API.post("/api/auto-snapshot/retention?host=" + encodeURIComponent(currentHost), { changes });
+            if (r.success) {
+                toast(t("retention_saved"), "success");
+                renderRetentionEditor(mount);
+            } else {
+                const failed = (r.results || []).filter(x => !x.success)
+                    .map(x => x.label + ": " + (x.error || x.stderr || "?"));
+                toast(t("retention_save_partial") + " " + failed.join("; "), "error");
+                statusEl.textContent = "";
+                saveBtn.disabled = false;
+            }
+        } catch (e) {
+            toast(e.message, "error");
+            statusEl.textContent = "";
+            saveBtn.disabled = false;
+        }
+    };
+}
+
+
 // -- Snapshot Check -------------------------------------------------------
 async function viewSnapshotCheck() {
     if (!requireHost()) return;
@@ -1354,22 +1455,15 @@ async function viewSnapshotCheck() {
         h("p", {}, `${currentHost} — ${data.datasets_analyzed || 0} Datasets`),
     ]));
 
-    // Retention Policy Overview
+    // Retention Policy — editable (keep value + enabled per level)
     const policyCard = h("div", { className: "card" });
     policyCard.appendChild(h("div", { className: "card-header" }, t("retention_policy") || "Retention Policy (Cron)"));
-    const policyBody = h("div", { className: "card-body" });
-    const rp = data.retention_policy || {};
-    if (Object.keys(rp).length > 0) {
-        const policyGrid = h("div", { className: "grid grid-5" });
-        for (const [label, keep] of Object.entries(rp)) {
-            policyGrid.appendChild(makeStatCard(label, `${keep}`, "keep"));
-        }
-        policyBody.appendChild(policyGrid);
-    } else {
-        policyBody.appendChild(h("p", { style: "color:var(--text-secondary)" }, "No retention policy found in cron"));
-    }
+    const policyBody = h("div", { className: "card-body" }, loading());
     policyCard.appendChild(policyBody);
     container.appendChild(policyCard);
+    // Load + render the editable retention table asynchronously so the rest
+    // of the Snapshot Check view paints immediately.
+    renderRetentionEditor(policyBody);
 
     // Per-Label Status
     const labels = data.per_label || {};

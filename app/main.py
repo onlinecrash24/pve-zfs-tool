@@ -613,6 +613,37 @@ def api_set_auto_snap():
     return jsonify(result)
 
 
+@app.route("/api/auto-snapshot/retention", methods=["GET"])
+@login_required
+def api_auto_snap_retention_get():
+    """Read the per-level zfs-auto-snapshot retention policy (keep + enabled)."""
+    from app.autosnap import get_retention
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(get_retention(host))
+
+
+@app.route("/api/auto-snapshot/retention", methods=["POST"])
+@login_required
+def api_auto_snap_retention_set():
+    """Apply per-level keep / enabled changes to the cron files (with backup)."""
+    from app.autosnap import set_retention
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    changes = data.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return jsonify({"error": "changes must be a non-empty array"}), 400
+    result = set_retention(host, changes)
+    audit_log("auto_snapshot.retention", target="retention_policy", host=host["address"],
+              success=result.get("success", False),
+              details={"changes": [{"label": c.get("label"), "keep": c.get("keep"),
+                                    "enabled": c.get("enabled")} for c in changes]})
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # API: Proxmox VMs/CTs
 # ---------------------------------------------------------------------------
