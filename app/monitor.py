@@ -109,6 +109,18 @@ def _mark_alerted(scope, key):
         conn.close()
 
 
+def _state_delete(scope, key):
+    """Remove a state row. Used to clear a condition that has recovered so
+    aggregate counts (e.g. the stale-snapshot-labels dashboard tile) reflect
+    current reality instead of accumulating forever."""
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM monitor_state WHERE scope=? AND key=?", (scope, key))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _cooldown_ok(last_alert_ts, cooldown):
     if not last_alert_ts:
         return True
@@ -290,25 +302,32 @@ def check_auto_snapshots(host):
     name = host.get("name") or host["address"]
     now = int(time.time())
     scope = "stale_snap"
-    for label, info in per_label.items():
-        if label not in STALE_THRESHOLDS or not isinstance(info, dict):
-            continue
-        stale = info.get("stale_datasets") or []
-        if not stale:
-            continue
-        # stale_datasets entries are dicts {dataset, newest_age, ...}
-        # (analyze_snapshots in snapshot_analysis.py). Be defensive anyway.
+    addr = host["address"]
+    # Iterate the labels we actually monitor (not just whatever appears in
+    # per_label) so a label that has fully recovered -- or dropped out of the
+    # analysis -- gets its lingering state cleared.
+    for label in STALE_THRESHOLDS:
+        info = per_label.get(label)
+        stale = info.get("stale_datasets") if isinstance(info, dict) else None
         norm = []
-        for e in stale:
+        for e in (stale or []):
             if isinstance(e, str):
                 norm.append({"dataset": e})
-            elif isinstance(e, dict) and e.get("dataset"):
+            elif isinstance(e, dict) and e.get("dataset") and not e.get("note"):
                 norm.append(e)
+        key = f"{addr}:{label}"
+
         if not norm:
+            # Not stale (anymore) -> clear any leftover state so the
+            # dashboard count stops counting recovered labels.
+            _state_delete(scope, key)
             continue
-        key = f"{host['address']}:{label}"
+
         _prev, last_alert = _state_get(scope, key)
+        # Keep the count fresh either way so the tile/detail match.
         if not _cooldown_ok(last_alert, STALE_ALERT_COOLDOWN):
+            _state_set(scope, key, json.dumps({"count": len(norm)}),
+                       last_alert_ts=last_alert)
             continue
         ds_list = ", ".join(e["dataset"] for e in norm[:6])
         more = f" (+{len(norm) - 6} more)" if len(norm) > 6 else ""
