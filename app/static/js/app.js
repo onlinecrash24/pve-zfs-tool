@@ -283,6 +283,15 @@ async function viewHome() {
                 </ul>
             </div>
             <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_dr_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_dr_1"))}</li>
+                    <li>${escapeHtml(t("feat_dr_2"))}</li>
+                    <li>${escapeHtml(t("feat_dr_3"))}</li>
+                    <li>${escapeHtml(t("feat_dr_4"))}</li>
+                </ul>
+            </div>
+            <div>
                 <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_health_title"))}</h4>
                 <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
                     <li>${escapeHtml(t("feat_health_1"))}</li>
@@ -406,6 +415,18 @@ function _renderDashboard(d) {
         "",
         (agg.pools_degraded || 0) === 0 ? true : false));
     root.appendChild(tiles2);
+
+    // Inline stale-snapshots block: when labels are behind schedule, show
+    // WHERE -- the affected datasets per host:label with age/threshold --
+    // right on the dashboard instead of hiding it behind a click.
+    if ((agg.stale_snap_detail || []).length) {
+        const staleCard = h("div", { className: "card", style: "margin-bottom:16px" });
+        staleCard.appendChild(h("div", { className: "card-header" }, "⚠️ " + t("stale_block_title")));
+        const staleBody = h("div", { className: "card-body" }, loading());
+        staleCard.appendChild(staleBody);
+        root.appendChild(staleCard);
+        renderStaleSnapshotsBlock(staleBody, agg.stale_snap_detail);
+    }
 
     // Per-host breakdown
     const hostsCard = h("div", { className: "card" });
@@ -648,6 +669,10 @@ async function viewHosts() {
                 onClick: () => testHost(host.address),
             }, t("test")));
             btnGroup.appendChild(h("button", {
+                className: "btn btn-sm",
+                onClick: () => openHostBackupModal(host),
+            }, t("hb_backup")));
+            btnGroup.appendChild(h("button", {
                 className: "btn btn-sm btn-danger",
                 onClick: () => deleteHost(host.address),
             }, t("remove")));
@@ -659,9 +684,21 @@ async function viewHosts() {
         tableCard.appendChild(table);
     }
     container.appendChild(tableCard);
+
+    // Consolidated backups across all hosts.
+    const allBackupsCard = h("div", { className: "card", style: "margin-top:16px" });
+    const allBkRefresh = h("button", { className: "btn btn-sm" }, t("refresh"));
+    allBackupsCard.appendChild(h("div", { className: "card-header" },
+        [h("span", {}, t("hb_all_title")), allBkRefresh]));
+    const allBkBody = h("div", { className: "card-body" }, loading());
+    allBackupsCard.appendChild(allBkBody);
+    container.appendChild(allBackupsCard);
+
     setContent(container);
 
     document.getElementById("add-host-btn").addEventListener("click", addHost);
+    allBkRefresh.onclick = () => renderAllHostBackups(allBkBody);
+    renderAllHostBackups(allBkBody);
 
     // Auto-probe each host in parallel so the "unknown" badge resolves
     // without requiring a manual click. Uses the same /api/hosts/test
@@ -669,6 +706,57 @@ async function viewHosts() {
     for (const host of hosts) {
         _probeHostBadge(host.address);
     }
+}
+
+// Consolidated table of every stored host-config backup across all hosts.
+async function renderAllHostBackups(mount) {
+    mount.innerHTML = loading();
+    let data;
+    try { data = await API.get("/api/host-backup/list-all"); }
+    catch (e) { mount.innerHTML = `<p class="muted">${escapeHtml(e.message || "")}</p>`; return; }
+    const items = data.backups || [];
+    if (!items.length) {
+        mount.innerHTML = "";
+        mount.appendChild(h("p", { className: "muted", style: "margin:0" }, t("hb_no_backups")));
+        return;
+    }
+    const fmtBytes = (n) => n == null ? "—" : (n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(2) + " MB");
+    const fmtDate = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
+
+    const tbl = h("table", { className: "data-table", style: "margin:0;width:100%;font-size:13px" });
+    tbl.appendChild(h("thead", {}, h("tr", {}, [
+        h("th", {}, t("hb_col_host")),
+        h("th", {}, t("hb_col_date")),
+        h("th", {}, t("hb_col_size")),
+        h("th", {}, "priv"),
+        h("th", { style: "text-align:right" }, ""),
+    ])));
+    const tb = h("tbody");
+    items.forEach(it => {
+        const qs = "?host=" + encodeURIComponent(it.host_address);
+        const dlBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("hb_download"));
+        dlBtn.onclick = () => window.open("/api/host-backup/download" + qs + "&file=" + encodeURIComponent(it.filename), "_blank");
+        const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete"));
+        delBtn.onclick = async () => {
+            if (!confirm(t("hb_delete_confirm"))) return;
+            const dr = await API.post("/api/host-backup/delete" + qs, { filename: it.filename });
+            if (dr.success) { toast(t("hb_deleted"), "success"); renderAllHostBackups(mount); }
+            else toast(dr.error || t("failed"), "error");
+        };
+        tb.appendChild(h("tr", {}, [
+            h("td", { style: "font-weight:600" }, [
+                it.host_name,
+                h("span", { style: "font-size:11px;color:var(--text-secondary);margin-left:6px" }, it.host_address),
+            ]),
+            h("td", {}, fmtDate(it.created_ts)),
+            h("td", {}, fmtBytes(it.bytes)),
+            h("td", {}, it.include_priv ? "⚠ yes" : "no"),
+            h("td", { style: "text-align:right" }, [dlBtn, delBtn]),
+        ]));
+    });
+    tbl.appendChild(tb);
+    mount.innerHTML = "";
+    mount.appendChild(tbl);
 }
 
 async function _probeHostBadge(addr) {
@@ -718,6 +806,269 @@ async function deleteHost(addr) {
     loadHostSelector();
     viewHosts();
 }
+
+// Host config backup modal: create now, schedule, and the stored-backup list.
+function openHostBackupModal(host) {
+    const addr = host.address;
+    const qs = "?host=" + encodeURIComponent(addr);
+    const fmtBytes = (n) => {
+        if (n == null) return "—";
+        if (n < 1024) return n + " B";
+        if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+        return (n / 1048576).toFixed(2) + " MB";
+    };
+    const fmtDate = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
+    const weekdays = t("ai_weekdays").split(",");
+
+    const body = h("div");
+
+    // Security warning
+    body.appendChild(h("div", {
+        style: "padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;font-size:12px;margin-bottom:14px"
+    }, [
+        h("b", { style: "color:var(--danger)" }, "⚠ " + t("hb_security_title")),
+        h("div", { style: "color:var(--text-secondary);margin-top:4px" }, t("hb_security_text")),
+    ]));
+
+    // --- Create now ---
+    const createCard = h("div", { className: "card", style: "margin-bottom:14px" });
+    createCard.appendChild(h("div", { className: "card-header" }, t("hb_create_now")));
+    const createBody = h("div", { className: "card-body" });
+    const privCb = h("input", { type: "checkbox" });
+    const createBtn = h("button", { className: "btn btn-primary" }, t("hb_create_btn"));
+    const createStatus = h("span", { style: "font-size:12px;color:var(--text-secondary);margin-left:8px" });
+    createBody.appendChild(h("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-bottom:10px" }, [
+        privCb, h("span", {}, t("hb_include_priv")),
+    ]));
+    createBody.appendChild(h("div", { style: "display:flex;align-items:center" }, [createBtn, createStatus]));
+    createCard.appendChild(createBody);
+    body.appendChild(createCard);
+
+    // --- Schedule ---
+    const schedCard = h("div", { className: "card", style: "margin-bottom:14px" });
+    schedCard.appendChild(h("div", { className: "card-header" }, t("hb_schedule")));
+    const schedBody = h("div", { className: "card-body" }, loading());
+    schedCard.appendChild(schedBody);
+    body.appendChild(schedCard);
+
+    // --- Backup list ---
+    const listCard = h("div", { className: "card" });
+    const listRefresh = h("button", { className: "btn btn-sm" }, t("refresh"));
+    listCard.appendChild(h("div", { className: "card-header" }, [h("span", {}, t("hb_existing")), listRefresh]));
+    const listBody = h("div", { className: "card-body" }, loading());
+    listCard.appendChild(listBody);
+    body.appendChild(listCard);
+
+    async function refreshList() {
+        listBody.innerHTML = loading();
+        try {
+            const r = await API.get("/api/host-backup/list" + qs);
+            const items = r.backups || [];
+            if (!items.length) {
+                listBody.innerHTML = "";
+                listBody.appendChild(h("p", { className: "muted", style: "margin:0" }, t("hb_no_backups")));
+                return;
+            }
+            const tbl = h("table", { className: "data-table", style: "margin:0;width:100%;font-size:13px" });
+            tbl.appendChild(h("thead", {}, h("tr", {}, [
+                h("th", {}, t("hb_col_date")),
+                h("th", {}, t("hb_col_size")),
+                h("th", {}, "priv"),
+                h("th", { style: "text-align:right" }, ""),
+            ])));
+            const tb = h("tbody");
+            items.forEach(it => {
+                const dlBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("hb_download"));
+                dlBtn.onclick = () => window.open("/api/host-backup/download" + qs + "&file=" + encodeURIComponent(it.filename), "_blank");
+                const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete"));
+                delBtn.onclick = async () => {
+                    if (!confirm(t("hb_delete_confirm"))) return;
+                    const dr = await API.post("/api/host-backup/delete" + qs, { filename: it.filename });
+                    if (dr.success) { toast(t("hb_deleted"), "success"); refreshList(); }
+                    else toast(dr.error || t("failed"), "error");
+                };
+                tb.appendChild(h("tr", {}, [
+                    h("td", {}, fmtDate(it.created_ts)),
+                    h("td", {}, fmtBytes(it.bytes)),
+                    h("td", {}, it.include_priv ? "⚠ yes" : "no"),
+                    h("td", { style: "text-align:right" }, [dlBtn, delBtn]),
+                ]));
+            });
+            tbl.appendChild(tb);
+            listBody.innerHTML = "";
+            listBody.appendChild(tbl);
+        } catch (e) { listBody.innerHTML = `<p class="muted">${escapeHtml(e.message || "")}</p>`; }
+    }
+    listRefresh.onclick = refreshList;
+
+    createBtn.onclick = async () => {
+        createBtn.disabled = true;
+        createStatus.textContent = t("hb_creating");
+        try {
+            const r = await API.post("/api/host-backup/create" + qs, { include_priv: privCb.checked });
+            if (r.success) {
+                toast(t("hb_created").replace("{size}", fmtBytes(r.bytes)), "success");
+                createStatus.textContent = "";
+                refreshList();
+            } else {
+                toast(r.error || t("failed"), "error");
+                createStatus.textContent = "";
+            }
+        } catch (e) { toast(e.message, "error"); createStatus.textContent = ""; }
+        finally { createBtn.disabled = false; }
+    };
+
+    async function renderSchedule() {
+        let s;
+        try { s = await API.get("/api/host-backup/schedule" + qs); }
+        catch (e) { schedBody.innerHTML = `<p class="muted">${escapeHtml(e.message || "")}</p>`; return; }
+        schedBody.innerHTML = "";
+        const enabledCb = h("input", { type: "checkbox" }); enabledCb.checked = !!s.enabled;
+        const intervalSel = h("select", { className: "form-control" }, [
+            h("option", { value: "daily" }, t("ai_schedule_daily")),
+            h("option", { value: "weekly" }, t("ai_schedule_weekly")),
+            h("option", { value: "monthly" }, t("hb_monthly")),
+        ]);
+        intervalSel.value = s.interval || "weekly";
+        const hourInput = h("input", { type: "number", min: "0", max: "23", className: "form-control", value: String(s.hour ?? 3) });
+        const weekdaySel = h("select", { className: "form-control" },
+            weekdays.map((d, i) => h("option", { value: String(i) }, d)));
+        weekdaySel.value = String(s.weekday ?? 0);
+        const keepInput = h("input", { type: "number", min: "0", max: "1000", className: "form-control", value: String(s.keep ?? 8) });
+        const schedPrivCb = h("input", { type: "checkbox" }); schedPrivCb.checked = !!s.include_priv;
+        const weekdayWrap = h("div", {}, [
+            h("label", {}, t("ai_schedule_weekday")), weekdaySel,
+        ]);
+        const updateWeekdayVis = () => { weekdayWrap.style.display = intervalSel.value === "weekly" ? "" : "none"; };
+        intervalSel.onchange = updateWeekdayVis;
+
+        const grid = h("div", { className: "grid grid-2", style: "gap:12px" }, [
+            h("div", { style: "grid-column:1/-1" }, h("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer" }, [
+                enabledCb, h("span", {}, t("hb_schedule_enable")),
+            ])),
+            h("div", {}, [h("label", {}, t("ai_schedule_interval")), intervalSel]),
+            h("div", {}, [h("label", {}, t("ai_schedule_hour")), hourInput]),
+            weekdayWrap,
+            h("div", {}, [h("label", {}, t("hb_keep")), keepInput]),
+            h("div", { style: "grid-column:1/-1" }, h("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer" }, [
+                schedPrivCb, h("span", {}, t("hb_include_priv")),
+            ])),
+        ]);
+        schedBody.appendChild(grid);
+        updateWeekdayVis();
+        const saveBtn = h("button", { className: "btn btn-primary", style: "margin-top:12px" }, t("save"));
+        const saveStatus = h("span", { style: "font-size:12px;margin-left:8px;color:var(--text-secondary)" });
+        saveBtn.onclick = async () => {
+            saveBtn.disabled = true;
+            try {
+                const r = await API.post("/api/host-backup/schedule" + qs, {
+                    enabled: enabledCb.checked,
+                    interval: intervalSel.value,
+                    hour: parseInt(hourInput.value, 10) || 0,
+                    weekday: parseInt(weekdaySel.value, 10) || 0,
+                    keep: parseInt(keepInput.value, 10) || 0,
+                    include_priv: schedPrivCb.checked,
+                });
+                toast(r.success ? t("hb_schedule_saved") : t("failed"), r.success ? "success" : "error");
+            } catch (e) { toast(e.message, "error"); }
+            finally { saveBtn.disabled = false; }
+        };
+        schedBody.appendChild(h("div", { style: "margin-top:4px" }, [saveBtn, saveStatus]));
+    }
+
+    openModal(t("hb_title").replace("{host}", host.name || addr), "");
+    const mb = document.getElementById("modal-body");
+    const mf = document.getElementById("modal-footer");
+    mb.innerHTML = ""; mb.appendChild(body);
+    mf.innerHTML = "";
+    mf.appendChild(h("button", { className: "btn", onClick: closeModal }, t("close")));
+    const modal = document.querySelector("#modal-overlay .modal");
+    if (modal) modal.style.maxWidth = "720px";
+    renderSchedule();
+    refreshList();
+}
+
+// Switch the active host and jump to its Snapshot Check view.
+function gotoSnapshotCheckForHost(addr) {
+    const sel = document.getElementById("host-select");
+    if (sel) sel.value = addr;
+    currentHost = addr;
+    closeModal();
+    navigate("snapshot-check");
+}
+
+// Inline "where do I find them" block for the dashboard: for every host the
+// monitor flagged with stale labels, fetch its Snapshot Check analysis and
+// list the affected datasets per label (with age + threshold). Each host gets
+// an "Open Snapshot Check" shortcut.
+async function renderStaleSnapshotsBlock(mount, detail) {
+    const addrs = [...new Set((detail || []).map(d => d.host_address))];
+    const nameByAddr = {};
+    (detail || []).forEach(d => { nameByAddr[d.host_address] = d.host_name || d.host_address; });
+
+    mount.innerHTML = "";
+    mount.appendChild(h("p", { style: "font-size:13px;color:var(--text-secondary);margin:0 0 12px 0" },
+        t("stale_block_intro")));
+
+    // Fetch each affected host's snapshot-check in parallel (cached server-side).
+    const results = await Promise.all(addrs.map(async (addr) => {
+        try {
+            const d = await API.get("/api/health/snapshot-check?host=" + encodeURIComponent(addr));
+            return { addr, data: d };
+        } catch (e) {
+            return { addr, error: e.message || "failed" };
+        }
+    }));
+
+    results.forEach(({ addr, data, error }) => {
+        const hostName = nameByAddr[addr] || addr;
+        const card = h("div", { style: "border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px" });
+        card.appendChild(h("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px" }, [
+            h("span", { style: "font-weight:600" }, [
+                hostName, h("span", { style: "font-size:11px;color:var(--text-secondary);margin-left:6px" }, addr),
+            ]),
+            h("button", { className: "btn btn-sm btn-primary", onClick: () => gotoSnapshotCheckForHost(addr) }, t("stale_block_open")),
+        ]));
+
+        if (error) {
+            card.appendChild(h("p", { className: "muted", style: "margin:0" }, error));
+            mount.appendChild(card);
+            return;
+        }
+
+        // Collect stale datasets across all labels for this host.
+        const perLabel = (data && data.per_label) || {};
+        let any = false;
+        Object.keys(perLabel).forEach(label => {
+            const stale = (perLabel[label].stale_datasets || []).filter(s => !s.note);
+            if (!stale.length) return;
+            any = true;
+            card.appendChild(h("div", { style: "font-size:12px;font-weight:600;color:var(--warning,#d4a017);margin:6px 0 4px" },
+                label + " — " + stale.length + " " + t("stale_block_datasets")));
+            const tbl = h("table", { className: "data-table", style: "margin:0 0 6px 0;width:100%;font-size:12px" });
+            tbl.appendChild(h("thead", {}, h("tr", {}, [
+                h("th", {}, t("stale_block_dataset")),
+                h("th", { style: "width:120px;text-align:right" }, t("stale_block_age")),
+                h("th", { style: "width:120px;text-align:right" }, t("stale_block_threshold")),
+            ])));
+            const tb = h("tbody");
+            stale.forEach(s => {
+                tb.appendChild(h("tr", {}, [
+                    h("td", { style: "font-family:monospace" }, s.dataset || "—"),
+                    h("td", { style: "text-align:right" }, s.age || s.newest_age_human || "—"),
+                    h("td", { style: "text-align:right;color:var(--text-secondary)" }, s.threshold || "—"),
+                ]));
+            });
+            tbl.appendChild(tb);
+            card.appendChild(tbl);
+        });
+        if (!any) {
+            card.appendChild(h("p", { className: "muted", style: "margin:0;font-size:12px" }, t("stale_block_cleared")));
+        }
+        mount.appendChild(card);
+    });
+}
+
 
 // -- Pools -----------------------------------------------------------------
 async function viewPools() {
@@ -1332,6 +1683,107 @@ async function destroySnap(snap) {
     viewSnapshots();
 }
 
+// Editable zfs-auto-snapshot retention table. Loads per-level keep/enabled
+// from /api/auto-snapshot/retention and writes changed rows back.
+async function renderRetentionEditor(mount) {
+    let data;
+    try {
+        data = await API.get("/api/auto-snapshot/retention?host=" + encodeURIComponent(currentHost));
+    } catch (e) {
+        mount.innerHTML = "";
+        mount.appendChild(h("p", { className: "muted" }, e.message || "Failed to load retention"));
+        return;
+    }
+    const levels = data.levels || [];
+    if (!data.installed) {
+        mount.innerHTML = "";
+        mount.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("retention_not_installed")));
+        return;
+    }
+
+    const rows = {};
+    const table = h("table", { className: "data-table", style: "margin:0;width:100%" });
+    table.appendChild(h("thead", {}, h("tr", {}, [
+        h("th", {}, t("retention_level")),
+        h("th", {}, t("retention_interval")),
+        h("th", { style: "width:120px" }, t("retention_keep")),
+        h("th", { style: "width:90px;text-align:center" }, t("retention_enabled")),
+    ])));
+    const tb = h("tbody");
+    levels.forEach(lv => {
+        if (!lv.installed) {
+            tb.appendChild(h("tr", { style: "opacity:0.5" }, [
+                h("td", { style: "font-weight:600" }, lv.label),
+                h("td", { style: "color:var(--text-secondary)" }, lv.interval),
+                h("td", { style: "font-size:12px;color:var(--text-secondary)" }, t("retention_level_missing")),
+                h("td", {}, ""),
+            ]));
+            return;
+        }
+        const keepInput = h("input", { type: "number", min: "0", max: "100000",
+            className: "form-input", style: "max-width:100px",
+            value: String(lv.keep != null ? lv.keep : "") });
+        const enabledCb = h("input", { type: "checkbox" });
+        enabledCb.checked = !!lv.enabled;
+        rows[lv.label] = { keepInput, enabledCb, orig: { keep: lv.keep, enabled: lv.enabled } };
+        tb.appendChild(h("tr", {}, [
+            h("td", { style: "font-weight:600" }, lv.label),
+            h("td", { style: "color:var(--text-secondary)" }, lv.interval),
+            h("td", {}, keepInput),
+            h("td", { style: "text-align:center" }, enabledCb),
+        ]));
+    });
+    table.appendChild(tb);
+
+    mount.innerHTML = "";
+    mount.appendChild(table);
+    mount.appendChild(h("p", { style: "font-size:11px;color:var(--text-secondary);margin-top:8px" }, t("retention_edit_hint")));
+    const btnRow = h("div", { style: "margin-top:10px;display:flex;gap:8px;align-items:center" });
+    const saveBtn = h("button", { className: "btn btn-primary" }, t("save"));
+    const statusEl = h("span", { style: "font-size:12px;color:var(--text-secondary)" });
+    btnRow.appendChild(saveBtn);
+    btnRow.appendChild(statusEl);
+    mount.appendChild(btnRow);
+
+    saveBtn.onclick = async () => {
+        const changes = [];
+        for (const label of Object.keys(rows)) {
+            const r = rows[label];
+            const keep = parseInt(r.keepInput.value, 10);
+            if (isNaN(keep) || keep < 0) {
+                toast(t("retention_keep_invalid").replace("{level}", label), "error");
+                return;
+            }
+            const enabled = r.enabledCb.checked;
+            if (keep !== r.orig.keep || enabled !== r.orig.enabled) {
+                changes.push({ label, keep, enabled });
+            }
+        }
+        if (!changes.length) { toast(t("retention_no_changes"), "info"); return; }
+        if (!confirm(t("retention_confirm"))) return;
+        saveBtn.disabled = true;
+        statusEl.textContent = t("saving") || "…";
+        try {
+            const r = await API.post("/api/auto-snapshot/retention?host=" + encodeURIComponent(currentHost), { changes });
+            if (r.success) {
+                toast(t("retention_saved"), "success");
+                renderRetentionEditor(mount);
+            } else {
+                const failed = (r.results || []).filter(x => !x.success)
+                    .map(x => x.label + ": " + (x.error || x.stderr || "?"));
+                toast(t("retention_save_partial") + " " + failed.join("; "), "error");
+                statusEl.textContent = "";
+                saveBtn.disabled = false;
+            }
+        } catch (e) {
+            toast(e.message, "error");
+            statusEl.textContent = "";
+            saveBtn.disabled = false;
+        }
+    };
+}
+
+
 // -- Snapshot Check -------------------------------------------------------
 async function viewSnapshotCheck() {
     if (!requireHost()) return;
@@ -1345,22 +1797,15 @@ async function viewSnapshotCheck() {
         h("p", {}, `${currentHost} — ${data.datasets_analyzed || 0} Datasets`),
     ]));
 
-    // Retention Policy Overview
+    // Retention Policy — editable (keep value + enabled per level)
     const policyCard = h("div", { className: "card" });
     policyCard.appendChild(h("div", { className: "card-header" }, t("retention_policy") || "Retention Policy (Cron)"));
-    const policyBody = h("div", { className: "card-body" });
-    const rp = data.retention_policy || {};
-    if (Object.keys(rp).length > 0) {
-        const policyGrid = h("div", { className: "grid grid-5" });
-        for (const [label, keep] of Object.entries(rp)) {
-            policyGrid.appendChild(makeStatCard(label, `${keep}`, "keep"));
-        }
-        policyBody.appendChild(policyGrid);
-    } else {
-        policyBody.appendChild(h("p", { style: "color:var(--text-secondary)" }, "No retention policy found in cron"));
-    }
+    const policyBody = h("div", { className: "card-body" }, loading());
     policyCard.appendChild(policyBody);
     container.appendChild(policyCard);
+    // Load + render the editable retention table asynchronously so the rest
+    // of the Snapshot Check view paints immediately.
+    renderRetentionEditor(policyBody);
 
     // Per-Label Status
     const labels = data.per_label || {};

@@ -23,7 +23,28 @@ env:
   IMAGE_NAME: ${{ github.repository }}   # onlinecrash24/pve-zfs-tool
 
 jobs:
+  # Run the pytest suite first. build-and-push depends on it, so no image
+  # is published unless the tests are green -- on dev pushes, tag pushes and
+  # PRs alike.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dev dependencies
+        run: pip install --no-cache-dir -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest
+
   build-and-push:
+    needs: test          # gate the image build on green tests
     runs-on: ubuntu-latest
     permissions:
       contents: read

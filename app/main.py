@@ -613,6 +613,134 @@ def api_set_auto_snap():
     return jsonify(result)
 
 
+@app.route("/api/auto-snapshot/retention", methods=["GET"])
+@login_required
+def api_auto_snap_retention_get():
+    """Read the per-level zfs-auto-snapshot retention policy (keep + enabled)."""
+    from app.autosnap import get_retention
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(get_retention(host))
+
+
+@app.route("/api/auto-snapshot/retention", methods=["POST"])
+@login_required
+def api_auto_snap_retention_set():
+    """Apply per-level keep / enabled changes to the cron files (with backup)."""
+    from app.autosnap import set_retention
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    changes = data.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return jsonify({"error": "changes must be a non-empty array"}), 400
+    result = set_retention(host, changes)
+    audit_log("auto_snapshot.retention", target="retention_policy", host=host["address"],
+              success=result.get("success", False),
+              details={"changes": [{"label": c.get("label"), "keep": c.get("keep"),
+                                    "enabled": c.get("enabled")} for c in changes]})
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# API: Host config backups
+# ---------------------------------------------------------------------------
+
+@app.route("/api/host-backup/create", methods=["POST"])
+@login_required
+def api_host_backup_create():
+    from app.hostbackup import create_backup
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    include_priv = bool(data.get("include_priv"))
+    result = create_backup(host, include_priv=include_priv)
+    audit_log("host_backup.create", target=host["address"], host=host["address"],
+              success=result.get("success", False),
+              details={"filename": result.get("filename"),
+                       "bytes": result.get("bytes"), "include_priv": include_priv})
+    return jsonify(result)
+
+
+@app.route("/api/host-backup/list")
+@login_required
+def api_host_backup_list():
+    from app.hostbackup import list_backups
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(list_backups(host))
+
+
+@app.route("/api/host-backup/list-all")
+@login_required
+def api_host_backup_list_all():
+    """Consolidated list of stored backups across every registered host."""
+    from app.hostbackup import list_all_backups
+    from app.ssh_manager import load_hosts
+    return jsonify(list_all_backups(load_hosts()))
+
+
+@app.route("/api/host-backup/delete", methods=["POST"])
+@login_required
+def api_host_backup_delete():
+    from app.hostbackup import delete_backup
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    filename = (data.get("filename") or "").strip()
+    result = delete_backup(host, filename)
+    audit_log("host_backup.delete", target=filename, host=host["address"],
+              success=result.get("success", False))
+    return jsonify(result)
+
+
+@app.route("/api/host-backup/download")
+@login_required
+def api_host_backup_download():
+    from flask import send_file
+    from app.hostbackup import backup_path
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    filename = (request.args.get("file") or "").strip()
+    path = backup_path(host, filename)
+    if not path:
+        return jsonify({"error": "backup not found"}), 404
+    audit_log("host_backup.download", target=filename, host=host["address"], success=True)
+    return send_file(path, as_attachment=True, download_name=filename,
+                     mimetype="application/gzip")
+
+
+@app.route("/api/host-backup/schedule", methods=["GET"])
+@login_required
+def api_host_backup_schedule_get():
+    from app.hostbackup import get_schedule
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    return jsonify(get_schedule(host["address"]))
+
+
+@app.route("/api/host-backup/schedule", methods=["POST"])
+@login_required
+def api_host_backup_schedule_set():
+    from app.hostbackup import set_schedule, start_scheduler
+    host, err, code = _require_host()
+    if err:
+        return jsonify(err), code
+    data = request.get_json(silent=True) or {}
+    saved = set_schedule(host["address"], data)
+    start_scheduler()  # idempotent — ensure the loop is running
+    audit_log("host_backup.schedule", target=host["address"], host=host["address"],
+              success=True, details=saved)
+    return jsonify({"success": True, "schedule": saved})
+
+
 # ---------------------------------------------------------------------------
 # API: Proxmox VMs/CTs
 # ---------------------------------------------------------------------------
@@ -1701,6 +1829,11 @@ try:
     start_metrics_sampler()
 except Exception:
     log.exception("Failed to start metrics sampler")
+try:
+    from app.hostbackup import start_scheduler as start_host_backup_scheduler
+    start_host_backup_scheduler()
+except Exception:
+    log.exception("Failed to start host backup scheduler")
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0")

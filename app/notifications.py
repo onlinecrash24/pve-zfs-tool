@@ -65,6 +65,7 @@ DEFAULT_CONFIG = {
         "auto_snapshot": True,
         "ai_report": True,
         "replication_lag": True,
+        "host_backup_failed": True,
     },
 }
 
