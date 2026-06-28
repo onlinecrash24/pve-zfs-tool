@@ -465,15 +465,25 @@ function _renderDashboard(d) {
                 nameCell = `<td rowspan="${pools.length}">${escapeHtml(host.name)}</td>`;
                 statusCell = `<td rowspan="${pools.length}">${statusBadge}</td>`;
             }
-            const healthCls = p.health === "ONLINE" ? "badge-online" :
+            const stale = !!p.stale;
+            // Offline host: last sample can't be trusted as current -> show it
+            // as "stale" rather than a confident green ONLINE, and drop the
+            // capacity/forecast warning colors so a dead host doesn't alarm.
+            const healthCls = stale ? "badge-stopped" :
+                p.health === "ONLINE" ? "badge-online" :
                 (p.health ? "badge-offline" : "badge-stopped");
+            const healthTxt = stale ? t("dash_stale_pool") : (p.health || "?");
+            const healthTitle = stale ? ` title="${escapeHtml(t("dash_stale_pool_hint", p.health || "?"))}"` : "";
             const capPct = p.cap_pct != null ? p.cap_pct.toFixed(0) + "%" : "—";
-            const capClass = (p.cap_pct != null && p.cap_pct >= 90) ? "color:var(--error,#f44336);font-weight:bold" :
+            const capClass = stale ? "color:var(--text-secondary)" :
+                             (p.cap_pct != null && p.cap_pct >= 90) ? "color:var(--error,#f44336);font-weight:bold" :
                              (p.cap_pct != null && p.cap_pct >= 80) ? "color:#e67e22" : "";
             const free = p.free_bytes != null ? formatBytes(p.free_bytes) : "—";
             let fc;
             if (p.forecast_days_until_full == null) {
                 fc = `<span class="muted">—</span>`;
+            } else if (stale) {
+                fc = `<span class="muted">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
             } else if (p.forecast_days_until_full < 30) {
                 fc = `<span style="color:var(--error,#f44336);font-weight:bold">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
             } else if (p.forecast_days_until_full < 90) {
@@ -483,7 +493,7 @@ function _renderDashboard(d) {
             }
             tr.innerHTML = `${nameCell}${statusCell}
                 <td style="font-family:monospace">${escapeHtml(p.pool)}</td>
-                <td><span class="badge ${healthCls}">${escapeHtml(p.health || "?")}</span></td>
+                <td><span class="badge ${healthCls}"${healthTitle}>${escapeHtml(healthTxt)}</span></td>
                 <td style="${capClass}">${capPct}</td>
                 <td>${free}</td>
                 <td>${fc}</td>`;

@@ -189,6 +189,41 @@ def build_stale_detail(stale_state, name_by_addr):
     return out
 
 
+def summarize_host_pools(reachable, pools):
+    """Account one host's pool samples into dashboard counters.
+
+    Returns ``(counts, annotated_pools)``. A pool on a host that is currently
+    **offline** (``reachable is False``) cannot have its last sample trusted as
+    current, so it is flagged ``stale`` and excluded from every counter
+    (online / degraded / capacity / forecast). This stops a dead host's last
+    "ONLINE" reading from inflating the POOLS tile. ``reachable`` True or None
+    (not yet classified) is treated as live and counted as before.
+    """
+    counts = {"pools_total": 0, "pools_ok": 0, "pools_degraded": 0,
+              "pools_capacity_warn": 0, "forecast_pools_critical": 0}
+    stale = (reachable is False)
+    annotated = []
+    for p in pools:
+        pp = dict(p)
+        pp["stale"] = stale
+        annotated.append(pp)
+        if stale:
+            continue
+        counts["pools_total"] += 1
+        health = (p.get("health") or "").upper()
+        if health and health != "ONLINE":
+            counts["pools_degraded"] += 1
+        elif health == "ONLINE":
+            counts["pools_ok"] += 1
+        cap = p.get("cap_pct")
+        if cap is not None and cap >= 90:
+            counts["pools_capacity_warn"] += 1
+        days = p.get("forecast_days_until_full")
+        if days is not None and days < 30:
+            counts["forecast_pools_critical"] += 1
+    return counts, annotated
+
+
 def dashboard():
     """Return a compact status snapshot for the Home-page widget."""
     from app.ssh_manager import load_hosts
@@ -224,43 +259,34 @@ def dashboard():
         pools_here = []
         for r in by_host.get(addr, []):
             health = (r.get("health") or "").upper()
-            cap = r.get("cap_pct")
-            size = r.get("size_bytes")
-            alloc = r.get("alloc_bytes")
             # Forecast (best-effort; skip on error)
             try:
                 days = forecast_days_until_full(addr, r["pool"])
             except Exception:
                 days = None
-
-            agg["pools_total"] += 1
-            if health and health != "ONLINE":
-                agg["pools_degraded"] += 1
-            elif health == "ONLINE":
-                agg["pools_ok"] += 1
-            if cap is not None and cap >= 90:
-                agg["pools_capacity_warn"] += 1
-            if days is not None and days < 30:
-                agg["forecast_pools_critical"] += 1
-
             pools_here.append({
                 "pool": r["pool"],
                 "health": health or None,
-                "cap_pct": cap,
-                "size_bytes": size,
-                "alloc_bytes": alloc,
+                "cap_pct": r.get("cap_pct"),
+                "size_bytes": r.get("size_bytes"),
+                "alloc_bytes": r.get("alloc_bytes"),
                 "free_bytes": r.get("free_bytes"),
                 "frag_pct": r.get("frag_pct"),
                 "sample_ts": r["timestamp"],
                 "forecast_days_until_full": days,
             })
 
+        # Offline hosts: don't let a dead host's last sample count as ONLINE.
+        counts, pools_annotated = summarize_host_pools(reachable, pools_here)
+        for k, v in counts.items():
+            agg[k] += v
+
         hosts_out.append({
             "address": addr,
             "name": h.get("name") or addr,
             "reachable": reachable,
             "last_seen": hstate.get("updated_ts"),
-            "pools": pools_here,
+            "pools": pools_annotated,
         })
 
     # Count stale-snap labels + build the per-host:label breakdown so the
