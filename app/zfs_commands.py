@@ -153,6 +153,48 @@ def get_pool_iostat(host, pool_name):
     return result
 
 
+# Pool properties we expose as simple on/off toggles in the UI.
+EDITABLE_POOL_PROPS = ("autotrim", "autoexpand")
+
+
+def get_pool_props(host, pool_name):
+    """Return the autotrim/autoexpand state for a pool."""
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    cols = ",".join(EDITABLE_POOL_PROPS)
+    result = run_command(host, f"zpool get -H -o property,value {cols} {pool_name}",
+                         cache_ttl=_TTL_SHORT)
+    props = {}
+    if result.get("success"):
+        for line in result["stdout"].splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                props[parts[0]] = parts[1]
+    return {
+        "success": result.get("success", False),
+        "autotrim": props.get("autotrim"),
+        "autoexpand": props.get("autoexpand"),
+    }
+
+
+def set_pool_prop(host, pool_name, prop, value):
+    """Set a single editable pool property (autotrim/autoexpand) to on/off."""
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    if prop not in EDITABLE_POOL_PROPS:
+        return {"success": False, "error": "unsupported property"}
+    if value not in ("on", "off"):
+        return {"success": False, "error": "value must be 'on' or 'off'"}
+    result = run_command(host, f"zpool set {prop}={value} {pool_name}")
+    if result.get("success"):
+        _invalidate_cache(host["address"])
+    return {"success": result.get("success", False), "stderr": result.get("stderr", "")}
+
+
 def scrub_pool(host, pool_name):
     try:
         pool_name = validate_pool_name(pool_name)

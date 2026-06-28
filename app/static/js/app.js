@@ -1151,16 +1151,51 @@ async function viewPools() {
 }
 
 async function showPoolDetail(pool) {
-    const [status, iostat] = await Promise.all([
+    const [status, iostat, props] = await Promise.all([
         API.get(`/api/pools/status?host=${currentHost}&pool=${pool}`),
         API.get(`/api/pools/iostat?host=${currentHost}&pool=${pool}`),
+        API.get(`/api/pools/props?host=${currentHost}&pool=${pool}`),
     ]);
+    const propRow = (key, label, hint) => {
+        const val = props[key];
+        const known = val === "on" || val === "off";
+        const on = val === "on";
+        const ctrl = known
+            ? `<button class="btn btn-sm ${on ? "btn-success" : ""}" id="poolprop-${key}" data-cur="${val}">${on ? "on" : "off"}</button>`
+            : `<span style="color:var(--text-secondary)">${escapeHtml(t("no_data"))}</span>`;
+        return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+            <div><strong>${escapeHtml(label)}</strong>
+            <div style="color:var(--text-secondary);font-size:12px">${escapeHtml(hint)}</div></div>
+            <div>${ctrl}</div></div>`;
+    };
     openModal(`Pool: ${pool}`, `
-        <h4 style="margin-bottom:8px">${escapeHtml(t("pool_status"))}</h4>
+        <h4 style="margin-bottom:8px">${escapeHtml(t("pool_props"))}</h4>
+        ${propRow("autotrim", t("prop_autotrim"), t("prop_autotrim_hint"))}
+        ${propRow("autoexpand", t("prop_autoexpand"), t("prop_autoexpand_hint"))}
+        <h4 style="margin:16px 0 8px">${escapeHtml(t("pool_status"))}</h4>
         <pre class="output">${escapeHtml(status.stdout || status.stderr || t("no_data"))}</pre>
         <h4 style="margin:16px 0 8px">${escapeHtml(t("io_stats"))}</h4>
         <pre class="output">${escapeHtml(iostat.stdout || iostat.stderr || t("no_data"))}</pre>
     `);
+    ["autotrim", "autoexpand"].forEach((key) => {
+        const btn = document.getElementById(`poolprop-${key}`);
+        if (!btn) return;
+        btn.addEventListener("click", async () => {
+            const cur = btn.getAttribute("data-cur");
+            const next = cur === "on" ? "off" : "on";
+            btn.setAttribute("disabled", "disabled");
+            const r = await API.post("/api/pools/set-prop", { host: currentHost, pool, property: key, value: next });
+            btn.removeAttribute("disabled");
+            if (r.success) {
+                btn.setAttribute("data-cur", next);
+                btn.textContent = next;
+                btn.className = "btn btn-sm " + (next === "on" ? "btn-success" : "");
+                toast(t("pool_prop_set", key, next), "success");
+            } else {
+                toast(r.stderr || r.error || t("pool_prop_failed"), "error");
+            }
+        });
+    });
 }
 
 async function scrubPool(pool) {
@@ -2600,6 +2635,114 @@ async function toggleAutoSnap(ds, enabled) {
 }
 
 // -- Health ----------------------------------------------------------------
+async function renderArcEditor(container) {
+    const card = h("div", { className: "card" });
+    card.appendChild(h("div", { className: "card-header" }, t("arc_limit_title")));
+    const body = h("div", { className: "card-body" });
+    body.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("loading")));
+    card.appendChild(body);
+    container.appendChild(card);
+
+    let cfg;
+    try {
+        cfg = await API.get(`/api/tuning/arc?host=${currentHost}`);
+    } catch (e) {
+        cfg = null;
+    }
+    body.innerHTML = "";
+    if (!cfg || cfg.error) {
+        body.appendChild(h("p", { style: "color:var(--text-secondary)" }, (cfg && cfg.error) || t("no_data")));
+        return;
+    }
+
+    const GIB = 1024 * 1024 * 1024;
+    const ram = cfg.total_ram_bytes || 0;
+    const effMax = cfg.runtime_max || cfg.persistent_max || 0;
+
+    // Current-state grid
+    const grid = h("div", { className: "grid grid-4" });
+    grid.appendChild(makeStatCard(t("arc_total_ram"), ram ? formatBytes(ram) : "?", ""));
+    grid.appendChild(makeStatCard(t("arc_current_size"),
+        cfg.current_size != null ? formatBytes(cfg.current_size) : "?", ""));
+    grid.appendChild(makeStatCard(t("arc_runtime_limit"),
+        cfg.runtime_max ? formatBytes(cfg.runtime_max) : t("arc_default"), ""));
+    grid.appendChild(makeStatCard(t("arc_persistent_limit"),
+        cfg.persistent_max ? formatBytes(cfg.persistent_max) : t("arc_not_set"), ""));
+    body.appendChild(grid);
+
+    body.appendChild(h("p", {
+        style: "color:var(--text-secondary);font-size:13px;margin:12px 0 8px"
+    }, t("arc_hint")));
+
+    // Input + actions
+    const defGib = effMax ? (effMax / GIB) : (ram ? (ram * 0.5 / GIB) : 8);
+    const row = h("div", { style: "display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap" });
+    const fg = h("div", { className: "form-group", style: "margin:0" });
+    fg.appendChild(h("label", {}, t("arc_new_limit_gib")));
+    const input = h("input", {
+        type: "number", min: "0.0625", step: "0.5",
+        value: String(Math.round(defGib * 10) / 10), style: "width:140px"
+    });
+    fg.appendChild(input);
+    row.appendChild(fg);
+    const applyBtn = h("button", { className: "btn btn-primary" }, t("arc_apply"));
+    const resetBtn = h("button", { className: "btn" }, t("arc_reset"));
+    row.appendChild(applyBtn);
+    row.appendChild(resetBtn);
+    body.appendChild(row);
+
+    const note = h("div", { style: "margin-top:12px" });
+    body.appendChild(note);
+
+    function showResult(r) {
+        note.innerHTML = "";
+        if (!r || !r.success) {
+            note.appendChild(h("div", {
+                style: "padding:10px;background:rgba(220,53,69,0.08);border:1px solid var(--danger);border-radius:6px;font-size:13px"
+            }, (r && r.error) || t("arc_save_failed")));
+            return;
+        }
+        const box = h("div", {
+            style: "padding:10px;background:rgba(212,160,23,0.1);border:1px solid var(--warning,#d4a017);border-radius:6px;font-size:13px"
+        });
+        box.appendChild(h("b", {}, "⟳ " + t("arc_reboot_note")));
+        const detail = [
+            (r.runtime_applied ? "✓ " : "– ") + t("arc_runtime_state"),
+            (r.initramfs_updated ? "✓ " : "⚠ ") + t("arc_initramfs_state"),
+        ];
+        box.appendChild(h("div", {
+            style: "color:var(--text-secondary);font-size:12px;margin-top:6px"
+        }, detail.join("   ·   ")));
+        note.appendChild(box);
+    }
+
+    async function send(payload, confirmMsg) {
+        if (confirmMsg && !confirm(confirmMsg)) return;
+        applyBtn.setAttribute("disabled", "disabled");
+        resetBtn.setAttribute("disabled", "disabled");
+        const oldLabel = applyBtn.textContent;
+        applyBtn.textContent = t("arc_applying");
+        const r = await API.post("/api/tuning/arc", Object.assign({ host: currentHost }, payload));
+        applyBtn.removeAttribute("disabled");
+        resetBtn.removeAttribute("disabled");
+        applyBtn.textContent = oldLabel;
+        showResult(r);
+        toast(r && r.success ? t("arc_saved") : ((r && r.error) || t("arc_save_failed")),
+              r && r.success ? "success" : "error");
+    }
+
+    applyBtn.addEventListener("click", () => {
+        const gibVal = parseFloat(input.value);
+        if (isNaN(gibVal) || gibVal < 0.0625) { toast(t("arc_invalid"), "error"); return; }
+        if (ram && gibVal * GIB > ram) { toast(t("arc_over_ram"), "error"); return; }
+        const bytes = Math.round(gibVal * GIB);
+        send({ arc_max: bytes }, t("arc_apply_confirm", String(Math.round(gibVal * 10) / 10)));
+    });
+    resetBtn.addEventListener("click", () => {
+        send({ arc_max: 0 }, t("arc_reset_confirm"));
+    });
+}
+
 async function viewHealth() {
     if (!requireHost()) return;
     setContent(loading());
@@ -2641,6 +2784,11 @@ async function viewHealth() {
     }
     arcCard.appendChild(arcBody);
     container.appendChild(arcCard);
+
+    // ARC limit editor (read+act loop: cap the cache that eats RAM).
+    // Appends a placeholder card synchronously (picked up by the final
+    // setContent below) and fills it in once the config fetch resolves.
+    renderArcEditor(container);
 
     // SMART status (all disks across all pools, grouped by pool)
     const smart = await API.get(`/api/health/smart?host=${currentHost}`);
