@@ -17,6 +17,7 @@ from app.ssh_manager import (
 from app.zfs_commands import (
     get_pools, get_pool_status, get_pool_iostat, scrub_pool, get_pool_history,
     check_pool_upgrade, upgrade_pool, start_scrub_monitor,
+    get_pool_props, set_pool_prop,
     get_datasets, get_dataset_properties, set_dataset_property,
     create_dataset, destroy_dataset,
     get_snapshots, create_snapshot, destroy_snapshot,
@@ -347,6 +348,32 @@ def api_pool_iostat():
     return jsonify(get_pool_iostat(host, pool))
 
 
+@app.route("/api/pools/props")
+def api_pool_props():
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    pool = request.args.get("pool", "")
+    return jsonify(get_pool_props(host, pool))
+
+
+@app.route("/api/pools/set-prop", methods=["POST"])
+@login_required
+def api_pool_set_prop():
+    data = request.json or {}
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    pool_name = data.get("pool", "")
+    prop = data.get("property", "")
+    value = data.get("value", "")
+    result = set_pool_prop(host, pool_name, prop, value)
+    audit_log("pool.set_prop", target=pool_name, host=host["address"],
+              success=result.get("success", False),
+              details={"property": prop, "value": value})
+    return jsonify(result)
+
+
 @app.route("/api/pools/scrub", methods=["POST"])
 def api_pool_scrub():
     data = request.json
@@ -620,7 +647,7 @@ def api_auto_snap_retention_get():
     from app.autosnap import get_retention
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     return jsonify(get_retention(host))
 
 
@@ -631,7 +658,7 @@ def api_auto_snap_retention_set():
     from app.autosnap import set_retention
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     changes = data.get("changes")
     if not isinstance(changes, list) or not changes:
@@ -654,7 +681,7 @@ def api_host_backup_create():
     from app.hostbackup import create_backup
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     include_priv = bool(data.get("include_priv"))
     result = create_backup(host, include_priv=include_priv)
@@ -671,7 +698,7 @@ def api_host_backup_list():
     from app.hostbackup import list_backups
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     return jsonify(list_backups(host))
 
 
@@ -690,7 +717,7 @@ def api_host_backup_delete():
     from app.hostbackup import delete_backup
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     filename = (data.get("filename") or "").strip()
     result = delete_backup(host, filename)
@@ -706,7 +733,7 @@ def api_host_backup_download():
     from app.hostbackup import backup_path
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     filename = (request.args.get("file") or "").strip()
     path = backup_path(host, filename)
     if not path:
@@ -722,7 +749,7 @@ def api_host_backup_schedule_get():
     from app.hostbackup import get_schedule
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     return jsonify(get_schedule(host["address"]))
 
 
@@ -732,7 +759,7 @@ def api_host_backup_schedule_set():
     from app.hostbackup import set_schedule, start_scheduler
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     saved = set_schedule(host["address"], data)
     start_scheduler()  # idempotent — ensure the loop is running
@@ -945,6 +972,33 @@ def api_arc_stats():
     if err:
         return err, code
     return jsonify(get_arc_stats(host))
+
+
+@app.route("/api/tuning/arc", methods=["GET"])
+@login_required
+def api_arc_config_get():
+    """Current ARC limit (runtime + persistent), live size and total RAM."""
+    from app.tuning import get_arc_config
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(get_arc_config(host))
+
+
+@app.route("/api/tuning/arc", methods=["POST"])
+@login_required
+def api_arc_config_set():
+    """Set the ARC limit (modprobe.d + initramfs + runtime). arc_max=0 resets."""
+    from app.tuning import set_arc_limit
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    result = set_arc_limit(host, data.get("arc_max"), data.get("arc_min"))
+    audit_log("tuning.arc", target=host["address"], host=host["address"],
+              success=result.get("success", False),
+              details={"arc_max": result.get("arc_max"), "arc_min": result.get("arc_min")})
+    return jsonify(result)
 
 
 @app.route("/api/health/events")
@@ -1335,7 +1389,7 @@ def api_forecast():
     from app.analytics import forecast_days_until_full
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     pool = request.args.get("pool")
     if not pool:
         return jsonify({"error": "pool parameter required"}), 400
@@ -1354,7 +1408,7 @@ def api_replication_status():
     from app.replication import get_status
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     source = request.args.get("source") or None
     return jsonify(get_status(host, source=source))
 
@@ -1365,7 +1419,7 @@ def api_replication_install():
     from app.replication import install
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     result = install(host)
     audit_log("replication.install", target=host["address"], host=host["address"],
               success=result["success"],
@@ -1379,7 +1433,7 @@ def api_replication_config_get():
     from app.replication import read_config
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     source = request.args.get("source") or None
     cfg = read_config(host, source=source)
     return jsonify({
@@ -1396,7 +1450,7 @@ def api_replication_config_set():
     from app.replication import write_config
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     values = data.get("values") or {}
     if not isinstance(values, dict):
@@ -1420,7 +1474,7 @@ def api_replication_run():
     from app.replication import run_now_async
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     source = (data.get("source") or request.args.get("source") or None)
     task_id = run_now_async(host, source=source)
@@ -1491,7 +1545,7 @@ def api_replication_create_target():
     from app.replication import create_target_dataset
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     dataset = (data.get("dataset") or "").strip()
     if not dataset:
@@ -1510,7 +1564,7 @@ def api_replication_tagged_datasets():
     from app.replication import list_tagged_datasets
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     tag = request.args.get("tag") or "bashclub:zsync"
     return jsonify(list_tagged_datasets(host, tag))
 
@@ -1545,7 +1599,7 @@ def api_replication_log():
     from app.replication import tail_log
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     try:
         lines = int(request.args.get("lines", 200))
     except (TypeError, ValueError):
@@ -1559,7 +1613,7 @@ def api_replication_config_delete():
     from app.replication import delete_config
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     source = request.args.get("source") or None
     purge = (request.args.get("purge") or "").lower() in ("1", "true", "yes")
     purge_children = (request.args.get("purge_children") or "").lower() in ("1", "true", "yes")
@@ -1593,7 +1647,7 @@ def api_replication_cron_get():
     from app.replication import get_cron
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     source = request.args.get("source") or None
     return jsonify(get_cron(host, source=source))
 
@@ -1604,7 +1658,7 @@ def api_replication_cron_set():
     from app.replication import set_cron
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     schedule = (data.get("schedule") or "").strip()
     source = (data.get("source") or request.args.get("source") or None)
@@ -1624,7 +1678,7 @@ def api_replication_cron_delete():
     from app.replication import remove_cron
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     source = request.args.get("source") or None
     result = remove_cron(host, source=source)
     audit_log("replication.cron.remove", target=host["address"], host=host["address"],
@@ -1643,7 +1697,7 @@ def api_replication_target_candidates():
     from app.replication import list_auto_snap_disabled
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     return jsonify(list_auto_snap_disabled(host))
 
 
@@ -1677,7 +1731,7 @@ def api_dr_datasets():
     from app.dr import list_replica_datasets
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     root = (request.args.get("root") or "").strip()
     if not root:
         return jsonify({"error": "root required"}), 400
@@ -1691,7 +1745,7 @@ def api_dr_snapshots():
     from app.dr import list_replica_snapshots
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     ds = (request.args.get("dataset") or "").strip()
     if not ds:
         return jsonify({"error": "dataset required"}), 400
@@ -1710,7 +1764,7 @@ def api_dr_reverse_sync():
     from app.dr import reverse_sync_async
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     data = request.get_json(silent=True) or {}
     try:
         task_id = reverse_sync_async(
@@ -1740,7 +1794,7 @@ def api_replication_configs():
     from app.replication import list_configs
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     return jsonify(list_configs(host))
 
 
@@ -1750,7 +1804,7 @@ def api_replication_checkzfs():
     from app.replication import run_checkzfs
     host, err, code = _require_host()
     if err:
-        return jsonify(err), code
+        return err, code
     source = (request.args.get("source") or "").strip()
     if not source:
         return jsonify({"error": "source required"}), 400
