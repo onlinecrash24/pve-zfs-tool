@@ -2714,16 +2714,20 @@ async function renderArcEditor(container) {
     const resetBtn = h("button", { className: "btn" }, t("arc_reset"));
     row.appendChild(applyBtn);
     row.appendChild(resetBtn);
-    // "1 GiB ARC per 1 TiB pool" suggestion (bashclub rule of thumb)
-    if (cfg.suggest_max_bytes) {
-        const sgGib = Math.round(cfg.suggest_max_bytes / GIB * 10) / 10;
-        const sgBtn = h("button", { className: "btn", title: t("arc_suggest_hint") },
-            t("arc_suggest_btn", String(sgGib)));
-        sgBtn.addEventListener("click", () => { input.value = String(sgGib); });
-        row.appendChild(sgBtn);
-    }
+    // Min / Recommended / Max reference buttons (fill the input on click).
+    const sug = cfg.arc_suggest || {};
+    const mkSug = (bytes, labelKey, cls) => {
+        if (!bytes) return;
+        const gib = Math.round(bytes / GIB * 10) / 10;
+        const b = h("button", { className: cls, title: t("arc_suggest_hint") }, t(labelKey, String(gib)));
+        b.addEventListener("click", () => { input.value = String(gib); });
+        row.appendChild(b);
+    };
+    mkSug(sug.min, "arc_suggest_min", "btn");
+    mkSug(sug.balanced, "arc_suggest_balanced", "btn btn-success");
+    mkSug(sug.max, "arc_suggest_max", "btn");
     body.appendChild(row);
-    if (cfg.suggest_max_bytes) {
+    if (sug.min || sug.balanced || sug.max) {
         body.appendChild(h("p", {
             style: "color:var(--text-secondary);font-size:12px;margin:6px 0 0"
         }, t("arc_suggest_hint")));

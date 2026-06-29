@@ -119,26 +119,54 @@ def test_set_arc_limit_rejects_min_ge_max_without_ssh():
     assert "arc_min" in r["error"]
 
 
-# --- suggest_arc_max (1 GiB ARC per 1 TiB pool) --------------------------
+# --- suggest_arc_floor (Proxmox 2 GiB + 1 GiB/TiB) -----------------------
 
 TIB = 1024 ** 4
 
 
-def test_suggest_one_gib_per_tib():
-    assert tn.suggest_arc_max(1 * TIB) == 1 * GIB
-    assert tn.suggest_arc_max(4 * TIB) == 4 * GIB
+def test_floor_two_gib_base_plus_one_per_tib():
+    assert tn.suggest_arc_floor(1 * TIB) == 3 * GIB
+    assert tn.suggest_arc_floor(8 * TIB) == 10 * GIB   # Proxmox wiki example
 
 
-def test_suggest_none_for_unknown_pool_size():
-    assert tn.suggest_arc_max(0) is None
-    assert tn.suggest_arc_max(None) is None
+def test_floor_none_for_unknown_pool_size():
+    assert tn.suggest_arc_floor(0) is None
+    assert tn.suggest_arc_floor(None) is None
 
 
-def test_suggest_clamped_to_64mib_floor():
-    # a tiny 1 GiB pool would suggest 1 MiB -> clamped up to the 64 MiB floor
-    assert tn.suggest_arc_max(1 * GIB) == tn.ARC_MIN_BYTES
+def test_floor_includes_the_2gib_base_for_tiny_pools():
+    # even a tiny pool gets at least the 2 GiB base (well above the 64 MiB floor)
+    assert tn.suggest_arc_floor(1 * GIB) >= 2 * GIB
 
 
-def test_suggest_clamped_to_total_ram():
-    # 100 TiB pool would suggest 100 GiB, but RAM is only 8 GiB
-    assert tn.suggest_arc_max(100 * TIB, total_ram_bytes=8 * GIB) == 8 * GIB
+# --- arc_suggestions (min / balanced / max) ------------------------------
+
+def test_suggestions_typical_box():
+    # 8 TiB pool, 64 GiB RAM
+    s = tn.arc_suggestions(8 * TIB, 64 * GIB)
+    assert s["min"] == 10 * GIB          # Proxmox floor
+    assert s["balanced"] == 16 * GIB     # 25% RAM
+    assert s["max"] == 32 * GIB          # 50% RAM
+    assert s["min"] <= s["balanced"] <= s["max"]
+
+
+def test_suggestions_unknown_pool_keeps_ram_based_values():
+    s = tn.arc_suggestions(None, 64 * GIB)
+    assert s["min"] is None
+    assert s["balanced"] == 16 * GIB
+    assert s["max"] == 32 * GIB
+
+
+def test_suggestions_unknown_ram_keeps_only_floor():
+    s = tn.arc_suggestions(8 * TIB, None)
+    assert s["min"] == 10 * GIB
+    assert s["balanced"] is None
+    assert s["max"] is None
+
+
+def test_suggestions_stay_ordered_when_floor_exceeds_ram():
+    # tiny RAM box, huge pool: floor would exceed 50% RAM -> clamp & keep order
+    s = tn.arc_suggestions(100 * TIB, 8 * GIB)
+    assert s["min"] <= s["balanced"] <= s["max"]
+    assert s["max"] == 4 * GIB           # 50% of 8 GiB
+    assert s["min"] <= s["max"]
