@@ -2699,7 +2699,20 @@ async function renderArcEditor(container) {
     const resetBtn = h("button", { className: "btn" }, t("arc_reset"));
     row.appendChild(applyBtn);
     row.appendChild(resetBtn);
+    // "1 GiB ARC per 1 TiB pool" suggestion (bashclub rule of thumb)
+    if (cfg.suggest_max_bytes) {
+        const sgGib = Math.round(cfg.suggest_max_bytes / GIB * 10) / 10;
+        const sgBtn = h("button", { className: "btn", title: t("arc_suggest_hint") },
+            t("arc_suggest_btn", String(sgGib)));
+        sgBtn.addEventListener("click", () => { input.value = String(sgGib); });
+        row.appendChild(sgBtn);
+    }
     body.appendChild(row);
+    if (cfg.suggest_max_bytes) {
+        body.appendChild(h("p", {
+            style: "color:var(--text-secondary);font-size:12px;margin:6px 0 0"
+        }, t("arc_suggest_hint")));
+    }
 
     const note = h("div", { style: "margin-top:12px" });
     body.appendChild(note);
@@ -2768,27 +2781,39 @@ async function viewHealth() {
         h("p", {}, t("health_on", currentHost)),
     ]));
 
-    // ARC stats
+    // ARC effectiveness. Raw cumulative hits/misses aren't actionable on
+    // their own -- the hit ratio is the number that matters (high = the cache
+    // is doing its job). Size/limit live in the ARC-limit editor below.
     const arcCard = h("div", { className: "card" });
     arcCard.appendChild(h("div", { className: "card-header" }, t("arc_title")));
     const arcBody = h("div", { className: "card-body" });
     if (arc.stdout) {
-        const lines = arc.stdout.trim().split("\n");
-        const statsGrid = h("div", { className: "grid grid-4" });
-        for (const line of lines) {
+        const stats = {};
+        for (const line of arc.stdout.trim().split("\n")) {
             const parts = line.trim().split(/\s+/);
             if (parts.length >= 3) {
-                const name = parts[0];
-                const val = parts[2];
-                let displayVal = val;
-                if (name === "size" || name === "c_max") {
-                    const bytes = parseInt(val);
-                    if (!isNaN(bytes)) displayVal = formatBytes(bytes);
-                }
-                statsGrid.appendChild(makeStatCard(name, displayVal, ""));
+                const n = parseInt(parts[2]);
+                if (!isNaN(n)) stats[parts[0]] = n;
             }
         }
+        const hits = stats.hits || 0;
+        const misses = stats.misses || 0;
+        const total = hits + misses;
+        const ratio = total > 0 ? (hits / total * 100) : null;
+        const fillPct = (stats.size != null && stats.c_max) ? (stats.size / stats.c_max * 100) : null;
+
+        const statsGrid = h("div", { className: "grid grid-4" });
+        statsGrid.appendChild(makeStatCard(t("arc_hit_ratio"),
+            ratio != null ? ratio.toFixed(2) + " %" : "—", t("arc_hit_ratio_sub")));
+        statsGrid.appendChild(makeStatCard(t("arc_size_label"),
+            stats.size != null ? formatBytes(stats.size) : "—",
+            fillPct != null ? t("arc_fill_of_limit", fillPct.toFixed(0)) : ""));
+        statsGrid.appendChild(makeStatCard(t("arc_hits"), hits.toLocaleString(), ""));
+        statsGrid.appendChild(makeStatCard(t("arc_misses"), misses.toLocaleString(), ""));
         arcBody.appendChild(statsGrid);
+        arcBody.appendChild(h("p", {
+            style: "color:var(--text-secondary);font-size:13px;margin-top:10px"
+        }, t("arc_hit_ratio_help")));
     } else {
         arcBody.appendChild(h("pre", { className: "output" }, arc.stderr || t("no_arc")));
     }

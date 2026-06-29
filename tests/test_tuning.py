@@ -117,3 +117,28 @@ def test_set_arc_limit_rejects_min_ge_max_without_ssh():
     r = tn.set_arc_limit(_FakeHost(), 1 * GIB, 2 * GIB)
     assert r["success"] is False
     assert "arc_min" in r["error"]
+
+
+# --- suggest_arc_max (1 GiB ARC per 1 TiB pool) --------------------------
+
+TIB = 1024 ** 4
+
+
+def test_suggest_one_gib_per_tib():
+    assert tn.suggest_arc_max(1 * TIB) == 1 * GIB
+    assert tn.suggest_arc_max(4 * TIB) == 4 * GIB
+
+
+def test_suggest_none_for_unknown_pool_size():
+    assert tn.suggest_arc_max(0) is None
+    assert tn.suggest_arc_max(None) is None
+
+
+def test_suggest_clamped_to_64mib_floor():
+    # a tiny 1 GiB pool would suggest 1 MiB -> clamped up to the 64 MiB floor
+    assert tn.suggest_arc_max(1 * GIB) == tn.ARC_MIN_BYTES
+
+
+def test_suggest_clamped_to_total_ram():
+    # 100 TiB pool would suggest 100 GiB, but RAM is only 8 GiB
+    assert tn.suggest_arc_max(100 * TIB, total_ram_bytes=8 * GIB) == 8 * GIB

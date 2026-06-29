@@ -89,6 +89,20 @@ def build_arc_conf(existing_text: str, arc_max: Optional[int],
     return (body + "\n") if body else ""
 
 
+def suggest_arc_max(pool_sum_bytes, total_ram_bytes=None):
+    """Rule of thumb (bashclub proxmox-zfs-postinstall): ~1 GiB ARC per 1 TiB
+    of pool capacity. Clamped to [64 MiB, total RAM]. Returns None if the pool
+    size is unknown."""
+    if not pool_sum_bytes or pool_sum_bytes <= 0:
+        return None
+    suggest = pool_sum_bytes // 1024  # 1 MiB ARC per 1 GiB pool == 1 GiB/TiB
+    if suggest < ARC_MIN_BYTES:
+        suggest = ARC_MIN_BYTES
+    if total_ram_bytes and suggest > total_ram_bytes:
+        suggest = total_ram_bytes
+    return suggest
+
+
 # ---------------------------------------------------------------------------
 # SSH I/O
 # ---------------------------------------------------------------------------
@@ -121,6 +135,14 @@ def get_arc_config(host: Dict[str, Any]) -> Dict[str, Any]:
     if ss.isdigit():
         cur_size = int(ss)
 
+    # Sum of raw pool sizes -> "1 GiB ARC per 1 TiB pool" suggestion.
+    pool_sum = 0
+    rp = run_command(host, "zpool list -Hp -o size 2>/dev/null", timeout=10)
+    for line in (rp.get("stdout") or "").splitlines():
+        s = line.strip()
+        if s.isdigit():
+            pool_sum += int(s)
+
     return {
         "runtime_max": runtime_max,
         "runtime_min": runtime_min,
@@ -128,6 +150,8 @@ def get_arc_config(host: Dict[str, Any]) -> Dict[str, Any]:
         "persistent_min": persistent["zfs_arc_min"],
         "current_size": cur_size,
         "total_ram_bytes": total_ram,
+        "pool_size_sum_bytes": pool_sum or None,
+        "suggest_max_bytes": suggest_arc_max(pool_sum, total_ram),
         "conf_path": ARC_CONF_PATH,
     }
 
@@ -182,7 +206,10 @@ def set_arc_limit(host: Dict[str, Any], arc_max: Optional[int],
                 (rw.get("stderr") or "").strip()[:200]}
 
     # ---- rebuild initramfs so the persistent value survives reboot ----
-    ri = run_command(host, "update-initramfs -u 2>&1; echo __EXIT=$?", timeout=300)
+    # -k all: rebuild for *every* installed kernel, not just the running one,
+    # so the limit still applies after a kernel update boots a different
+    # kernel (matches the bashclub proxmox-zfs-postinstall approach).
+    ri = run_command(host, "update-initramfs -u -k all 2>&1; echo __EXIT=$?", timeout=300)
     initramfs_ok = "__EXIT=0" in (ri.get("stdout") or "")
 
     # ---- runtime: best-effort immediate apply ----
