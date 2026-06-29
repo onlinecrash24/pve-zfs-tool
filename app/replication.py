@@ -220,22 +220,30 @@ def get_status(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, 
     return out
 
 
-def install(host: Dict[str, Any]) -> Dict[str, Any]:
-    """Install bashclub-zsync via the official bashclub APT repository.
+def _build_install_script() -> str:
+    """Remote bash that adds the bashclub APT repo and installs bashclub-zsync.
 
-    Writes the deb822 ``.sources`` stanza that bashclub publishes
-    (https://apt.bashclub.org/release/) and the keyring at
-    ``/usr/share/keyrings/bashclub-archive-keyring.gpg``. Cleans up the
-    legacy ``bashclub.list`` + ``/etc/apt/keyrings/bashclub.gpg`` files
-    we previously installed, so re-running upgrades the layout in place.
-    Idempotent.
+    The Debian suite is derived from the host's ``/etc/os-release``
+    (``VERSION_CODENAME`` -> PVE 8 = bookworm, PVE 9 = trixie) and only used
+    if bashclub actually publishes a Release file for it, otherwise it falls
+    back to ``bookworm``. The ``.sources`` file is rewritten when the suite
+    changes (e.g. after a PVE major upgrade), so it self-heals. Pure string so
+    it can be asserted in tests.
     """
-    script = r"""
+    return r"""
 set -e
 KEY=/usr/share/keyrings/bashclub-archive-keyring.gpg
 SRC=/etc/apt/sources.list.d/bashclub.sources
 LEGACY_LIST=/etc/apt/sources.list.d/bashclub.list
 LEGACY_KEY=/etc/apt/keyrings/bashclub.gpg
+
+# Derive the Debian suite from the host (PVE 8 = bookworm, PVE 9 = trixie).
+# Only use it if bashclub publishes that suite, else fall back to bookworm.
+. /etc/os-release 2>/dev/null || true
+SUITE="${VERSION_CODENAME:-bookworm}"
+if ! curl -fsSL -o /dev/null "https://apt.bashclub.org/release/dists/${SUITE}/Release" 2>/dev/null; then
+  SUITE=bookworm
+fi
 
 # Drop the old layout if present (we previously installed bashclub.list
 # pointing at /bashclub bookworm main with a key under /etc/apt/keyrings)
@@ -249,12 +257,13 @@ if [ ! -s "$KEY" ]; then
   chmod 0644 "$KEY"
 fi
 
-# Write the deb822 .sources stanza (matches bashclub's published layout)
-if [ ! -s "$SRC" ]; then
+# Write the deb822 .sources stanza; rewrite if the suite changed (e.g. after
+# a PVE major upgrade from bookworm to trixie).
+if [ ! -s "$SRC" ] || ! grep -qx "Suites: $SUITE" "$SRC"; then
   cat > "$SRC" <<EOSRC
 Types: deb
 URIs: https://apt.bashclub.org/release/
-Suites: bookworm
+Suites: $SUITE
 Components: main
 Signed-By: $KEY
 Enabled: true
@@ -266,6 +275,18 @@ DEBIAN_FRONTEND=noninteractive apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y bashclub-zsync
 command -v bashclub-zsync
 """.strip()
+
+
+def install(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Install bashclub-zsync via the official bashclub APT repository.
+
+    Adds the deb822 ``.sources`` stanza (suite derived from the host, see
+    :func:`_build_install_script`) and the keyring at
+    ``/usr/share/keyrings/bashclub-archive-keyring.gpg``. Cleans up the legacy
+    ``bashclub.list`` + ``/etc/apt/keyrings/bashclub.gpg`` files we previously
+    installed, so re-running upgrades the layout in place. Idempotent.
+    """
+    script = _build_install_script()
     # Use `bash -s` over SSH so we don't have to quote multi-line
     cmd = f"bash -s <<'EOF'\n{script}\nEOF"
     r = run_command(host, cmd, timeout=180)
