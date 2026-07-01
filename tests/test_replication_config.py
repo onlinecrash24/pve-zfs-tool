@@ -114,3 +114,9 @@ def test_install_script_still_installs_zsync_from_bashclub_repo():
     assert "https://apt.bashclub.org/release/" in s
     assert "apt-get install -y bashclub-zsync" in s
     assert "bashclub-archive-keyring.gpg" in s
+
+
+def test_install_script_apt_update_is_non_fatal():
+    # a broken foreign repo must not abort before zsync is installed
+    s = r._build_install_script()
+    assert "apt-get update -qq || true" in s
