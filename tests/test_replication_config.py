@@ -94,3 +94,23 @@ def test_validate_cron_rejects_invalid(expr):
 def test_cron_marker_is_config_specific():
     m = r._cron_marker("/etc/bashclub/192.168.1.80.conf")
     assert "bashclub-zsync -c /etc/bashclub/192.168.1.80.conf" == m
+
+
+# --- install script: APT suite must be derived, not hardcoded -------------
+
+def test_install_script_derives_suite_from_os_release():
+    s = r._build_install_script()
+    # suite comes from the host, validated against bashclub's published dists
+    assert "VERSION_CODENAME" in s
+    assert "dists/${SUITE}/Release" in s
+    assert "Suites: $SUITE" in s
+    # no lone hardcoded suite line (bookworm only appears as the fallback value)
+    assert "Suites: bookworm" not in s
+    assert 'SUITE="${VERSION_CODENAME:-bookworm}"' in s
+
+
+def test_install_script_still_installs_zsync_from_bashclub_repo():
+    s = r._build_install_script()
+    assert "https://apt.bashclub.org/release/" in s
+    assert "apt-get install -y bashclub-zsync" in s
+    assert "bashclub-archive-keyring.gpg" in s

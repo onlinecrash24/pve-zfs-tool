@@ -89,18 +89,41 @@ def build_arc_conf(existing_text: str, arc_max: Optional[int],
     return (body + "\n") if body else ""
 
 
-def suggest_arc_max(pool_sum_bytes, total_ram_bytes=None):
-    """Rule of thumb (bashclub proxmox-zfs-postinstall): ~1 GiB ARC per 1 TiB
-    of pool capacity. Clamped to [64 MiB, total RAM]. Returns None if the pool
-    size is unknown."""
+def suggest_arc_floor(pool_sum_bytes):
+    """Proxmox minimum: 2 GiB base + 1 GiB ARC per 1 TiB of pool capacity
+    (e.g. an 8 TiB pool -> 10 GiB). A conservative floor, not an optimum.
+    Returns None if the pool size is unknown."""
     if not pool_sum_bytes or pool_sum_bytes <= 0:
         return None
-    suggest = pool_sum_bytes // 1024  # 1 MiB ARC per 1 GiB pool == 1 GiB/TiB
-    if suggest < ARC_MIN_BYTES:
-        suggest = ARC_MIN_BYTES
-    if total_ram_bytes and suggest > total_ram_bytes:
-        suggest = total_ram_bytes
-    return suggest
+    floor = (2 * 1024 * 1024 * 1024) + (pool_sum_bytes // 1024)  # 2 GiB + 1 GiB/TiB
+    return max(floor, ARC_MIN_BYTES)
+
+
+def arc_suggestions(pool_sum_bytes, total_ram_bytes):
+    """Three ARC reference points (bytes), or None where inputs are unknown:
+
+      * min      -> Proxmox floor (2 GiB + 1 GiB/TiB) -- don't go below
+      * balanced -> ~25% RAM, an even split for a hypervisor (the "recommended"
+                    middle; there is no universal optimum, it depends on VM
+                    load and working-set size)
+      * max      -> 50% RAM ceiling, leaving the other half for VMs/host
+
+    Values are clamped to RAM and kept ordered (min <= balanced <= max)."""
+    out = {"min": None, "balanced": None, "max": None}
+    if total_ram_bytes:
+        out["max"] = max(ARC_MIN_BYTES, total_ram_bytes // 2)
+        out["balanced"] = max(ARC_MIN_BYTES, total_ram_bytes // 4)
+    floor = suggest_arc_floor(pool_sum_bytes)
+    if floor is not None:
+        out["min"] = min(floor, total_ram_bytes) if total_ram_bytes else floor
+    # Keep the three ordered even when the pool floor is large vs. RAM.
+    if out["min"] and out["max"] and out["min"] > out["max"]:
+        out["min"] = out["max"]
+    if out["balanced"] and out["min"] and out["balanced"] < out["min"]:
+        out["balanced"] = out["min"]
+    if out["balanced"] and out["max"] and out["balanced"] > out["max"]:
+        out["balanced"] = out["max"]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +174,7 @@ def get_arc_config(host: Dict[str, Any]) -> Dict[str, Any]:
         "current_size": cur_size,
         "total_ram_bytes": total_ram,
         "pool_size_sum_bytes": pool_sum or None,
-        "suggest_max_bytes": suggest_arc_max(pool_sum, total_ram),
+        "arc_suggest": arc_suggestions(pool_sum, total_ram),
         "conf_path": ARC_CONF_PATH,
     }
 

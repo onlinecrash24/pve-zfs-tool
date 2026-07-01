@@ -359,12 +359,24 @@ async function viewHome() {
     setContent(container);
 }
 
-function makeStatCard(label, value, extra) {
+function makeStatCard(label, value, extra, valueStyle) {
     const card = h("div", { className: "stat-card" });
     card.appendChild(h("div", { className: "stat-label" }, label));
-    card.appendChild(h("div", { className: "stat-value" }, String(value)));
+    card.appendChild(h("div", { className: "stat-value", style: valueStyle || "" }, String(value)));
     if (extra) card.appendChild(h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:4px" }, extra));
     return card;
+}
+
+// Traffic-light color for a value, using the same green/orange/red the
+// dashboard tiles already use. Pass good >= warn thresholds (higher = better)
+// or set higherIsBetter=false for metrics where lower is better.
+function ampelColor(value, warn, good, higherIsBetter = true) {
+    if (value == null || isNaN(value)) return "";
+    const ok = higherIsBetter ? value >= good : value <= good;
+    const mid = higherIsBetter ? value >= warn : value <= warn;
+    if (ok) return "color:var(--success,#4caf50)";
+    if (mid) return "color:#e67e22";
+    return "color:var(--error,#f44336)";
 }
 
 function _renderDashboard(d) {
@@ -2669,11 +2681,14 @@ async function renderArcEditor(container) {
     const ram = cfg.total_ram_bytes || 0;
     const effMax = cfg.runtime_max || cfg.persistent_max || 0;
 
-    // Current-state grid
+    // Current-state grid. ARC size + its fill-% of the limit live here (the
+    // ARC-stats card above no longer repeats the size).
+    const fillPct = (cfg.current_size != null && effMax) ? (cfg.current_size / effMax * 100) : null;
     const grid = h("div", { className: "grid grid-4" });
     grid.appendChild(makeStatCard(t("arc_total_ram"), ram ? formatBytes(ram) : "?", ""));
     grid.appendChild(makeStatCard(t("arc_current_size"),
-        cfg.current_size != null ? formatBytes(cfg.current_size) : "?", ""));
+        cfg.current_size != null ? formatBytes(cfg.current_size) : "?",
+        fillPct != null ? t("arc_fill_of_limit", fillPct.toFixed(0)) : ""));
     grid.appendChild(makeStatCard(t("arc_runtime_limit"),
         cfg.runtime_max ? formatBytes(cfg.runtime_max) : t("arc_default"), ""));
     grid.appendChild(makeStatCard(t("arc_persistent_limit"),
@@ -2699,16 +2714,20 @@ async function renderArcEditor(container) {
     const resetBtn = h("button", { className: "btn" }, t("arc_reset"));
     row.appendChild(applyBtn);
     row.appendChild(resetBtn);
-    // "1 GiB ARC per 1 TiB pool" suggestion (bashclub rule of thumb)
-    if (cfg.suggest_max_bytes) {
-        const sgGib = Math.round(cfg.suggest_max_bytes / GIB * 10) / 10;
-        const sgBtn = h("button", { className: "btn", title: t("arc_suggest_hint") },
-            t("arc_suggest_btn", String(sgGib)));
-        sgBtn.addEventListener("click", () => { input.value = String(sgGib); });
-        row.appendChild(sgBtn);
-    }
+    // Min / Recommended / Max reference buttons (fill the input on click).
+    const sug = cfg.arc_suggest || {};
+    const mkSug = (bytes, labelKey, cls) => {
+        if (!bytes) return;
+        const gib = Math.round(bytes / GIB * 10) / 10;
+        const b = h("button", { className: cls, title: t("arc_suggest_hint") }, t(labelKey, String(gib)));
+        b.addEventListener("click", () => { input.value = String(gib); });
+        row.appendChild(b);
+    };
+    mkSug(sug.min, "arc_suggest_min", "btn");
+    mkSug(sug.balanced, "arc_suggest_balanced", "btn btn-success");
+    mkSug(sug.max, "arc_suggest_max", "btn");
     body.appendChild(row);
-    if (cfg.suggest_max_bytes) {
+    if (sug.min || sug.balanced || sug.max) {
         body.appendChild(h("p", {
             style: "color:var(--text-secondary);font-size:12px;margin:6px 0 0"
         }, t("arc_suggest_hint")));
@@ -2800,14 +2819,15 @@ async function viewHealth() {
         const misses = stats.misses || 0;
         const total = hits + misses;
         const ratio = total > 0 ? (hits / total * 100) : null;
-        const fillPct = (stats.size != null && stats.c_max) ? (stats.size / stats.c_max * 100) : null;
 
-        const statsGrid = h("div", { className: "grid grid-4" });
+        // Hit ratio is the one ARC value with real good/bad thresholds -> give
+        // it a traffic light (>=90 green, >=80 orange, else red). ARC size /
+        // fill is shown only in the ZFS-ARC-Limit card below to avoid the
+        // duplicate display; raw counters have no good/bad state.
+        const statsGrid = h("div", { className: "grid grid-3" });
         statsGrid.appendChild(makeStatCard(t("arc_hit_ratio"),
-            ratio != null ? ratio.toFixed(2) + " %" : "—", t("arc_hit_ratio_sub")));
-        statsGrid.appendChild(makeStatCard(t("arc_size_label"),
-            stats.size != null ? formatBytes(stats.size) : "—",
-            fillPct != null ? t("arc_fill_of_limit", fillPct.toFixed(0)) : ""));
+            ratio != null ? ratio.toFixed(2) + " %" : "—", t("arc_hit_ratio_sub"),
+            ampelColor(ratio, 80, 90)));
         statsGrid.appendChild(makeStatCard(t("arc_hits"), hits.toLocaleString(), ""));
         statsGrid.appendChild(makeStatCard(t("arc_misses"), misses.toLocaleString(), ""));
         arcBody.appendChild(statsGrid);
