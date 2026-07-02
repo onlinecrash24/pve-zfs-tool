@@ -36,12 +36,37 @@ class _FakeChan:
         return self._code
 
 
+class _FakeSftp:
+    def __init__(self, get_exc=None, payload=b"data"):
+        self._get_exc = get_exc
+        self._payload = payload
+        self.closed = False
+
+    def get_channel(self):
+        class _Ch:
+            def settimeout(self, t):
+                pass
+        return _Ch()
+
+    def get(self, remote, local):
+        if self._get_exc is not None:
+            raise self._get_exc
+        with open(local, "wb") as f:
+            f.write(self._payload)
+
+    def close(self):
+        self.closed = True
+
+
 class FakeClient:
-    def __init__(self, active=True, exec_result=None, exec_exc=None):
+    def __init__(self, active=True, exec_result=None, exec_exc=None,
+                 sftp_exc=None, sftp_get_exc=None):
         self._active = active
         self.closed = False
         self._exec_result = exec_result
         self._exec_exc = exec_exc
+        self._sftp_exc = sftp_exc
+        self._sftp_get_exc = sftp_get_exc
 
     def get_transport(self):
         return _FakeTransport(self._active)
@@ -51,6 +76,11 @@ class FakeClient:
             raise self._exec_exc
         out, err, code = self._exec_result or (b"ok\n", b"", 0)
         return None, _FakeOut(out, code), _FakeOut(err, 0)
+
+    def open_sftp(self):
+        if self._sftp_exc is not None:
+            raise self._sftp_exc
+        return _FakeSftp(get_exc=self._sftp_get_exc)
 
     def close(self):
         self.closed = True
@@ -180,3 +210,66 @@ def test_pool_disabled_falls_back_to_fresh_connection(monkeypatch):
     r = sm._exec_pooled({"address": "x"}, "echo", 10)
     assert r["success"] is True
     assert c.closed is True                 # fresh path always closes
+
+
+# --- fetch_file (SFTP) on the pool ----------------------------------------
+
+def test_fetch_file_success_keeps_pooled_connection(tmp_path, monkeypatch):
+    c = FakeClient()
+    monkeypatch.setattr(sm, "get_ssh_client", lambda h: c)
+    host = {"address": "sftp-ok"}
+    sm._drop(host)
+    local = tmp_path / "out.bin"
+    r = sm.fetch_file(host, "/remote/x", str(local))
+    assert r["success"] is True and r["bytes"] == 4
+    assert local.read_bytes() == b"data"
+    assert c.closed is False                # stays pooled for reuse
+    sm._drop(host)
+
+
+def test_fetch_file_retries_once_on_stale_reused_connection(tmp_path, monkeypatch):
+    dead = FakeClient(sftp_exc=EOFError("dead"))    # alive transport, sftp fails
+    good = FakeClient()
+    seq = [dead, good]
+    monkeypatch.setattr(sm, "get_ssh_client", lambda h: seq.pop(0))
+    host = {"address": "sftp-retry"}
+    sm._drop(host)
+    sm._acquire(host)                                # pool now holds `dead`
+    local = tmp_path / "out.bin"
+    r = sm.fetch_file(host, "/remote/x", str(local))
+    assert r["success"] is True and local.read_bytes() == b"data"
+    assert dead.closed is True
+    sm._drop(host)
+
+
+def test_fetch_file_fresh_connection_failure_not_retried(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sm, "get_ssh_client",
+                        lambda h: calls.append(1) or FakeClient(sftp_exc=EOFError("dead")))
+    host = {"address": "sftp-fresh-fail"}
+    sm._drop(host)
+    r = sm.fetch_file(host, "/remote/x", str(tmp_path / "o"))
+    assert r["success"] is False
+    assert len(calls) == 1
+    sm._drop(host)
+
+
+def test_fetch_file_transfer_timeout_is_result_not_retry(tmp_path, monkeypatch):
+    c = FakeClient(sftp_get_exc=socket.timeout())
+    made = []
+    monkeypatch.setattr(sm, "get_ssh_client", lambda h: made.append(c) or c)
+    host = {"address": "sftp-timeout"}
+    sm._drop(host)
+    r = sm.fetch_file(host, "/remote/x", str(tmp_path / "o"), timeout=5)
+    assert r["success"] is False and "timed out" in r["error"]
+    assert len(made) == 1                   # no second connection = no retry
+    sm._drop(host)
+
+
+def test_fetch_file_pool_disabled_closes_client(tmp_path, monkeypatch):
+    monkeypatch.setattr(sm, "SSH_POOL_ENABLED", False)
+    c = FakeClient()
+    monkeypatch.setattr(sm, "get_ssh_client", lambda h: c)
+    r = sm.fetch_file({"address": "x"}, "/remote/x", str(tmp_path / "o"))
+    assert r["success"] is True
+    assert c.closed is True
