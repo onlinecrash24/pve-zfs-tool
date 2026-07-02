@@ -315,29 +315,82 @@ def run_command(host, command, timeout=30, cache_ttl=0):
     return result
 
 
+def _sftp_get_once(client, remote_path, local_path, timeout):
+    """One SFTP download on an open client. Mirrors _run_once's contract:
+    returns a result dict for normal completion and transfer timeouts, raises
+    _StaleConnection for connection-level failures so the caller may retry."""
+    try:
+        sftp = client.open_sftp()
+    except (EOFError, ConnectionError, paramiko.SSHException, OSError) as e:
+        raise _StaleConnection(e)
+    try:
+        sftp.get_channel().settimeout(timeout)
+        sftp.get(remote_path, local_path)
+        size = os.path.getsize(local_path)
+        return {"success": True, "bytes": size, "error": ""}
+    except socket.timeout:
+        # Mid-transfer timeout: the command budget is spent -- do NOT retry
+        # (we'd restart the whole download); report it as a real failure.
+        return {"success": False, "bytes": 0,
+                "error": f"transfer timed out after {timeout}s"}
+    except Exception as e:
+        return {"success": False, "bytes": 0, "error": str(e)}
+    finally:
+        try:
+            sftp.close()
+        except Exception:
+            pass
+
+
 def fetch_file(host, remote_path, local_path, timeout=60):
     """Download a file from a remote host via SFTP into local_path.
 
     Used for binary payloads (e.g. host config backup tarballs) that don't
-    fit the text-only exec path. Returns {success, bytes, error}.
+    fit the text-only exec path. Reuses the per-thread connection pool; only
+    a stale *reused* connection is transparently rebuilt (once).
+    Returns {success, bytes, error}.
     """
-    client = None
+    if not SSH_POOL_ENABLED:
+        client = None
+        try:
+            client = get_ssh_client(host)
+            return _sftp_get_once(client, remote_path, local_path, timeout)
+        except _StaleConnection as e:
+            return {"success": False, "bytes": 0, "error": str(e.args[0] if e.args else e)}
+        except Exception as e:
+            return {"success": False, "bytes": 0, "error": str(e)}
+        finally:
+            if client is not None:
+                _close_quiet(client)
+
+    # Attempt 1 -- may reuse a pooled connection.
     try:
-        client = get_ssh_client(host)
-        sftp = client.open_sftp()
-        sftp.get_channel().settimeout(timeout)
-        sftp.get(remote_path, local_path)
-        sftp.close()
-        size = os.path.getsize(local_path)
-        return {"success": True, "bytes": size, "error": ""}
+        client, reused = _acquire(host)
     except Exception as e:
         return {"success": False, "bytes": 0, "error": str(e)}
-    finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
+    try:
+        result = _sftp_get_once(client, remote_path, local_path, timeout)
+        _touch(host)
+        return result
+    except _StaleConnection as e:
+        _drop(host)
+        if not reused:
+            return {"success": False, "bytes": 0, "error": str(e.args[0] if e.args else e)}
+    except Exception as e:
+        _drop(host)
+        return {"success": False, "bytes": 0, "error": str(e)}
+
+    # Attempt 2 -- the reused connection was stale; retry once, fresh.
+    try:
+        client, _ = _acquire(host)
+        result = _sftp_get_once(client, remote_path, local_path, timeout)
+        _touch(host)
+        return result
+    except _StaleConnection as e:
+        _drop(host)
+        return {"success": False, "bytes": 0, "error": str(e.args[0] if e.args else e)}
+    except Exception as e:
+        return {"success": False, "bytes": 0, "error": str(e)}
 
 
 def test_connection(host):
