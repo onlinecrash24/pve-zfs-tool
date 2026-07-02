@@ -7,6 +7,62 @@ from app import tuning as tn
 GIB = 1024 ** 3
 
 
+# --- _parse_arc_probe (single-round-trip read output) --------------------
+
+def test_parse_probe_typical():
+    out = "\n".join([
+        "RUNTIME_MAX=17179869184",
+        "RUNTIME_MIN=536870912",
+        "MEMTOTAL_KB=65536000",
+        "ARC_SIZE=16000000000",
+        "POOL_SUM=4831838208",
+        "__ZFSCONF__",
+        "options zfs zfs_arc_max=17179869184",
+    ])
+    p = tn._parse_arc_probe(out)
+    assert p["runtime_max"] == 17179869184
+    assert p["runtime_min"] == 536870912
+    assert p["total_ram_bytes"] == 65536000 * 1024
+    assert p["current_size"] == 16000000000
+    assert p["pool_sum"] == 4831838208
+    assert p["conf_text"] == "options zfs zfs_arc_max=17179869184"
+
+
+def test_parse_probe_missing_values_are_none():
+    # runtime files absent -> empty values; no conf
+    out = "RUNTIME_MAX=\nRUNTIME_MIN=\nMEMTOTAL_KB=\nARC_SIZE=\nPOOL_SUM=0\n__ZFSCONF__\n"
+    p = tn._parse_arc_probe(out)
+    assert p["runtime_max"] is None
+    assert p["runtime_min"] is None
+    assert p["total_ram_bytes"] is None
+    assert p["current_size"] is None
+    assert p["pool_sum"] == 0
+    assert p["conf_text"] == ""
+
+
+def test_parse_probe_multiline_conf_preserved():
+    out = "\n".join([
+        "POOL_SUM=0", "__ZFSCONF__",
+        "# comment", "options zfs zfs_arc_max=1 zfs_prefetch_disable=1",
+    ])
+    p = tn._parse_arc_probe(out)
+    assert "# comment" in p["conf_text"]
+    assert "zfs_prefetch_disable=1" in p["conf_text"]
+
+
+def test_parse_probe_empty_output():
+    p = tn._parse_arc_probe("")
+    assert p["pool_sum"] == 0
+    assert p["conf_text"] == ""
+    assert p["total_ram_bytes"] is None
+
+
+def test_probe_script_reads_everything_in_one_shot():
+    s = tn._arc_probe_script()
+    for token in ("zfs_arc_max", "MemTotal", "arcstats", "zpool list", "__ZFSCONF__"):
+        assert token in s
+
+
 # --- parse_arc_conf -------------------------------------------------------
 
 def test_parse_empty_is_none():

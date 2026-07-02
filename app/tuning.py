@@ -20,7 +20,6 @@ The conf parse/build helpers are pure (no SSH) and unit-tested.
 from __future__ import annotations
 
 import base64
-import re
 import shlex
 from typing import Any, Dict, Optional
 
@@ -130,48 +129,78 @@ def arc_suggestions(pool_sum_bytes, total_ram_bytes):
 # SSH I/O
 # ---------------------------------------------------------------------------
 
-def _read_int_file(host, path):
-    r = run_command(host, f"cat {shlex.quote(path)} 2>/dev/null", timeout=10)
-    s = (r.get("stdout") or "").strip()
-    return int(s) if s.isdigit() else None
+def _bash_s(script: str) -> str:
+    """Wrap a multi-line script so it can be piped to a remote ``bash -s``."""
+    return f"bash -s <<'EOF'\n{script}\nEOF"
+
+
+def _arc_probe_script() -> str:
+    """One remote script that emits every ARC read value in a single
+    round-trip: scalar ``KEY=VALUE`` lines, then a ``__ZFSCONF__`` marker
+    followed by the raw zfs.conf. Parsed by :func:`_parse_arc_probe`."""
+    return (
+        r"""printf 'RUNTIME_MAX=%s\n' "$(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null)"
+printf 'RUNTIME_MIN=%s\n' "$(cat /sys/module/zfs/parameters/zfs_arc_min 2>/dev/null)"
+printf 'MEMTOTAL_KB=%s\n' "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)"
+printf 'ARC_SIZE=%s\n' "$(awk '/^size /{print $3}' /proc/spl/kstat/zfs/arcstats 2>/dev/null)"
+printf 'POOL_SUM=%s\n' "$(zpool list -Hp -o size 2>/dev/null | awk '{s+=$1} END{print s+0}')"
+printf '__ZFSCONF__\n'
+cat """ + shlex.quote(ARC_CONF_PATH) + " 2>/dev/null\n"
+    )
+
+
+def _parse_arc_probe(output: str) -> Dict[str, Any]:
+    """Parse the delimited output of :func:`_arc_probe_script`."""
+    scalars: Dict[str, str] = {}
+    conf_lines = []
+    in_conf = False
+    for line in (output or "").splitlines():
+        if in_conf:
+            conf_lines.append(line)
+            continue
+        if line.strip() == "__ZFSCONF__":
+            in_conf = True
+            continue
+        key, sep, val = line.partition("=")
+        if sep:
+            scalars[key.strip()] = val.strip()
+
+    def _int(key):
+        v = scalars.get(key, "")
+        return int(v) if v.isdigit() else None
+
+    total_ram = None
+    memkb = scalars.get("MEMTOTAL_KB", "")
+    if memkb.isdigit():
+        total_ram = int(memkb) * 1024
+    pool_sum = int(scalars["POOL_SUM"]) if scalars.get("POOL_SUM", "").isdigit() else 0
+
+    return {
+        "runtime_max": _int("RUNTIME_MAX"),
+        "runtime_min": _int("RUNTIME_MIN"),
+        "total_ram_bytes": total_ram,
+        "current_size": _int("ARC_SIZE"),
+        "pool_sum": pool_sum,
+        "conf_text": "\n".join(conf_lines),
+    }
 
 
 def get_arc_config(host: Dict[str, Any]) -> Dict[str, Any]:
     """Return current ARC limits (runtime + persistent), live ARC size and
-    total RAM so the UI can render sensible bounds/defaults."""
-    runtime_max = _read_int_file(host, SYS_ARC_MAX)
-    runtime_min = _read_int_file(host, SYS_ARC_MIN)
-
-    r = run_command(host, f"cat {shlex.quote(ARC_CONF_PATH)} 2>/dev/null", timeout=10)
-    conf_text = r.get("stdout") or ""
-    persistent = parse_arc_conf(conf_text)
-
-    total_ram = None
-    rm = run_command(host, "grep MemTotal /proc/meminfo 2>/dev/null", timeout=10)
-    m = re.search(r"MemTotal:\s+(\d+)\s+kB", rm.get("stdout") or "")
-    if m:
-        total_ram = int(m.group(1)) * 1024
-
-    cur_size = None
-    rs = run_command(host, "awk '/^size /{print $3}' /proc/spl/kstat/zfs/arcstats 2>/dev/null", timeout=10)
-    ss = (rs.get("stdout") or "").strip()
-    if ss.isdigit():
-        cur_size = int(ss)
-
-    # Sum of raw pool sizes -> "1 GiB ARC per 1 TiB pool" suggestion.
-    pool_sum = 0
-    rp = run_command(host, "zpool list -Hp -o size 2>/dev/null", timeout=10)
-    for line in (rp.get("stdout") or "").splitlines():
-        s = line.strip()
-        if s.isdigit():
-            pool_sum += int(s)
+    total RAM so the UI can render sensible bounds/defaults. One SSH round-trip
+    (see :func:`_arc_probe_script`)."""
+    r = run_command(host, _bash_s(_arc_probe_script()), timeout=20)
+    parsed = _parse_arc_probe(r.get("stdout") or "")
+    persistent = parse_arc_conf(parsed["conf_text"])
+    total_ram = parsed["total_ram_bytes"]
+    pool_sum = parsed["pool_sum"]
 
     return {
-        "runtime_max": runtime_max,
-        "runtime_min": runtime_min,
+        "runtime_max": parsed["runtime_max"],
+        "runtime_min": parsed["runtime_min"],
         "persistent_max": persistent["zfs_arc_max"],
         "persistent_min": persistent["zfs_arc_min"],
-        "current_size": cur_size,
+        "current_size": parsed["current_size"],
         "total_ram_bytes": total_ram,
         "pool_size_sum_bytes": pool_sum or None,
         "arc_suggest": arc_suggestions(pool_sum, total_ram),
@@ -206,15 +235,15 @@ def set_arc_limit(host: Dict[str, Any], arc_max: Optional[int],
     else:
         arc_min = None
 
-    # Reject values larger than RAM.
-    cfg = get_arc_config(host)
-    total_ram = cfg.get("total_ram_bytes")
+    # One round-trip: read total RAM + the existing zfs.conf together.
+    probe = _parse_arc_probe(
+        run_command(host, _bash_s(_arc_probe_script()), timeout=20).get("stdout") or "")
+    total_ram = probe["total_ram_bytes"]
     if total_ram and arc_max > total_ram:
         return {"success": False, "error": "arc_max exceeds total RAM"}
 
     # ---- persistent: rewrite zfs.conf with backup ----
-    r_read = run_command(host, f"cat {shlex.quote(ARC_CONF_PATH)} 2>/dev/null", timeout=10)
-    existing = r_read.get("stdout") or ""
+    existing = probe["conf_text"]
     new_text = build_arc_conf(existing, arc_max if arc_max else None, arc_min)
     b64 = base64.b64encode(new_text.encode("utf-8")).decode("ascii")
     write_script = (

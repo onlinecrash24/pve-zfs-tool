@@ -271,7 +271,10 @@ EOSRC
   chmod 0644 "$SRC"
 fi
 
-DEBIAN_FRONTEND=noninteractive apt-get update -qq
+# Non-fatal: a broken *foreign* repo (e.g. pve-enterprise without a
+# subscription) must not abort the install. apt still refreshes the bashclub
+# list; if bashclub itself is unreachable the install below fails clearly.
+DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
 DEBIAN_FRONTEND=noninteractive apt-get install -y bashclub-zsync
 command -v bashclub-zsync
 """.strip()
