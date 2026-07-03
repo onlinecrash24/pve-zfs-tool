@@ -458,7 +458,10 @@ def collect_host_data(host_address=None):
             if host_data.get("auto_snapshot"):
                 retention_cfg = host_data["auto_snapshot"].get("retention_policy", {})
 
-            analysis = analyze_snapshots(snap_age_data, retention_cfg)
+            from app.zfs_commands import get_autosnap_disabled_datasets
+            analysis = analyze_snapshots(
+                snap_age_data, retention_cfg,
+                autosnap_disabled=get_autosnap_disabled_datasets(host))
             host_data["retention_analysis"] = truncate_for_ai(analysis)
         except Exception as e:
             host_data["errors"].append(f"Retention analysis: {e}")
