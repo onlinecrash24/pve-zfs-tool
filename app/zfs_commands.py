@@ -740,6 +740,22 @@ def get_snapshot_ages(host):
     return {"datasets": datasets, "manual": manual}
 
 
+def get_autosnap_disabled_datasets(host):
+    """Set of datasets whose *effective* com.sun:auto-snapshot is "false"
+    (typically zsync replication targets). The local retention policy does not
+    apply to them, so retention checks should not compare their snapshot
+    counts against the local --keep. One bulk command, cached."""
+    result = run_command(host, "zfs get -Hpo name,value com.sun:auto-snapshot",
+                         cache_ttl=_TTL_MED)
+    disabled = set()
+    if result.get("success"):
+        for line in result["stdout"].splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[1].strip() == "false":
+                disabled.add(parts[0].strip())
+    return disabled
+
+
 def get_auto_snapshot_property(host, dataset):
     try:
         dataset = validate_dataset_name(dataset)

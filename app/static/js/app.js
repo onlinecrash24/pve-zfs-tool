@@ -1864,9 +1864,16 @@ async function viewSnapshotCheck() {
     // of the Snapshot Check view paints immediately.
     renderRetentionEditor(policyBody);
 
-    // Per-Label Status
+    // Per-Label Status, in the same order as the retention table above
+    // (frequent -> monthly); unknown labels follow alphabetically.
+    const LABEL_ORDER = ["frequent", "hourly", "daily", "weekly", "monthly"];
     const labels = data.per_label || {};
-    for (const [label, info] of Object.entries(labels)) {
+    const orderedLabels = Object.entries(labels).sort((a, b) => {
+        const ia = LABEL_ORDER.indexOf(a[0]), ib = LABEL_ORDER.indexOf(b[0]);
+        if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        return a[0].localeCompare(b[0]);
+    });
+    for (const [label, info] of orderedLabels) {
         const hasIssues = (info.stale_datasets || []).length > 0
             || (info.gaps || []).length > 0
             || (info.count_mismatches || []).length > 0;
@@ -1918,6 +1925,12 @@ async function viewSnapshotCheck() {
                 info.count_mismatches.filter(m => !m.note).map(m => [m.dataset, `${m.actual}`, `${m.configured}`])
             );
             body.appendChild(tbl);
+        }
+        // Replica datasets (com.sun:auto-snapshot=false) are excluded from the
+        // count comparison -- their snapshot counts follow the source host.
+        if (info.count_mismatch_excluded > 0) {
+            body.appendChild(h("p", { style: "color:var(--text-secondary);font-size:12px;margin-top:8px" },
+                t("count_mismatch_excluded", String(info.count_mismatch_excluded))));
         }
 
         if (!hasIssues) {

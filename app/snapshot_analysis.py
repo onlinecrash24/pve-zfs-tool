@@ -40,7 +40,7 @@ def format_age(seconds):
         return f"{days}d {hours}h"
 
 
-def analyze_snapshots(snap_age_data, retention_cfg=None):
+def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None):
     """Analyze snapshot health from get_snapshot_ages() output.
 
     Args:
@@ -48,12 +48,19 @@ def analyze_snapshots(snap_age_data, retention_cfg=None):
             {"datasets": {ds: {label: {count, oldest, newest, timestamps}}}, "manual": {...}}
         retention_cfg: dict of configured --keep values per label from cron
             e.g. {"frequent": 12, "hourly": 96, "daily": 10}
+        autosnap_disabled: set of datasets with com.sun:auto-snapshot=false
+            (e.g. zsync replication targets). Their snapshot counts follow the
+            *source* host's retention, not the local cron --keep, so they are
+            excluded from the count-mismatch comparison (counted per label in
+            ``count_mismatch_excluded`` instead). Stale/gap checks still apply.
 
     Returns:
         dict with: per_label, missing_labels, manual_snapshots, datasets_analyzed
     """
     if retention_cfg is None:
         retention_cfg = {}
+    if autosnap_disabled is None:
+        autosnap_disabled = set()
 
     now_epoch = int(time.time())
     snap_ages = snap_age_data.get("datasets", {})
@@ -89,6 +96,7 @@ def analyze_snapshots(snap_age_data, retention_cfg=None):
                     "oldest_age_sec": 0,
                     "newest_age_sec": age_sec,
                     "count_mismatches": [],
+                    "count_mismatch_excluded": 0,
                     "stale_datasets": [],
                     "gaps": [],
                 }
@@ -101,14 +109,19 @@ def analyze_snapshots(snap_age_data, retention_cfg=None):
             if age_sec > lg["oldest_age_sec"]:
                 lg["oldest_age_sec"] = age_sec
 
-            # Check: count vs configured --keep
+            # Check: count vs configured --keep. Datasets with
+            # com.sun:auto-snapshot=false (replication targets) follow the
+            # source host's retention -- the local --keep doesn't apply.
             configured = retention_cfg.get(label)
             if configured and count != configured:
-                lg["count_mismatches"].append({
-                    "dataset": ds,
-                    "actual": count,
-                    "configured": configured,
-                })
+                if ds in autosnap_disabled:
+                    lg["count_mismatch_excluded"] += 1
+                else:
+                    lg["count_mismatches"].append({
+                        "dataset": ds,
+                        "actual": count,
+                        "configured": configured,
+                    })
 
             # Check: newest snapshot too old?
             threshold = MAX_AGE.get(label, 2764800)
