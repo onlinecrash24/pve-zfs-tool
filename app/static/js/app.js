@@ -1117,10 +1117,20 @@ async function viewPools() {
             healthBadge(pool.health),
             h("span", { className: "badge badge-stopped", id: `upgrade-badge-${pool.name}`, style: "display:none" }, t("upgrade")),
         ]));
-        card.appendChild(h("div", { style: "margin-top:8px;font-size:13px;color:var(--text-secondary)" },
-            `${pool.alloc} / ${pool.size} used (${pool.cap})`));
-        card.appendChild(h("div", { style: "margin-top:4px;font-size:12px;color:var(--text-secondary)" },
-            `Frag: ${pool.frag} | Dedup: ${pool.dedup}`));
+        // Traffic light: capacity green <80 / orange 80-89 / red >=90,
+        // fragmentation green <50 / orange 50-79 / red >=80.
+        const capStyle = ampelColor(parseFloat(pool.cap), 89, 79, false);
+        const fragStyle = ampelColor(parseFloat(pool.frag), 79, 49, false);
+        card.appendChild(h("div", { style: "margin-top:8px;font-size:13px;color:var(--text-secondary)" }, [
+            `${pool.alloc} / ${pool.size} used (`,
+            h("span", { style: capStyle }, pool.cap),
+            ")",
+        ]));
+        card.appendChild(h("div", { style: "margin-top:4px;font-size:12px;color:var(--text-secondary)" }, [
+            "Frag: ",
+            h("span", { style: fragStyle }, pool.frag),
+            ` | Dedup: ${pool.dedup}`,
+        ]));
         statsGrid.appendChild(card);
     }
     container.appendChild(statsGrid);
@@ -1141,8 +1151,8 @@ async function viewPools() {
         tr.appendChild(h("td", {}, pool.size));
         tr.appendChild(h("td", {}, pool.alloc));
         tr.appendChild(h("td", {}, pool.free));
-        tr.appendChild(h("td", {}, pool.frag));
-        tr.appendChild(h("td", {}, pool.cap));
+        tr.appendChild(h("td", { style: ampelColor(parseFloat(pool.frag), 79, 49, false) }, pool.frag));
+        tr.appendChild(h("td", { style: ampelColor(parseFloat(pool.cap), 89, 79, false) }, pool.cap));
         const htd = h("td"); htd.appendChild(healthBadge(pool.health)); tr.appendChild(htd);
         const actTd = h("td");
         const bg = h("div", { className: "btn-group" });

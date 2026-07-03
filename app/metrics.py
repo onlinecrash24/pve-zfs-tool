@@ -119,7 +119,7 @@ def _sample_and_monitor(host):
     host_offline detector sees the transition.
     """
     from app.ssh_manager import test_connection
-    from app.zfs_commands import get_pools, get_pool_status
+    from app.zfs_commands import get_pools_result, get_pool_status
     from app.monitor import run_checks
 
     # Explicit reachability probe — a host with zero pools is still "up"
@@ -129,9 +129,12 @@ def _sample_and_monitor(host):
         reachable = False
 
     pools = []
+    pools_valid = False   # True only when `zpool list` itself succeeded
     if reachable:
         try:
-            pools = get_pools(host)
+            pr = get_pools_result(host)
+            pools = pr["pools"]
+            pools_valid = pr["success"]
         except Exception as e:
             log.warning("metrics: get_pools failed for %s: %s",
                         host.get("address"), e)
@@ -186,7 +189,8 @@ def _sample_and_monitor(host):
                 pass
 
     # Run the state-change detectors (never raises)
-    run_checks(host, pools, reachable, pools_status=pools_status)
+    run_checks(host, pools, reachable, pools_status=pools_status,
+               pools_valid=pools_valid)
 
     # Replication health probe — also state-change driven, swallows its own
     # errors so a misconfigured pair can't break the metrics loop.

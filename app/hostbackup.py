@@ -141,9 +141,12 @@ def create_backup(host, include_priv: bool = False):
     os.makedirs(out_dir, exist_ok=True)
     local_path = os.path.join(out_dir, filename)
 
+    t0 = time.monotonic()
+
     # 1. Build the archive on the host.
     script = _build_backup_script(include_priv, remote_tmp)
     r = run_command(host, f"bash -s <<'__EOF__'\n{script}\n__EOF__", timeout=600)
+    t_build = time.monotonic() - t0
     if "__OK__" not in (r.get("stdout") or ""):
         return {"success": False, "filename": None, "bytes": 0,
                 "include_priv": include_priv,
@@ -152,6 +155,7 @@ def create_backup(host, include_priv: bool = False):
 
     # 2. Pull it down via SFTP.
     fr = fetch_file(host, remote_tmp, local_path, timeout=600)
+    t_fetch = time.monotonic() - t0 - t_build
 
     # 3. Clean up the host temp file regardless.
     run_command(host, f"rm -f {shlex.quote(remote_tmp)}", timeout=15)
@@ -167,8 +171,12 @@ def create_backup(host, include_priv: bool = False):
                 "include_priv": include_priv,
                 "error": "SFTP fetch failed: " + fr.get("error", "")[:300]}
 
+    duration = time.monotonic() - t0
+    log.info("Host backup %s: build %.1fs, fetch %.1fs, total %.1fs (%d bytes)",
+             address, t_build, t_fetch, duration, fr.get("bytes", 0))
     return {"success": True, "filename": filename, "bytes": fr.get("bytes", 0),
-            "include_priv": include_priv, "error": ""}
+            "include_priv": include_priv, "error": "",
+            "duration_sec": round(duration, 1)}
 
 
 def list_backups(host):
@@ -339,8 +347,8 @@ def _scheduler_loop():
                     res = create_backup(host, include_priv=bool(sched.get("include_priv")))
                     if res.get("success"):
                         deleted = prune_backups(host, int(sched.get("keep", 8)))
-                        log.info("Host backup for %s ok (%s bytes, pruned %d)",
-                                 address, res.get("bytes"), deleted)
+                        log.info("Host backup for %s ok in %ss (%s bytes, pruned %d)",
+                                 address, res.get("duration_sec"), res.get("bytes"), deleted)
                     else:
                         log.error("Host backup for %s failed: %s", address, res.get("error"))
                         _notify_failure(host, res.get("error", ""))

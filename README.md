@@ -11,10 +11,11 @@
 ## Features
 
 ### ZFS Pool Management
-- **Pool Overview** -- Status, IO statistics, health, fragmentation, dedup ratio
+- **Pool Overview** -- Status, IO statistics, health, fragmentation, dedup ratio; capacity and fragmentation carry a traffic light (green/orange/red)
 - **Pool Scrub** -- Start scrubs directly from the UI with automatic completion notification
 - **Pool Upgrade** -- Automatically detects if a feature upgrade is available (green button), with confirmation before upgrading
 - **Pool History** -- View recent pool activity
+- **autotrim / autoexpand** -- Toggle both pool properties directly from the pool detail dialog (continuous TRIM on SSDs; automatic growth after replacing a device with a larger one)
 
 ### Dataset Management
 - **Separated Views** -- Filesystems (LXC, data) and VM Volumes shown in distinct sections with type-specific actions
@@ -80,12 +81,14 @@
 - **Per-Label Analysis** -- Total snapshots, dataset count, per-dataset average, newest age
 - **Gap Detection** -- Identifies gaps in snapshot chains exceeding `MAX_AGE * 1.5`
 - **Stale Datasets** -- Warns when snapshots exceed age thresholds (frequent >1h, hourly >2h, daily >25h, weekly >8d, monthly >32d)
-- **Count Mismatches** -- Compares actual snapshot count vs. configured retention (SOLL/IST)
+- **Count Mismatches** -- Compares actual snapshot count vs. configured retention (SOLL/IST); replica datasets (`com.sun:auto-snapshot=false`, e.g. zsync targets) are excluded from this comparison since their snapshot count follows the *source* host's retention -- stale/gap detection still applies to them
 - **Missing Labels** -- Detects labels configured in cron but absent from datasets
 - **Manual Snapshots** -- Lists non-standard snapshots (not matching known auto-snapshot labels)
 
 ### Health & Monitoring
-- **ARC Statistics** -- Adaptive Replacement Cache hit/miss rates and memory usage
+- **ARC Statistics** -- Cache effectiveness led by the hit ratio with a traffic light (>=90 % green, >=80 % orange, below red); raw hits/misses as context
+- **ARC Limit Editor** -- View runtime + persistent (`/etc/modprobe.d/zfs.conf`) ARC limits, current size and fill %; set a new limit with Min / Recommended / Max reference buttons (Proxmox floor `2 GiB + 1 GiB/TiB pool`, ~25 % RAM, 50 % RAM). Writes the modprobe config with a timestamped backup, rebuilds the initramfs for **all** kernels (`update-initramfs -u -k all`) and applies the runtime value immediately; `arc_max=0` resets to the ZFS default
+- **Monitoring State Hygiene** -- A pool destroyed/exported while DEGRADED is announced once and its monitoring state cleared (no eternal ghosts); the cleanup only runs on a verified pool listing, never on a failed `zpool list`. Dashboard tiles likewise exclude pools of offline hosts (rendered as "stale" instead of a confident green ONLINE)
 - **ZFS Events** -- Recent ZFS kernel events
 - **SMART Status** -- Disk health for all drives in each pool (resolved via `/dev/disk/by-id/`)
 - **LXC Restore Clone Cleanup** -- View and destroy leftover restore-mount datasets with one-click cleanup
@@ -107,7 +110,9 @@
 - **SQLite Backed** -- Indexed for fast queries, persisted across restarts
 
 ### Performance
+- **SSH Connection Pool** -- Connections are reused per (thread, host) instead of a fresh handshake per command: health-checked before reuse (120 s idle TTL), one transparent reconnect when a reused connection died, command timeouts never re-run the command. SFTP downloads (host backups) use the same pool. Opt-out with `SSH_POOL=0`
 - **SSH Command Cache** -- TTL-based in-memory cache (15-300s) for read-only ZFS queries drastically reduces SSH round-trips on active views; writes automatically invalidate the cache for the affected host
+- **Batched Reads** -- Multi-value reads (e.g. the ARC editor's six values) are collected in a single SSH round-trip
 - **Cache Stats API** -- `/api/cache/stats` exposes hit rate and entry count for ops visibility
 
 ### Notifications
