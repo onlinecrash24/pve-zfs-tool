@@ -16,6 +16,7 @@ intentionally out-of-scope for Phase 1.
 from __future__ import annotations
 
 import base64
+import os
 import re
 import shlex
 from typing import Any, Dict, List, Optional
@@ -31,8 +32,22 @@ def start_task(name: str, fn, *args, **kwargs) -> str:
 
 CONFIG_PATH = "/etc/bashclub/zsync.conf"
 CONFIG_DIR = "/etc/bashclub"
-LOG_PATH = "/var/log/bashclub-zsync.log"
+# Upstream bashclub-zsync convention (DOCUMENTATION_DE.md): logs live in a
+# directory, /var/log/bashclub-zsync/zsync.log. Earlier versions of this tool
+# wrote a flat /var/log/bashclub-zsync.log; reads fall back to it so existing
+# installs keep showing their history until the first run under the new path.
+LOG_DIR = "/var/log/bashclub-zsync"
+LOG_PATH = LOG_DIR + "/zsync.log"
+LEGACY_LOG_PATH = "/var/log/bashclub-zsync.log"
 BINARY_NAME = "bashclub-zsync"
+
+
+def _tail_log_cmd(lines: int) -> str:
+    """Shell snippet: tail the zsync log, falling back to the legacy path."""
+    return (
+        f"if [ -s {shlex.quote(LOG_PATH)} ]; then tail -n {lines} {shlex.quote(LOG_PATH)}; "
+        f"elif [ -f {shlex.quote(LEGACY_LOG_PATH)} ]; then tail -n {lines} {shlex.quote(LEGACY_LOG_PATH)}; fi"
+    )
 CHECKZFS_BINARY = "checkzfs"
 
 
@@ -212,7 +227,7 @@ def get_status(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, 
         out["config"] = parsed["values"]
 
     # Log tail (last 5 lines for overview)
-    r = run_command(host, f"tail -n 5 {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=10)
+    r = run_command(host, _tail_log_cmd(5), timeout=10)
     if r["success"] and r["stdout"]:
         out["log_present"] = True
         out["last_log_lines"] = r["stdout"].splitlines()
@@ -604,7 +619,7 @@ def run_now(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any
     """
     cfg_path = config_path_for(source)
     cmd = (
-        f"touch /var/log/bashclub-zsync.log && "
+        f"mkdir -p {shlex.quote(LOG_DIR)} && touch {shlex.quote(LOG_PATH)} && "
         f"{BINARY_NAME} -c {shlex.quote(cfg_path)} "
         f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
     )
@@ -635,7 +650,7 @@ def run_now_async(host: Dict[str, Any], source: Optional[str] = None) -> str:
     def _job(progress, _host, _cfg_path):
         progress(f"Starting bashclub-zsync with {_cfg_path} …")
         cmd = (
-            f"touch /var/log/bashclub-zsync.log && "
+            f"mkdir -p {shlex.quote(LOG_DIR)} && touch {shlex.quote(LOG_PATH)} && "
             f"{BINARY_NAME} -c {shlex.quote(_cfg_path)} "
             f">> {shlex.quote(LOG_PATH)} 2>&1; echo __exit=$?"
         )
@@ -653,7 +668,7 @@ def run_now_async(host: Dict[str, Any], source: Optional[str] = None) -> str:
         # non-replicated source datasets, it exits non-zero with status warn
         # — that bubbles out as exit=1 even though replication itself was a
         # full success. Disambiguate by inspecting the tail of the log.
-        log_r = run_command(_host, f"tail -n 200 {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=15)
+        log_r = run_command(_host, _tail_log_cmd(200), timeout=15)
         log_tail = (log_r.get("stdout") or "")
         finished_count = len(re.findall(r"Replication of \S+ finished\.", log_tail))
         has_checkzfs_step = "Running checkzfs" in log_tail
@@ -1142,7 +1157,7 @@ def get_cron(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, An
 
 def set_cron(host: Dict[str, Any], schedule: str,
              source: Optional[str] = None,
-             log_path: str = "/var/log/bashclub-zsync.log") -> Dict[str, Any]:
+             log_path: str = LOG_PATH) -> Dict[str, Any]:
     """Install or replace the zsync cron entry for the per-source config.
 
     Idempotent: existing zsync lines for this config are removed first, then
@@ -1170,9 +1185,12 @@ def set_cron(host: Dict[str, Any], schedule: str,
     # but we additionally trigger an explicit reload so the new schedule is
     # picked up deterministically (covers both Debian's cron and any setup
     # that uses cronie / systemd-cron).
+    log_dir = os.path.dirname(log_path)
     script = (
         "set -e; "
-        f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
+        # ensure the log directory exists (upstream: /var/log/bashclub-zsync)
+        + (f"mkdir -p {shlex.quote(log_dir)}; " if log_dir and log_dir != "/var/log" else "")
+        + f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
         "TMP=$(mktemp); "
         "(crontab -l 2>/dev/null || true) | grep -vF \"$M\" > \"$TMP\" || true; "
         f"echo {shlex.quote(appended)} | base64 -d >> \"$TMP\"; "
@@ -1279,7 +1297,7 @@ def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
 
 def tail_log(host: Dict[str, Any], lines: int = 200) -> Dict[str, Any]:
     lines = max(1, min(int(lines), 5000))
-    r = run_command(host, f"tail -n {lines} {shlex.quote(LOG_PATH)} 2>/dev/null", timeout=15)
+    r = run_command(host, _tail_log_cmd(lines), timeout=15)
     return {
         "success": r["success"],
         "content": r["stdout"] if r["success"] else "",
