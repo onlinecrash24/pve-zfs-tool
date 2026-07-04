@@ -113,11 +113,14 @@ def start_scrub_monitor(host, pool_name):
 # Pool operations
 # ---------------------------------------------------------------------------
 
-def get_pools(host):
+def get_pools_result(host):
+    """Like get_pools, but distinguishes "zpool list failed" from "host has
+    zero pools" -- callers that clean up state for vanished pools must only
+    do so when the listing actually succeeded."""
     result = run_command(host, "zpool list -H -o name,size,alloc,free,fragmentation,capacity,health,dedupratio",
                          cache_ttl=_TTL_SHORT)
     if not result["success"]:
-        return []
+        return {"success": False, "pools": []}
     pools = []
     for line in result["stdout"].strip().splitlines():
         parts = line.split("\t")
@@ -132,7 +135,11 @@ def get_pools(host):
                 "health": parts[6],
                 "dedup": parts[7],
             })
-    return pools
+    return {"success": True, "pools": pools}
+
+
+def get_pools(host):
+    return get_pools_result(host)["pools"]
 
 
 def get_pool_status(host, pool_name):

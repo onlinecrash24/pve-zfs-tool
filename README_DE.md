@@ -11,10 +11,11 @@
 ## Funktionen
 
 ### ZFS-Pool-Verwaltung
-- **Pool-Übersicht** -- Status, IO-Statistiken, Health, Fragmentierung, Dedup-Ratio
+- **Pool-Übersicht** -- Status, IO-Statistiken, Health, Fragmentierung, Dedup-Ratio; Kapazität und Fragmentierung mit Ampel (grün/orange/rot)
 - **Pool-Scrub** -- Scrubs direkt aus der UI starten mit automatischer Abschluss-Benachrichtigung
 - **Pool-Upgrade** -- Erkennt automatisch, ob ein Feature-Upgrade verfügbar ist (grüner Button) inkl. Bestätigung vor dem Upgrade
 - **Pool-History** -- Jüngste Pool-Aktivitäten einsehen
+- **autotrim / autoexpand** -- Beide Pool-Properties direkt im Pool-Detail-Dialog umschalten (laufendes TRIM auf SSDs; automatisches Wachsen nach Tausch gegen ein größeres Gerät)
 
 ### Dataset-Verwaltung
 - **Getrennte Ansichten** -- Filesysteme (LXC, Daten) und VM-Volumes in eigenen Bereichen mit typ-spezifischen Aktionen
@@ -80,12 +81,14 @@
 - **Analyse pro Label** -- Snapshot-Gesamtzahl, Dataset-Anzahl, Durchschnitt pro Dataset, Alter des neuesten Snapshots
 - **Gap-Erkennung** -- Identifiziert Lücken in Snapshot-Ketten, wenn diese `MAX_AGE * 1.5` übersteigen
 - **Veraltete Datasets** -- Warnt, wenn Snapshots die Altersgrenzen überschreiten (frequent > 1 h, hourly > 2 h, daily > 25 h, weekly > 8 T, monthly > 32 T)
-- **Count-Mismatches** -- Vergleicht tatsächliche Snapshot-Anzahl mit konfigurierter Retention (SOLL/IST)
+- **Count-Mismatches** -- Vergleicht tatsächliche Snapshot-Anzahl mit konfigurierter Retention (SOLL/IST); Replikat-Datasets (`com.sun:auto-snapshot=false`, z. B. zsync-Ziele) sind vom Vergleich ausgenommen, da deren Snapshot-Anzahl der Retention des *Quell*-Hosts folgt -- Stale-/Gap-Erkennung greift dort weiterhin
 - **Fehlende Labels** -- Erkennt Labels, die in Cron konfiguriert sind, aber im Dataset fehlen
 - **Manuelle Snapshots** -- Listet Nicht-Standard-Snapshots (die keinem bekannten Auto-Snapshot-Label entsprechen)
 
 ### Health & Monitoring
-- **ARC-Statistiken** -- Adaptive-Replacement-Cache Hit/Miss-Rate und Speichernutzung
+- **ARC-Statistiken** -- Cache-Effektivität mit der Trefferquote im Zentrum, inkl. Ampel (>=90 % grün, >=80 % orange, darunter rot); rohe Hits/Misses als Kontext
+- **ARC-Limit-Editor** -- Laufzeit- + persistentes Limit (`/etc/modprobe.d/zfs.conf`), aktuelle Größe und Füllgrad anzeigen; neues Limit setzen mit Min-/Empfohlen-/Max-Richtwerten (Proxmox-Untergrenze `2 GiB + 1 GiB/TiB Pool`, ~25 % RAM, 50 % RAM). Schreibt die modprobe-Config mit Zeitstempel-Backup, baut die initramfs für **alle** Kernel neu (`update-initramfs -u -k all`) und setzt den Laufzeitwert sofort; `arc_max=0` setzt auf den ZFS-Standard zurück
+- **Monitoring-State-Hygiene** -- Ein im DEGRADED-Zustand zerstörter/exportierter Pool wird einmal gemeldet und sein Monitoring-State bereinigt (keine ewigen Geister); die Bereinigung läuft nur bei verifizierter Pool-Liste, nie nach fehlgeschlagenem `zpool list`. Dashboard-Kacheln zählen Pools offliner Hosts ebenfalls nicht mit (Anzeige „veraltet" statt grünem ONLINE)
 - **ZFS-Events** -- Aktuelle ZFS-Kernel-Events
 - **SMART-Status** -- Festplattenzustand aller Laufwerke pro Pool (aufgelöst via `/dev/disk/by-id/`)
 - **LXC-Restore-Clone-Cleanup** -- Übrig gebliebene Restore-Mount-Datasets mit einem Klick entfernen
@@ -107,7 +110,9 @@
 - **SQLite-basiert** -- Indiziert für schnelle Queries, persistent über Neustarts hinweg
 
 ### Performance
+- **SSH-Verbindungs-Pool** -- Verbindungen werden pro (Thread, Host) wiederverwendet statt pro Kommando neu aufgebaut: Health-Check vor Reuse (120 s Idle-TTL), ein transparenter Reconnect bei gestorbener wiederverwendeter Verbindung, Kommando-Timeouts führen nie zur Doppel-Ausführung. SFTP-Downloads (Host-Backups) nutzen denselben Pool. Abschaltbar mit `SSH_POOL=0`
 - **SSH-Command-Cache** -- TTL-basierter In-Memory-Cache (15–300 s) für lesende ZFS-Abfragen reduziert SSH-Round-Trips auf aktiven Seiten drastisch; Schreibvorgänge invalidieren den Cache für den betroffenen Host automatisch
+- **Gebündelte Reads** -- Mehrwert-Abfragen (z. B. die sechs Werte des ARC-Editors) laufen in einem einzigen SSH-Round-Trip
 - **Cache-Stats-API** -- `/api/cache/stats` zeigt Hit-Rate und Anzahl Einträge für Ops-Transparenz
 
 ### Benachrichtigungen

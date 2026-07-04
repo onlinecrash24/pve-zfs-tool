@@ -120,3 +120,35 @@ def test_install_script_apt_update_is_non_fatal():
     # a broken foreign repo must not abort before zsync is installed
     s = r._build_install_script()
     assert "apt-get update -qq || true" in s
+
+
+# --- zsync log path: upstream convention + legacy fallback ----------------
+
+def test_log_path_matches_upstream_convention():
+    # upstream DOCUMENTATION_DE.md: /var/log/bashclub-zsync/zsync.log
+    assert r.LOG_PATH == "/var/log/bashclub-zsync/zsync.log"
+    assert r.LEGACY_LOG_PATH == "/var/log/bashclub-zsync.log"
+
+
+def test_tail_log_cmd_prefers_new_falls_back_to_legacy():
+    cmd = r._tail_log_cmd(50)
+    assert "/var/log/bashclub-zsync/zsync.log" in cmd
+    assert "/var/log/bashclub-zsync.log" in cmd
+    # new path checked first
+    assert cmd.index("zsync.log") < cmd.index("bashclub-zsync.log")
+
+
+def test_set_cron_uses_upstream_log_path_and_creates_dir(monkeypatch):
+    captured = {}
+
+    def fake_run(host, cmd, timeout=30, **kw):
+        captured["cmd"] = cmd
+        return {"success": True, "stdout": "__OK__", "stderr": ""}
+
+    monkeypatch.setattr(r, "run_command", fake_run)
+    res = r.set_cron({"address": "1.2.3.4"}, "17 * * * *", source="root@1.2.3.5")
+    assert res["success"] is True
+    # the cron line redirects to the upstream path
+    assert ">> /var/log/bashclub-zsync/zsync.log 2>&1" in res["command"]
+    # and the install script ensures the log directory exists
+    assert "mkdir -p /var/log/bashclub-zsync" in captured["cmd"]

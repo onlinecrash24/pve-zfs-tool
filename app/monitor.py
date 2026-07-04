@@ -121,6 +121,20 @@ def _state_delete(scope, key):
         conn.close()
 
 
+def _state_keys(scope, key_prefix):
+    """All state keys in a scope starting with key_prefix, with their values.
+    Used to find entries for pools that no longer exist on a host."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT key, value FROM monitor_state WHERE scope=? AND key LIKE ?",
+            (scope, key_prefix + "%"),
+        ).fetchall()
+        return {r["key"]: r["value"] for r in rows}
+    finally:
+        conn.close()
+
+
 def _cooldown_ok(last_alert_ts, cooldown):
     if not last_alert_ts:
         return True
@@ -158,6 +172,36 @@ def check_host_reachability(host, reachable):
             priority=3,
         )
     _state_set(scope, key, new, last_alert_ts=int(time.time()))
+
+
+def clear_vanished_pool_state(host, pools):
+    """Drop per-pool state rows for pools that no longer exist on the host.
+
+    Fixes the "ghost" where a pool destroyed/exported while DEGRADED stayed
+    in pool_health forever (surfacing in bad_pools). Only call this with a
+    *verified* pool listing (zpool list succeeded on a reachable host) --
+    never on a fetch failure, where an empty list would wipe real state.
+    A vanished pool whose last known health was bad is announced rather than
+    silently forgotten, so the cleanup can't suppress a real problem.
+    """
+    addr = host["address"]
+    prefix = f"{addr}:"
+    current = {p.get("name") for p in pools if p.get("name")}
+    for scope in ("pool_health", "capacity", "pool_errors"):
+        for key, value in _state_keys(scope, prefix).items():
+            pool_name = key[len(prefix):]
+            if pool_name in current:
+                continue
+            if scope == "pool_health" and (value or "").upper() in BAD_HEALTH:
+                name = host.get("name") or addr
+                send_notification(
+                    "pool_error",
+                    f"Pool {pool_name}: removed while {value}",
+                    f"Pool '{pool_name}' on {name} is no longer present; its "
+                    f"last known state was {value}. Monitoring state cleared.",
+                    priority=6,
+                )
+            _state_delete(scope, key)
 
 
 def check_pool_health(host, pools):
@@ -346,14 +390,24 @@ def check_auto_snapshots(host):
 # Entry point used by the metrics sampler
 # ---------------------------------------------------------------------------
 
-def run_checks(host, pools, reachable, pools_status=None):
-    """Run all checks for one host. Never raises."""
+def run_checks(host, pools, reachable, pools_status=None, pools_valid=False):
+    """Run all checks for one host. Never raises.
+
+    ``pools_valid`` must only be True when the pool listing itself succeeded
+    (see get_pools_result) -- it gates the vanished-pool state cleanup so a
+    failed ``zpool list`` can't be mistaken for "all pools destroyed".
+    """
     try:
         check_host_reachability(host, reachable)
     except Exception as e:
         log.warning("monitor: host reachability check failed: %s", e)
     if not reachable:
         return
+    if pools_valid:
+        try:
+            clear_vanished_pool_state(host, pools or [])
+        except Exception as e:
+            log.warning("monitor: vanished-pool cleanup failed: %s", e)
     try:
         check_pool_health(host, pools or [])
     except Exception as e:

@@ -1664,7 +1664,8 @@ def api_replication_cron_set():
     data = request.get_json(silent=True) or {}
     schedule = (data.get("schedule") or "").strip()
     source = (data.get("source") or request.args.get("source") or None)
-    log_path = (data.get("log_path") or "/var/log/bashclub-zsync.log").strip()
+    from app.replication import LOG_PATH as _zsync_log_path
+    log_path = (data.get("log_path") or _zsync_log_path).strip()
     if not schedule:
         return jsonify({"error": "schedule required"}), 400
     result = set_cron(host, schedule, source=source, log_path=log_path)
