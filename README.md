@@ -34,6 +34,7 @@
 
 ### Proxmox VM/CT Integration
 - **Guest Overview** -- List all VMs and LXC containers with status
+- **Lifecycle Control** -- Start, graceful shutdown, reboot and hard stop per guest (status-dependent buttons, confirmation for disruptive actions, audit-logged)
 - **Per-Guest Snapshots** -- View ZFS snapshots specific to a VM or container
 - **Smart Rollback** -- Automatically stops VM/LXC before rollback and restarts afterwards
 - **LXC File-Level Restore** -- Browse and restore individual files from LXC container snapshots:

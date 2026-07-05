@@ -782,6 +782,24 @@ def api_pve_guests():
     return jsonify({"vms": vms, "cts": cts})
 
 
+@app.route("/api/pve/guest-action", methods=["POST"])
+@login_required
+def api_pve_guest_action():
+    from app.zfs_commands import guest_action
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    vmid = str(data.get("vmid") or "")
+    vm_type = str(data.get("type") or "")
+    action = str(data.get("action") or "")
+    result = guest_action(host, vmid, vm_type, action)
+    audit_log("guest." + (action or "?"), target=f"{vm_type}/{vmid}",
+              host=host["address"], success=result.get("success", False),
+              details={"error": result.get("error", "")})
+    return jsonify(result)
+
+
 @app.route("/api/pve/guest-snapshots")
 def api_pve_guest_snapshots():
     host, err, code = _require_host()

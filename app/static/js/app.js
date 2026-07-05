@@ -2049,6 +2049,20 @@ async function viewGuests() {
             const sTd = h("td"); sTd.appendChild(statusBadge(g.status)); tr.appendChild(sTd);
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
+            // Lifecycle: status-dependent (start when stopped; graceful
+            // shutdown / reboot / hard stop when running)
+            const running = (g.status || "").toLowerCase() === "running";
+            if (running) {
+                bg.appendChild(h("button", { className: "btn btn-sm",
+                    onClick: () => guestAction(g, "shutdown") }, t("guest_shutdown")));
+                bg.appendChild(h("button", { className: "btn btn-sm btn-warning",
+                    onClick: () => guestAction(g, "reboot") }, t("guest_reboot")));
+                bg.appendChild(h("button", { className: "btn btn-sm btn-danger",
+                    onClick: () => guestAction(g, "stop") }, t("guest_stop")));
+            } else {
+                bg.appendChild(h("button", { className: "btn btn-sm btn-success",
+                    onClick: () => guestAction(g, "start") }, t("guest_start")));
+            }
             bg.appendChild(h("button", {
                 className: "btn btn-sm",
                 onClick: () => showGuestSnapshots(g, pools),
@@ -2066,6 +2080,22 @@ async function viewGuests() {
     }
     container.appendChild(tableCard);
     setContent(container);
+}
+
+async function guestAction(guest, action) {
+    const label = `${guest.type === "qemu" ? "VM" : "LXC"} ${guest.vmid} (${guest.name})`;
+    // start is harmless; everything else interrupts the guest -> confirm
+    if (action !== "start" && !confirm(t("guest_action_confirm_" + action, label))) return;
+    toast(t("guest_action_running", label), "info");
+    const r = await API.post("/api/pve/guest-action", {
+        host: currentHost, vmid: guest.vmid, type: guest.type, action,
+    });
+    if (r.success) {
+        toast(t("guest_action_ok", label), "success");
+    } else {
+        toast((r.error || r.stderr || t("guest_action_failed")), "error");
+    }
+    viewGuests();
 }
 
 async function showGuestSnapshots(guest, pools) {
