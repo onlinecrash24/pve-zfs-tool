@@ -301,6 +301,15 @@ async function viewHome() {
                 </ul>
             </div>
             <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_backup_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_backup_1"))}</li>
+                    <li>${escapeHtml(t("feat_backup_2"))}</li>
+                    <li>${escapeHtml(t("feat_backup_3"))}</li>
+                    <li>${escapeHtml(t("feat_backup_4"))}</li>
+                </ul>
+            </div>
+            <div>
                 <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_notify_title"))}</h4>
                 <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
                     <li>${escapeHtml(t("feat_notify_1"))}</li>
@@ -2049,6 +2058,20 @@ async function viewGuests() {
             const sTd = h("td"); sTd.appendChild(statusBadge(g.status)); tr.appendChild(sTd);
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
+            // Lifecycle: status-dependent (start when stopped; graceful
+            // shutdown / reboot / hard stop when running)
+            const running = (g.status || "").toLowerCase() === "running";
+            if (running) {
+                bg.appendChild(h("button", { className: "btn btn-sm",
+                    onClick: () => guestAction(g, "shutdown") }, t("guest_shutdown")));
+                bg.appendChild(h("button", { className: "btn btn-sm btn-warning",
+                    onClick: () => guestAction(g, "reboot") }, t("guest_reboot")));
+                bg.appendChild(h("button", { className: "btn btn-sm btn-danger",
+                    onClick: () => guestAction(g, "stop") }, t("guest_stop")));
+            } else {
+                bg.appendChild(h("button", { className: "btn btn-sm btn-success",
+                    onClick: () => guestAction(g, "start") }, t("guest_start")));
+            }
             bg.appendChild(h("button", {
                 className: "btn btn-sm",
                 onClick: () => showGuestSnapshots(g, pools),
@@ -2066,6 +2089,22 @@ async function viewGuests() {
     }
     container.appendChild(tableCard);
     setContent(container);
+}
+
+async function guestAction(guest, action) {
+    const label = `${guest.type === "qemu" ? "VM" : "LXC"} ${guest.vmid} (${guest.name})`;
+    // start is harmless; everything else interrupts the guest -> confirm
+    if (action !== "start" && !confirm(t("guest_action_confirm_" + action, label))) return;
+    toast(t("guest_action_running", label), "info");
+    const r = await API.post("/api/pve/guest-action", {
+        host: currentHost, vmid: guest.vmid, type: guest.type, action,
+    });
+    if (r.success) {
+        toast(t("guest_action_ok", label), "success");
+    } else {
+        toast((r.error || r.stderr || t("guest_action_failed")), "error");
+    }
+    viewGuests();
 }
 
 async function showGuestSnapshots(guest, pools) {
@@ -5912,9 +5951,17 @@ document.addEventListener("DOMContentLoaded", async () => {
         } catch (e) { /* will redirect to login if not authenticated */ }
     }
 
-    // Set language selector to stored preference
-    const langSel = document.getElementById("lang-select");
-    langSel.value = getLang();
+    // Language flag buttons: highlight the active language, switch on click
+    const langBtns = { de: document.getElementById("lang-de"), en: document.getElementById("lang-en") };
+    const updateLangButtons = () => {
+        const cur = getLang();
+        for (const [code, btn] of Object.entries(langBtns)) {
+            if (!btn) continue;
+            btn.classList.toggle("btn-primary", code === cur);
+            btn.style.opacity = code === cur ? "1" : "0.55";
+        }
+    };
+    updateLangButtons();
     updateSidebarLanguage();
 
     loadHostSelector();
@@ -5924,11 +5971,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (currentView !== "home" && currentView !== "hosts") renderView();
     });
 
-    langSel.addEventListener("change", (e) => {
-        setLang(e.target.value);
-        updateSidebarLanguage();
-        renderView(); // Re-render current view with new language
-    });
+    for (const [code, btn] of Object.entries(langBtns)) {
+        if (!btn) continue;
+        btn.addEventListener("click", () => {
+            if (getLang() === code) return;
+            setLang(code);
+            updateLangButtons();
+            updateSidebarLanguage();
+            renderView(); // Re-render current view with new language
+        });
+    }
 
     document.querySelectorAll(".nav-item").forEach(el => {
         el.addEventListener("click", () => navigate(el.dataset.view));

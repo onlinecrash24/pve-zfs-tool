@@ -831,6 +831,41 @@ def get_pve_cts(host):
     return cts
 
 
+# Whitelisted lifecycle actions per guest type. shutdown is graceful (ACPI /
+# init) with a bounded wait; stop is the hard variant.
+GUEST_ACTIONS = {
+    ("qemu", "start"):    "qm start {vmid}",
+    ("qemu", "shutdown"): "qm shutdown {vmid} --timeout 60",
+    ("qemu", "stop"):     "qm stop {vmid}",
+    ("qemu", "reboot"):   "qm reboot {vmid}",
+    ("lxc", "start"):     "pct start {vmid}",
+    ("lxc", "shutdown"):  "pct shutdown {vmid}",
+    ("lxc", "stop"):      "pct stop {vmid}",
+    ("lxc", "reboot"):    "pct reboot {vmid}",
+}
+
+
+def guest_action(host, vmid, vm_type, action):
+    """Start/shutdown/stop/reboot a VM or container (whitelisted commands)."""
+    try:
+        vmid = validate_vmid(vmid)
+        vm_type = validate_vm_type(vm_type)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    tpl = GUEST_ACTIONS.get((vm_type, action))
+    if tpl is None:
+        return {"success": False, "error": "unsupported action"}
+    # shutdown waits for the guest; give the SSH channel headroom beyond the
+    # qm --timeout 60 / pct default 60s.
+    result = run_command(host, tpl.format(vmid=vmid), timeout=120)
+    if result.get("success"):
+        _invalidate_cache(host["address"])   # qm/pct list are TTL-cached
+    return {"success": result.get("success", False),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "error": "" if result.get("success") else (result.get("stderr") or "").strip()[:300]}
+
+
 def get_vm_snapshots(host, pool, vmid, vm_type="qemu"):
     """Find ZFS snapshots belonging to a specific VM/CT without grep."""
     try:

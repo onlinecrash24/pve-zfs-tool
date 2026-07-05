@@ -624,6 +624,30 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
 
 
 # ---------------------------------------------------------------------------
+# Secret masking (UI round-trip)
+#
+# GET /api/notifications/config masks secrets as "xx...yy". When the UI sends
+# a value back (save OR test), a still-masked value means "unchanged" and must
+# resolve to the stored secret -- otherwise the literal mask is used as the
+# credential (Gotify then answers 401 and the user thinks their token broke).
+# ---------------------------------------------------------------------------
+
+def mask_secret(val):
+    if not val or len(val) < 6:
+        return val
+    return val[:2] + "..." + val[-2:]
+
+
+def is_masked(val):
+    return bool(val) and "..." in val and len(val) < 32
+
+
+def resolve_masked(val, stored):
+    """Return the stored secret when the UI sent back a masked placeholder."""
+    return stored if is_masked(val) else val
+
+
+# ---------------------------------------------------------------------------
 # Test endpoints
 # ---------------------------------------------------------------------------
 

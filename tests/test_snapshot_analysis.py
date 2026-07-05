@@ -75,6 +75,38 @@ def test_replica_stale_detection_still_applies():
     assert any(s["dataset"] == "rpool/repl/x" for s in lg["stale_datasets"])
 
 
+def _hourly_data(newest_age_sec, ds="rpool/repl/x"):
+    newest = NOW - newest_age_sec
+    ts = [newest - 3600, newest]
+    return {"datasets": {ds: {"hourly": {
+        "count": 2, "oldest": ts[0], "newest": ts[1], "timestamps": ts}}},
+        "manual": {}}
+
+
+def test_replica_slightly_over_threshold_not_stale():
+    # 2h 2m on a replica: inherent replication lag (source snapshot up to 1h
+    # old + replication up to 1h later) -- must NOT flicker stale.
+    a = analyze_snapshots(_hourly_data(2 * 3600 + 120), {},
+                          autosnap_disabled={"rpool/repl/x"})
+    assert a["per_label"]["hourly"]["stale_datasets"] == []
+
+
+def test_replica_beyond_double_threshold_is_stale():
+    # beyond 2x (hourly: 4h) the replication has genuinely stalled
+    a = analyze_snapshots(_hourly_data(4 * 3600 + 120), {},
+                          autosnap_disabled={"rpool/repl/x"})
+    stale = a["per_label"]["hourly"]["stale_datasets"]
+    assert len(stale) == 1
+    # reported threshold reflects the doubled value
+    assert stale[0]["threshold_sec"] == 4 * 3600
+
+
+def test_local_dataset_keeps_original_threshold():
+    # 2h 2m locally means the hourly cron missed a run -> still flagged
+    a = analyze_snapshots(_hourly_data(2 * 3600 + 120, ds="rpool/data/vm"), {})
+    assert len(a["per_label"]["hourly"]["stale_datasets"]) == 1
+
+
 def test_default_no_exclusions_backwards_compatible():
     data = _data(NOW, {"a": 10, "b": 14})
     a = analyze_snapshots(data, CFG)

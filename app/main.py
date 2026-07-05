@@ -782,6 +782,24 @@ def api_pve_guests():
     return jsonify({"vms": vms, "cts": cts})
 
 
+@app.route("/api/pve/guest-action", methods=["POST"])
+@login_required
+def api_pve_guest_action():
+    from app.zfs_commands import guest_action
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    vmid = str(data.get("vmid") or "")
+    vm_type = str(data.get("type") or "")
+    action = str(data.get("action") or "")
+    result = guest_action(host, vmid, vm_type, action)
+    audit_log("guest." + (action or "?"), target=f"{vm_type}/{vmid}",
+              host=host["address"], success=result.get("success", False),
+              details={"error": result.get("error", "")})
+    return jsonify(result)
+
+
 @app.route("/api/pve/guest-snapshots")
 def api_pve_guest_snapshots():
     host, err, code = _require_host()
@@ -1039,10 +1057,7 @@ def api_snapshot_check():
 # API: Notifications
 # ---------------------------------------------------------------------------
 
-def _mask_secret(val):
-    if not val or len(val) < 6:
-        return val
-    return val[:2] + "..." + val[-2:]
+from app.notifications import mask_secret as _mask_secret, resolve_masked as _resolve_masked
 
 
 @app.route("/api/notifications/config", methods=["GET"])
@@ -1072,8 +1087,9 @@ def api_save_notify_config():
         ("matrix", "access_token"),
     ):
         new_val = (data.get(section) or {}).get(field, "")
-        if new_val and "..." in new_val and len(new_val) < 32:
-            data.setdefault(section, {})[field] = existing.get(section, {}).get(field, "")
+        resolved = _resolve_masked(new_val, existing.get(section, {}).get(field, ""))
+        if resolved != new_val:
+            data.setdefault(section, {})[field] = resolved
     save_notify_config(data)
     audit_log("config.notifications.save", target="notifications", success=True,
               details={"channels": [k for k in ("email", "telegram", "gotify", "matrix")
@@ -1083,25 +1099,30 @@ def api_save_notify_config():
 
 @app.route("/api/notifications/test/telegram", methods=["POST"])
 def api_test_telegram():
-    data = request.json
-    result = test_telegram(data.get("bot_token", ""), data.get("chat_id", ""))
+    data = request.json or {}
+    # Allow masked token: resolve to stored value
+    token = _resolve_masked(data.get("bot_token", ""),
+                            load_notify_config().get("telegram", {}).get("bot_token", ""))
+    result = test_telegram(token, data.get("chat_id", ""))
     return jsonify(result)
 
 
 @app.route("/api/notifications/test/gotify", methods=["POST"])
 def api_test_gotify():
-    data = request.json
-    result = test_gotify(data.get("url", ""), data.get("token", ""))
+    data = request.json or {}
+    # Allow masked token: resolve to stored value
+    token = _resolve_masked(data.get("token", ""),
+                            load_notify_config().get("gotify", {}).get("token", ""))
+    result = test_gotify(data.get("url", ""), token)
     return jsonify(result)
 
 
 @app.route("/api/notifications/test/matrix", methods=["POST"])
 def api_test_matrix():
-    data = request.json
+    data = request.json or {}
     # Allow masked token: resolve to stored value
-    token = data.get("access_token", "")
-    if token and "..." in token and len(token) < 32:
-        token = load_notify_config().get("matrix", {}).get("access_token", "")
+    token = _resolve_masked(data.get("access_token", ""),
+                            load_notify_config().get("matrix", {}).get("access_token", ""))
     result = test_matrix(
         data.get("homeserver", ""),
         token,
@@ -1114,9 +1135,9 @@ def api_test_matrix():
 def api_test_email():
     data = request.json or {}
     # Allow masked password: resolve to stored value
-    pw = data.get("smtp_password", "")
-    if pw and "..." in pw and len(pw) < 32:
-        data["smtp_password"] = load_notify_config().get("email", {}).get("smtp_password", "")
+    data["smtp_password"] = _resolve_masked(
+        data.get("smtp_password", ""),
+        load_notify_config().get("email", {}).get("smtp_password", ""))
     result = test_email(data)
     return jsonify(result)
 
