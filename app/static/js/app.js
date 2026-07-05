@@ -5942,9 +5942,17 @@ document.addEventListener("DOMContentLoaded", async () => {
         } catch (e) { /* will redirect to login if not authenticated */ }
     }
 
-    // Set language selector to stored preference
-    const langSel = document.getElementById("lang-select");
-    langSel.value = getLang();
+    // Language flag buttons: highlight the active language, switch on click
+    const langBtns = { de: document.getElementById("lang-de"), en: document.getElementById("lang-en") };
+    const updateLangButtons = () => {
+        const cur = getLang();
+        for (const [code, btn] of Object.entries(langBtns)) {
+            if (!btn) continue;
+            btn.classList.toggle("btn-primary", code === cur);
+            btn.style.opacity = code === cur ? "1" : "0.55";
+        }
+    };
+    updateLangButtons();
     updateSidebarLanguage();
 
     loadHostSelector();
@@ -5954,11 +5962,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (currentView !== "home" && currentView !== "hosts") renderView();
     });
 
-    langSel.addEventListener("change", (e) => {
-        setLang(e.target.value);
-        updateSidebarLanguage();
-        renderView(); // Re-render current view with new language
-    });
+    for (const [code, btn] of Object.entries(langBtns)) {
+        if (!btn) continue;
+        btn.addEventListener("click", () => {
+            if (getLang() === code) return;
+            setLang(code);
+            updateLangButtons();
+            updateSidebarLanguage();
+            renderView(); // Re-render current view with new language
+        });
+    }
 
     document.querySelectorAll(".nav-item").forEach(el => {
         el.addEventListener("click", () => navigate(el.dataset.view));
