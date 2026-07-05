@@ -319,7 +319,8 @@ def check_auto_snapshots(host):
     Throttled per (host, label) via STALE_ALERT_COOLDOWN.
     """
     try:
-        from app.zfs_commands import get_snapshot_ages, get_auto_snapshot_status
+        from app.zfs_commands import (get_snapshot_ages, get_auto_snapshot_status,
+                                      get_autosnap_disabled_datasets)
         from app.snapshot_analysis import analyze_snapshots
     except Exception:
         return
@@ -334,7 +335,14 @@ def check_auto_snapshots(host):
                 retention_cfg = st.get("retention_policy") or {}
         except Exception:
             pass
-        analysis = analyze_snapshots(snap_age_data, retention_cfg)
+        # Replica awareness: same exclusions/relaxed thresholds as the
+        # Snapshot Check page, so the dashboard tile can't disagree with it.
+        try:
+            autosnap_disabled = get_autosnap_disabled_datasets(host)
+        except Exception:
+            autosnap_disabled = set()
+        analysis = analyze_snapshots(snap_age_data, retention_cfg,
+                                     autosnap_disabled=autosnap_disabled)
     except Exception as e:
         log.debug("auto-snap analysis failed for %s: %s", host.get("address"), e)
         return

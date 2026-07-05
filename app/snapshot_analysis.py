@@ -22,6 +22,13 @@ MAX_AGE = {
 # Gap detection: factor above threshold = suspicious gap
 GAP_FACTOR = 1.5
 
+# Replica datasets get double the stale threshold: their newest snapshot is
+# inherently older than local ones (source snapshot up to 1 interval old +
+# replication up to 1 interval later), so at 1x they flicker stale right
+# before each replication run (e.g. hourly 2h 2m vs 2h 0m). 2x still catches
+# a genuinely stalled replication, matching the replication monitor's WARN.
+REPLICA_STALE_FACTOR = 2
+
 
 def format_age(seconds):
     """Format seconds into a human-readable age string."""
@@ -52,7 +59,9 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
             (e.g. zsync replication targets). Their snapshot counts follow the
             *source* host's retention, not the local cron --keep, so they are
             excluded from the count-mismatch comparison (counted per label in
-            ``count_mismatch_excluded`` instead). Stale/gap checks still apply.
+            ``count_mismatch_excluded`` instead). Stale detection still applies
+            but with REPLICA_STALE_FACTOR x the threshold (replication lag);
+            gap detection is unchanged.
 
     Returns:
         dict with: per_label, missing_labels, manual_snapshots, datasets_analyzed
@@ -123,8 +132,11 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
                         "configured": configured,
                     })
 
-            # Check: newest snapshot too old?
+            # Check: newest snapshot too old? Replicas get 2x (see
+            # REPLICA_STALE_FACTOR) to absorb inherent replication lag.
             threshold = MAX_AGE.get(label, 2764800)
+            if ds in autosnap_disabled:
+                threshold *= REPLICA_STALE_FACTOR
             if age_sec > threshold:
                 lg["stale_datasets"].append({
                     "dataset": ds,
