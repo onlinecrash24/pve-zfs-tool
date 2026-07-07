@@ -104,6 +104,13 @@ for f in /etc/network/interfaces /etc/hosts /etc/resolv.conf /etc/hostname; do
 done
 [ -d /etc/network/interfaces.d ] && cp -a --parents /etc/network/interfaces.d "$STAGE" 2>/dev/null || true
 
+# NIC naming artifacts -- a major upgrade can rename interfaces (the classic
+# "host offline after PVE upgrade" pitfall); persistent-name rules plus the
+# MAC/driver/path identity captured below let you reconstruct the mapping.
+for f in /etc/udev/rules.d/*net*.rules /etc/systemd/network/*.link /lib/systemd/network/*.link; do
+  [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
+done
+
 # Command captures (best-effort)
 pveversion -v          > "$STAGE/cmd/pveversion.txt"        2>&1 || true
 dpkg --get-selections  > "$STAGE/cmd/dpkg-selections.txt"   2>&1 || true
@@ -113,6 +120,14 @@ zpool status           > "$STAGE/cmd/zpool-status.txt"      2>&1 || true
 zpool list             > "$STAGE/cmd/zpool-list.txt"        2>&1 || true
 zfs list -o name,used,avail,refer,mountpoint > "$STAGE/cmd/zfs-list.txt" 2>&1 || true
 pvecm status           > "$STAGE/cmd/pvecm-status.txt"      2>&1 || true
+ls -l /sys/class/net/  > "$STAGE/cmd/net-devices.txt"       2>&1 || true
+for n in /sys/class/net/*; do
+  dev=$(basename "$n"); [ "$dev" = "lo" ] && continue
+  echo "=== $dev ==="
+  echo "mac=$(cat "$n/address" 2>/dev/null)"
+  ethtool -i "$dev" 2>/dev/null || true
+  udevadm info -q property "$n" 2>/dev/null | grep -E "^(ID_NET_NAME|ID_PATH|ID_MODEL|ID_VENDOR|INTERFACE)" || true
+done > "$STAGE/cmd/nic-identity.txt" 2>&1 || true
 {{ echo "host=$(hostname -f 2>/dev/null || hostname)"; echo "date=$(date -Is)"; echo "include_priv=$INCLUDE_PRIV"; }} > "$STAGE/cmd/_meta.txt" 2>&1 || true
 
 tar -C "$STAGE" -czf {qdest} . 2>/dev/null

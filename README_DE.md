@@ -187,6 +187,7 @@
 
 ### Host-Config-Backup
 - **Config-Snapshot** -- Ein-Klick-Backup der Proxmox-Host-Konfiguration (NICHT der VM-Disks): das `/etc/pve`-Cluster-Dateisystem, Netzwerk-Config (`interfaces`, `hosts`, `resolv.conf`) plus Befehlsausgaben (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs`-Status)
+- **NIC-Naming-Artefakte** -- Persistente Namensregeln (`udev *net*.rules`, systemd-`.link`-Dateien) und eine Identitäts-Erfassung pro NIC (MAC, Treiber via `ethtool -i`, `udevadm`-Pfad) — ein PVE-Major-Upgrade kann Interfaces umbenennen, und genau damit rekonstruiert man das Mapping
 - **Ins Tool geholt** -- Das Archiv wird per SFTP ins Daten-Volume geladen und kann jederzeit für den Worst-Case heruntergeladen werden
 - **Geplant** -- Pro-Host-Zeitplan täglich/wöchentlich/monatlich mit „behalte N"-Retention; ein fehlgeschlagenes geplantes Backup löst eine `host_backup_failed`-Benachrichtigung aus
 - **Geheimnisse opt-in** -- `/etc/pve/priv` (Cluster-CA-Private-Key etc.) ist **standardmäßig ausgeschlossen**; ein expliziter Schalter schließt es ein, mit Warnung im UI, dass solche Archive hochsensibel sind. Alle Downloads sind login-geschützt
