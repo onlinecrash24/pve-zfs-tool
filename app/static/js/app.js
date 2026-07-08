@@ -1861,6 +1861,59 @@ async function renderRetentionEditor(mount) {
 
 
 // -- Snapshot Check -------------------------------------------------------
+async function renderSnapshotTagSelector(mount) {
+    let data;
+    try {
+        data = await API.get(`/api/snapshot-tags?host=${currentHost}`);
+    } catch (e) {
+        data = null;
+    }
+    mount.innerHTML = "";
+    const tags = (data && data.tags) || [];
+    if (!tags.length) {
+        mount.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("no_data")));
+        return;
+    }
+    mount.appendChild(h("p", {
+        style: "color:var(--text-secondary);font-size:13px;margin-bottom:10px"
+    }, t("snap_tags_hint")));
+
+    const row = h("div", { style: "display:flex;flex-wrap:wrap;gap:10px 18px;margin-bottom:12px" });
+    const boxes = [];
+    for (const entry of tags) {
+        const cb = h("input", { type: "checkbox" });
+        cb.checked = !!entry.selected;
+        boxes.push([entry.tag, cb]);
+        const label = h("label", { style: "display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px" }, [
+            cb,
+            h("span", { style: "font-family:monospace" }, entry.tag),
+            h("span", { className: "badge badge-stopped", title: t("snap_tags_count") }, String(entry.count)),
+        ]);
+        row.appendChild(label);
+    }
+    mount.appendChild(row);
+
+    const saveBtn = h("button", { className: "btn btn-primary btn-sm" }, t("save"));
+    saveBtn.addEventListener("click", async () => {
+        const selected = boxes.filter(([, cb]) => cb.checked).map(([tag]) => tag);
+        saveBtn.setAttribute("disabled", "disabled");
+        const r = await API.post("/api/snapshot-tags", { host: currentHost, tags: selected });
+        saveBtn.removeAttribute("disabled");
+        if (r && r.success) {
+            toast(t("snap_tags_saved"), "success");
+            viewSnapshotCheck();   // re-run the analysis with the new selection
+        } else {
+            toast((r && r.error) || t("snap_tags_save_failed"), "error");
+        }
+    });
+    mount.appendChild(saveBtn);
+    if (data.custom_selection) {
+        mount.appendChild(h("span", {
+            style: "margin-left:10px;font-size:12px;color:var(--text-secondary)"
+        }, t("snap_tags_custom_active")));
+    }
+}
+
 async function viewSnapshotCheck() {
     if (!requireHost()) return;
     setContent(loading());
@@ -1882,6 +1935,15 @@ async function viewSnapshotCheck() {
     // Load + render the editable retention table asynchronously so the rest
     // of the Snapshot Check view paints immediately.
     renderRetentionEditor(policyBody);
+
+    // Snapshot tags — which naming tags count as auto-labels for this check
+    // (users with several replications have several tags). Async like above.
+    const tagsCard = h("div", { className: "card", style: "margin-top:16px" });
+    tagsCard.appendChild(h("div", { className: "card-header" }, t("snap_tags_title")));
+    const tagsBody = h("div", { className: "card-body" }, loading());
+    tagsCard.appendChild(tagsBody);
+    container.appendChild(tagsCard);
+    renderSnapshotTagSelector(tagsBody);
 
     // Per-Label Status, in the same order as the retention table above
     // (frequent -> monthly); unknown labels follow alphabetically.

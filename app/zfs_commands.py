@@ -698,9 +698,10 @@ def get_snapshot_ages(host):
     if not result["success"]:
         return {"datasets": {}, "manual": {}}
 
-    LABELS = ("frequent", "hourly", "daily", "weekly", "monthly", "yearly",
-              "backup-zfs", "bashclub-zfs")
-    label_re = re.compile("|".join(LABELS))
+    # Which tags count as auto-snapshot labels is per-host configurable
+    # (multiple replications bring multiple tags); default = historic set.
+    from app.snaptags import effective_tags, build_label_regex
+    label_re = build_label_regex(effective_tags(host.get("address", "")))
 
     datasets = {}
     manual = {}
@@ -761,6 +762,21 @@ def get_autosnap_disabled_datasets(host):
             if len(parts) >= 2 and parts[1].strip() == "false":
                 disabled.add(parts[0].strip())
     return disabled
+
+
+def discover_snapshot_tags(host):
+    """Tag -> snapshot count across all snapshots on the host (for the
+    Snapshot Check tag-selection UI). Reuses the cached snapshot listing."""
+    from app.snaptags import discover_tags
+    result = run_command(host, "zfs list -t snapshot -Hpo name,creation", cache_ttl=_TTL_MED)
+    if not result.get("success"):
+        return {}
+    names = []
+    for line in result["stdout"].strip().splitlines():
+        parts = line.split("\t")
+        if parts and "@" in parts[0]:
+            names.append(parts[0].rsplit("@", 1)[1])
+    return discover_tags(names)
 
 
 def get_auto_snapshot_property(host, dataset):

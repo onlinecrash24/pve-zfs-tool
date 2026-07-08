@@ -1044,13 +1044,55 @@ def api_snapshot_check():
         return err, code
     from app.snapshot_analysis import analyze_snapshots
     from app.zfs_commands import get_autosnap_disabled_datasets
-    snap_age_data = get_snapshot_ages(host)
+    snap_age_data = get_snapshot_ages(host)   # respects the per-host tag selection
     auto_snap = get_auto_snapshot_status(host)
     retention_cfg = auto_snap.get("retention_policy", {})
     analysis = analyze_snapshots(snap_age_data, retention_cfg,
                                  autosnap_disabled=get_autosnap_disabled_datasets(host))
     analysis["retention_policy"] = retention_cfg
     return jsonify(analysis)
+
+
+@app.route("/api/snapshot-tags", methods=["GET"])
+@login_required
+def api_snapshot_tags_get():
+    """Discovered snapshot tags on the host + the saved per-host selection."""
+    from app.zfs_commands import discover_snapshot_tags
+    from app.snaptags import load_tag_selection, DEFAULT_TAGS
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    counts = discover_snapshot_tags(host)
+    selection = load_tag_selection(host["address"])
+    selected = set(selection) if selection is not None else set(DEFAULT_TAGS)
+    # Show every discovered tag, plus selected/default tags even at count 0.
+    tags = sorted(set(counts) | selected)
+    return jsonify({
+        "tags": [{"tag": tg, "count": counts.get(tg, 0), "selected": tg in selected}
+                 for tg in tags],
+        "custom_selection": selection is not None,
+    })
+
+
+@app.route("/api/snapshot-tags", methods=["POST"])
+@login_required
+def api_snapshot_tags_set():
+    """Persist which tags the Snapshot Check should treat as auto-labels."""
+    from app.snaptags import save_tag_selection, is_valid_tag
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    tags = data.get("tags")
+    if not isinstance(tags, list):
+        return jsonify({"success": False, "error": "tags must be a list"}), 400
+    bad = [t for t in tags if not is_valid_tag(str(t))]
+    if bad:
+        return jsonify({"success": False, "error": f"invalid tag(s): {', '.join(map(str, bad[:5]))}"}), 400
+    saved = save_tag_selection(host["address"], [str(t) for t in tags])
+    audit_log("snapcheck.tags.save", target=host["address"], host=host["address"],
+              success=True, details={"tags": saved or "defaults"})
+    return jsonify({"success": True, "tags": saved})
 
 
 # ---------------------------------------------------------------------------
