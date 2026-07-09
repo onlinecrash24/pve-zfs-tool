@@ -25,6 +25,60 @@ NOW = int(time.time())
 CFG = {"daily": 14}
 
 
+def _label_chain(now, label, tss):
+    """Build a get_snapshot_ages()-shaped single-dataset, single-label input
+    from an explicit ascending timestamp list."""
+    tss = sorted(tss)
+    return {"datasets": {"rpool/data/x": {label: {
+        "count": len(tss), "oldest": tss[0], "newest": tss[-1], "timestamps": tss}}},
+        "manual": {}}
+
+
+# --- gap detection (interval-based, catches short holes too) --------------
+
+def test_healthy_frequent_chain_has_no_gap():
+    tss = [NOW - 900 * i for i in range(8)]           # 8 snapshots exactly 15 min apart
+    a = analyze_snapshots(_label_chain(NOW, "frequent", tss), {})
+    assert a["per_label"]["frequent"]["gaps"] == []
+
+
+def test_short_frequent_hole_is_detected():
+    # 3 snapshots @15min ending 1h ago, then a ~45 min hole, then 2 more.
+    # interval*1.5 = 22.5 min catches it; the old MAX_AGE*1.5 (90 min) missed it.
+    before = [NOW - 3600 - 1800, NOW - 3600 - 900, NOW - 3600]
+    after = [NOW - 900, NOW]
+    a = analyze_snapshots(_label_chain(NOW, "frequent", before + after), {})
+    gaps = a["per_label"]["frequent"]["gaps"]
+    assert len(gaps) == 1 and gaps[0]["dataset"] == "rpool/data/x"
+
+
+def test_disable_reenable_daily_gap_detected():
+    # old dailies (before disable) + recent dailies (after re-enable) with a
+    # multi-day hole between -> gap flagged while both sides still exist.
+    before = [NOW - 86400 * (i + 6) for i in range(4)]   # 4 dailies, ending 6 d ago
+    after = [NOW - 86400, NOW]                           # 2 recent dailies
+    a = analyze_snapshots(_label_chain(NOW, "daily", before + after), CFG)
+    gaps = a["per_label"]["daily"]["gaps"]
+    assert len(gaps) == 1
+    assert gaps[0]["gap_hours"] > 24                     # the hole spans days
+
+
+def test_single_missed_daily_is_a_gap():
+    tss = [NOW - 86400 * 3, NOW - 86400 * 2, NOW]        # one daily missing (~48h hole)
+    a = analyze_snapshots(_label_chain(NOW, "daily", tss), CFG)
+    assert len(a["per_label"]["daily"]["gaps"]) == 1
+
+
+def test_gap_detection_applies_to_disabled_datasets_too():
+    # gap detection is not gated on the exclusion -- a re-enabled dataset that
+    # is momentarily still flagged disabled must still get its hole detected
+    before = [NOW - 3600 - 1800, NOW - 3600 - 900, NOW - 3600]
+    after = [NOW - 900, NOW]
+    a = analyze_snapshots(_label_chain(NOW, "frequent", before + after), {},
+                          autosnap_disabled={"rpool/data/x"})
+    assert len(a["per_label"]["frequent"]["gaps"]) == 1
+
+
 def test_local_dataset_mismatch_still_reported():
     data = _data(NOW, {"rpool/data/vm-100": 10})
     a = analyze_snapshots(data, CFG)

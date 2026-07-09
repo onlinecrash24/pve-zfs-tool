@@ -19,8 +19,19 @@ MAX_AGE = {
     "monthly":  2764800,  # 32 days
 }
 
-# Gap detection: factor above threshold = suspicious gap
+# Gap detection: a hole larger than GAP_FACTOR x the *expected interval*
+# (the cron cadence) is a suspicious gap. Using the interval -- not MAX_AGE,
+# the loose stale threshold -- means a one-missed-cycle hole is caught for
+# frequent/hourly too (MAX_AGE for those needs 6 / 3 missed cycles).
 GAP_FACTOR = 1.5
+
+LABEL_INTERVAL = {
+    "frequent": 900,       # every 15 min
+    "hourly":   3600,      # hourly
+    "daily":    86400,     # daily
+    "weekly":   604800,    # weekly
+    "monthly":  2592000,   # ~monthly (30 d)
+}
 
 # Replica datasets get double the stale threshold: their newest snapshot is
 # inherently older than local ones (source snapshot up to 1 interval old +
@@ -149,9 +160,10 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
                     "threshold_sec": threshold,
                 })
 
-            # Gap detection: find holes in the snapshot chain
-            if label in MAX_AGE and len(timestamps) >= 2:
-                gap_threshold = MAX_AGE[label] * GAP_FACTOR
+            # Gap detection: a hole > GAP_FACTOR x the expected cron interval.
+            interval = LABEL_INTERVAL.get(label)
+            if interval and len(timestamps) >= 2:
+                gap_threshold = interval * GAP_FACTOR
                 for idx in range(len(timestamps) - 1):
                     delta = timestamps[idx + 1] - timestamps[idx]
                     if delta > gap_threshold:
@@ -162,7 +174,7 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
                             "to_epoch": timestamps[idx + 1],
                             "from_age": format_age(now_epoch - timestamps[idx]),
                             "to_age": format_age(now_epoch - timestamps[idx + 1]),
-                            "threshold_hours": round(MAX_AGE[label] / 3600, 1),
+                            "threshold_hours": round(gap_threshold / 3600, 1),
                         })
 
     # Build summary
