@@ -650,6 +650,24 @@ def get_zdb_analysis(host, pool_name):
 # ZFS-auto-snapshot
 # ---------------------------------------------------------------------------
 
+# --default-exclude / -e (any short cluster containing 'e' -- 'e' is the only
+# zfs-auto-snapshot short flag with that letter). In that mode only datasets
+# with com.sun:auto-snapshot=true are snapshotted; without it, all datasets
+# except those set to false are snapshotted (so "not set" = included).
+_DEFAULT_EXCLUDE_RE = re.compile(r'(?:^|\s)(?:--default-exclude|-[a-df-zA-DF-Z]*e[a-df-zA-DF-Z]*)(?=[\s=]|$)')
+
+
+def parse_default_exclude(cron_raw):
+    """True if any active zfs-auto-snapshot cron line uses --default-exclude/-e."""
+    for line in (cron_raw or "").splitlines():
+        s = line.strip()
+        if "zfs-auto-snapshot" not in s or s.startswith("#"):
+            continue
+        if _DEFAULT_EXCLUDE_RE.search(s):
+            return True
+    return False
+
+
 def get_auto_snapshot_status(host):
     result = run_command(host, "which zfs-auto-snapshot 2>/dev/null && echo INSTALLED || echo NOT_INSTALLED",
                          cache_ttl=_TTL_LONG)
@@ -683,6 +701,7 @@ def get_auto_snapshot_status(host):
         "installed": installed,
         "cron_config": cron_raw,
         "retention_policy": retention_policy,
+        "default_exclude": parse_default_exclude(cron_raw),
     }
 
 

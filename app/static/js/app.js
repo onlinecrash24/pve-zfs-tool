@@ -1331,10 +1331,13 @@ async function upgradePool(pool) {
 async function viewDatasets() {
     if (!requireHost()) return;
     setContent(loading());
-    const [datasets, asMap] = await Promise.all([
+    const [datasets, asMap, asStatus] = await Promise.all([
         API.get(`/api/datasets?host=${currentHost}`),
         API.get(`/api/auto-snapshot/map?host=${currentHost}`),
+        API.get(`/api/auto-snapshot/status?host=${currentHost}`),
     ]);
+    // Cron mode: without --default-exclude, "not set" datasets ARE snapshotted.
+    const asDefaultExclude = !!(asStatus && asStatus.default_exclude);
 
     const filesystems = datasets.filter(ds => ds.type === "filesystem");
     const volumes = datasets.filter(ds => ds.type === "volume");
@@ -1370,7 +1373,7 @@ async function viewDatasets() {
             tr.appendChild(h("td", {}, ds.compression));
             tr.appendChild(h("td", {}, ds.compressratio));
             tr.appendChild(h("td", { style: "font-size:12px;color:var(--text-secondary)" }, ds.mountpoint || "-"));
-            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name]));
+            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name], asDefaultExclude));
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
@@ -1405,7 +1408,7 @@ async function viewDatasets() {
             tr.appendChild(h("td", {}, ds.refer));
             tr.appendChild(h("td", {}, ds.compression));
             tr.appendChild(h("td", {}, ds.compressratio));
-            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name]));
+            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name], asDefaultExclude));
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
@@ -1434,42 +1437,45 @@ async function showDatasetProps(ds) {
 // (the opposite) is offered (no no-op same-value button), guarded by a
 // confirm because it breaks inheritance; a local value can be toggled or
 // reset to inherit.
-function _autoSnapCell(name, info) {
+function _autoSnapCell(name, info, defaultExclude) {
     info = info || { value: "-", source: "-" };
     const val = info.value;                 // "true" | "false" | "-"
     const src = info.source || "-";         // "local" | "inherited from X" | "-"
     const isLocal = src === "local" || src === "received";
     const isInherited = src.indexOf("inherited") === 0 || src === "default";
+    const isSet = val === "true" || val === "false";
+    // Effective behavior: explicit value if set, else the cron default
+    // (opt-out mode = snapshotted; --default-exclude = not).
+    const effOn = isSet ? (val === "true") : !defaultExclude;
 
     const td = h("td", { style: "white-space:nowrap" });
-    let chipCls = "badge-stopped", chipTxt = t("as_notset");
-    if (val === "true") { chipCls = "badge-success"; chipTxt = t("as_on"); }
-    else if (val === "false") { chipCls = "badge-danger"; chipTxt = t("as_off"); }
-    const head = h("div", { style: "display:flex;align-items:center;gap:4px" }, [
-        h("span", { className: "badge " + chipCls }, chipTxt),
-    ]);
-    if (isInherited && (val === "true" || val === "false"))
-        head.appendChild(h("span", { style: "font-size:10px;color:var(--text-secondary)" }, t("as_inherited")));
-    else if (isLocal)
-        head.appendChild(h("span", { style: "font-size:10px;color:var(--text-secondary)" }, t("as_local")));
+    const chip = h("span", { className: "badge " + (effOn ? "badge-success" : "badge-danger") },
+        effOn ? t("as_on") : t("as_off"));
+    const head = h("div", { style: "display:flex;align-items:center;gap:4px" }, [chip]);
+    const marker = (txt, title) => h("span",
+        { style: "font-size:10px;color:var(--text-secondary)", title: title || "" }, txt);
+    if (!isSet) head.appendChild(marker(t("as_default"), t("as_default_hint")));
+    else if (isInherited) head.appendChild(marker(t("as_inherited")));
+    else if (isLocal) head.appendChild(marker(t("as_local")));
     td.appendChild(head);
 
     const bg = h("div", { className: "btn-group", style: "margin-top:4px" });
     const mk = (label, cls, fn) => h("button", { className: "btn btn-sm " + cls, onClick: fn }, label);
-    if (isLocal) {
+    if (isSet && isLocal) {
+        // local override -> toggle to the opposite + reset to inherit
         if (val === "true") bg.appendChild(mk(t("as_set_off"), "btn-danger", () => setAutoSnap(name, "false")));
-        else if (val === "false") bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
+        else bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
         bg.appendChild(mk(t("as_inherit"), "", () => setAutoSnap(name, "inherit")));
-    } else if (isInherited && val === "true") {
+    } else if (isSet && isInherited && val === "true") {
         bg.appendChild(mk(t("as_override_off"), "btn-danger",
             () => setAutoSnap(name, "false", t("as_confirm_override", name, "true", "false"))));
-    } else if (isInherited && val === "false") {
+    } else if (isSet && isInherited && val === "false") {
         bg.appendChild(mk(t("as_override_on"), "btn-success",
             () => setAutoSnap(name, "true", t("as_confirm_override", name, "false", "true"))));
     } else {
-        // not set anywhere -> a local value breaks nothing, offer both
-        bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
-        bg.appendChild(mk(t("as_set_off"), "btn-danger", () => setAutoSnap(name, "false")));
+        // not set -> only offer the action that actually changes behavior
+        if (effOn) bg.appendChild(mk(t("as_set_off"), "btn-danger", () => setAutoSnap(name, "false")));
+        else bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
     }
     td.appendChild(bg);
     return td;
