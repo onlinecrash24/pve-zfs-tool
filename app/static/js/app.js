@@ -699,6 +699,16 @@ async function viewHosts() {
                 className: "btn btn-sm btn-success",
                 onClick: () => testHost(host.address),
             }, t("test")));
+            // WOL: disabled until the async probe reports the host offline
+            const wolBtn = h("button", {
+                className: "btn btn-sm",
+                id: `wol-${host.address}`,
+                disabled: "disabled",
+                style: "opacity:0.4",
+                title: t("wol_only_offline"),
+                onClick: () => wakeHost(host.address),
+            }, t("wol_btn"));
+            btnGroup.appendChild(wolBtn);
             btnGroup.appendChild(h("button", {
                 className: "btn btn-sm",
                 onClick: () => openHostBackupModal(host),
@@ -795,13 +805,43 @@ async function _probeHostBadge(addr) {
     if (!el) return;
     el.textContent = t("testing");
     el.className = "badge badge-stopped";
+    let online = false;
     try {
         const r = await API.post("/api/hosts/test", { address: addr });
-        el.textContent = r.success ? t("online") : t("offline");
-        el.className = r.success ? "badge badge-online" : "badge badge-offline";
+        online = !!r.success;
+        el.textContent = online ? t("online") : t("offline");
+        el.className = online ? "badge badge-online" : "badge badge-offline";
     } catch (e) {
         el.textContent = t("offline");
         el.className = "badge badge-offline";
+    }
+    // WOL only makes sense for an offline host
+    const wolBtn = document.getElementById(`wol-${addr}`);
+    if (wolBtn) {
+        if (online) {
+            wolBtn.setAttribute("disabled", "disabled");
+            wolBtn.style.opacity = "0.4";
+            wolBtn.title = t("wol_only_offline");
+        } else {
+            wolBtn.removeAttribute("disabled");
+            wolBtn.style.opacity = "1";
+            wolBtn.title = t("wol_hint");
+        }
+    }
+}
+
+async function wakeHost(addr) {
+    const btn = document.getElementById(`wol-${addr}`);
+    if (btn) btn.setAttribute("disabled", "disabled");
+    const r = await API.post("/api/hosts/wol", { address: addr });
+    if (btn) btn.removeAttribute("disabled");
+    if (r && r.success) {
+        const relaysOk = (r.relays || []).filter(x => x.ok).length;
+        toast(t("wol_sent", String(relaysOk + (r.sent_local ? 1 : 0))), "success");
+        // Re-probe after a boot-ish delay so the badge flips by itself
+        setTimeout(() => _probeHostBadge(addr), 45000);
+    } else {
+        toast((r && r.error) || t("wol_failed"), "error");
     }
 }
 
@@ -3850,8 +3890,16 @@ async function viewReplication() {
         // Status badges — show PVE + zsync status for BOTH hosts
         const mkPveBadge = (label, st) => {
             const cls = st.is_pve ? "badge-success" : "badge-danger";
-            const txt = (st.is_pve ? "\u2713 " : "\u2717 ") + label + " PVE" + (st.pve_version ? " (" + (st.pve_version.split(/\s+/)[1] || "") + ")" : "");
+            // pveversion output: "pve-manager/8.4.1/abc (running kernel: ...)"
+            // -> show just the bare version number (was: split[1] => "((running")
+            const ver = (st.pve_version && (st.pve_version.match(/\/(\d+[\d.]*)/) || [])[1]) || "";
+            const txt = (st.is_pve ? "\u2713 " : "\u2717 ") + label + " PVE" + (ver ? " " + ver : "");
             return h("span", { className: "badge " + cls, title: st.pve_version || "" }, txt);
+        };
+        const mkRepoBadge = (label, st) => {
+            const ok = !!st.repo_present;
+            return h("span", { className: "badge " + (ok ? "badge-success" : "badge-danger") },
+                (ok ? "\u2713 " : "\u2717 ") + label + " " + t("repl_repo") + ": " + (ok ? t("repl_repo_present") : t("repl_repo_missing")));
         };
         const mkZsyncBadge = (label, st) => {
             const cls = st.installed ? "badge-success" : "badge-danger";
@@ -3863,6 +3911,8 @@ async function viewReplication() {
         const badgeRow = h("div", { style: "display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap" });
         badgeRow.appendChild(mkPveBadge(srcLabel, srcStatus));
         badgeRow.appendChild(mkPveBadge(tgtLabel, status));
+        badgeRow.appendChild(mkRepoBadge(srcLabel, srcStatus));
+        badgeRow.appendChild(mkRepoBadge(tgtLabel, status));
         const zsyncBadgeSrc = mkZsyncBadge(srcLabel, srcStatus);
         const zsyncBadge = mkZsyncBadge(tgtLabel, status);
         badgeRow.appendChild(zsyncBadgeSrc);

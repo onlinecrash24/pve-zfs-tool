@@ -318,6 +318,24 @@ def api_test_host():
     return jsonify({"success": ok, "message": "Connection OK" if ok else "Connection failed"})
 
 
+@app.route("/api/hosts/wol", methods=["POST"])
+@login_required
+def api_host_wol():
+    """Send Wake-on-LAN magic packets to an offline host (local + relays)."""
+    from app.wol import wake
+    data = request.get_json(silent=True) or {}
+    address = (data.get("address") or "").strip()
+    if not _find_host(address):
+        return jsonify({"success": False, "error": "Host not found"}), 404
+    result = wake(address)
+    audit_log("host.wol", target=address, host=address,
+              success=result.get("success", False),
+              details={"mac": result.get("mac"), "sent_local": result.get("sent_local"),
+                       "relays_ok": sum(1 for rl in result.get("relays", []) if rl.get("ok")),
+                       "error": result.get("error", "")})
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # API: Pools
 # ---------------------------------------------------------------------------

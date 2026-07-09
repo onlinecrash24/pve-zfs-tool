@@ -184,6 +184,7 @@
 - **Public-Key-Anzeige** -- Auf der Startseite mit Copy-Button (funktioniert unter HTTP und HTTPS)
 - **Mehrere Hosts** -- Mehrere Proxmox-VE-Nodes hinzufügen und verwalten
 - **Connection-Test** -- SSH-Konnektivität pro Host prüfen
+- **Wake-on-LAN** -- Offline-Host aus der Hosts-Ansicht wecken: Die MAC des Management-NICs wird automatisch erfasst, solange der Host online ist; Magic Packets gehen aus dem Container **und** als Relay über jeden anderen erreichbaren Host raus (eine gebridgte Docker-Umgebung broadcastet meist nicht ins LAN — ein Nachbar-PVE schon)
 
 ### Host-Config-Backup
 - **Config-Snapshot** -- Ein-Klick-Backup der Proxmox-Host-Konfiguration (NICHT der VM-Disks): das `/etc/pve`-Cluster-Dateisystem, Netzwerk-Config (`interfaces`, `hosts`, `resolv.conf`) plus Befehlsausgaben (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs`-Status)
