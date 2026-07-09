@@ -1604,6 +1604,19 @@ def api_replication_bootstrap_ssh():
     return jsonify(result)
 
 
+@app.route("/api/replication/ssh-probe", methods=["POST"])
+@login_required
+def api_replication_ssh_probe():
+    """Read-only pre-flight: does passwordless SSH target->source already work?"""
+    from app.replication import probe_ssh_trust
+    data = request.get_json(silent=True) or {}
+    target = _find_host((data.get("target") or "").strip())
+    source = _find_host((data.get("source") or "").strip())
+    if not target or not source:
+        return jsonify({"error": "target and source hosts are required"}), 404
+    return jsonify(probe_ssh_trust(target, source))
+
+
 @app.route("/api/replication/create-target", methods=["POST"])
 @login_required
 def api_replication_create_target():

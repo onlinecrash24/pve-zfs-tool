@@ -3854,9 +3854,9 @@ async function viewReplication() {
             return h("span", { className: "badge " + cls, title: st.pve_version || "" }, txt);
         };
         const mkZsyncBadge = (label, st) => {
-            const cls = st.installed ? "badge-success" : "badge-warning";
+            const cls = st.installed ? "badge-success" : "badge-danger";
             return h("span", { className: "badge " + cls },
-                (st.installed ? "\u2713 " : "") + label + " " + t("repl_setup_zsync") + ": " + (st.installed ? t("repl_installed") : t("repl_not_installed")));
+                (st.installed ? "\u2713 " : "\u2717 ") + label + " " + t("repl_setup_zsync") + ": " + (st.installed ? t("repl_installed") : t("repl_not_installed")));
         };
         const srcLabel = "[" + t("repl_source_short") + "]";
         const tgtLabel = "[" + t("repl_target_short") + "]";
@@ -3867,9 +3867,30 @@ async function viewReplication() {
         const zsyncBadge = mkZsyncBadge(tgtLabel, status);
         badgeRow.appendChild(zsyncBadgeSrc);
         badgeRow.appendChild(zsyncBadge);
-        const sshBadgeWrap = h("span", {}); // filled after probe
+        const sshBadgeWrap = h("span", {}); // pre-flight probe fills this
         badgeRow.appendChild(sshBadgeWrap);
         setupBody.appendChild(badgeRow);
+
+        // Pre-flight: does passwordless SSH target->source already work?
+        // Drives the green/red badge AND lets the setup button skip the
+        // bootstrap when trust is already established.
+        let sshTrustOk = null;   // null = unknown (probe pending or errored)
+        const sshDir = "SSH " + tgtLabel + "→" + srcLabel + ": ";
+        const fillSshBadge = () => {
+            sshBadgeWrap.innerHTML = "";
+            const cls = sshTrustOk === true ? "badge-success" : (sshTrustOk === false ? "badge-danger" : "badge-stopped");
+            const icon = sshTrustOk === true ? "✓ " : (sshTrustOk === false ? "✗ " : "⋯ ");
+            sshBadgeWrap.appendChild(h("span", { className: "badge " + cls },
+                icon + sshDir + (sshTrustOk === true ? t("repl_ssh_ok") : (sshTrustOk === false ? t("repl_ssh_not_ok") : "…"))));
+        };
+        fillSshBadge();
+        (async () => {
+            try {
+                const p = await API.post("/api/replication/ssh-probe", { target: tgt.address, source: src.address });
+                sshTrustOk = !!(p && p.probe_ok);
+            } catch (e) { sshTrustOk = null; }
+            fillSshBadge();
+        })();
 
         // Warn if either host isn't PVE
         if (!srcStatus.is_pve || !status.is_pve) {
@@ -3898,9 +3919,14 @@ async function viewReplication() {
                 ]));
             };
 
-            // Step A: install on BOTH hosts (zsync needs to be on both ends)
+            // Step A: install on BOTH hosts (zsync needs to be on both ends).
+            // Already-installed hosts are skipped (green pre-check badge).
+            let installedSomething = false;
             const installOn = async (label, hostAddr, statusRef, badge) => {
-                if (statusRef.installed) return true;
+                if (statusRef.installed) {
+                    addStep(t("repl_setup_step_install") + " " + label + " — " + t("repl_installed"), "ok");
+                    return true;
+                }
                 setupBtn.textContent = t("repl_installing") + " " + label;
                 addStep(t("repl_setup_step_install") + " " + label, "pending");
                 try {
@@ -3912,6 +3938,7 @@ async function viewReplication() {
                         return false;
                     }
                     statusRef.installed = true;
+                    installedSomething = true;
                     badge.className = "badge badge-success";
                     badge.textContent = "\u2713 " + label + " " + t("repl_setup_zsync") + ": " + t("repl_installed");
                     return true;
@@ -3928,7 +3955,16 @@ async function viewReplication() {
                 setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn"); return;
             }
 
-            // Step B: SSH bootstrap target → source
+            // Step B: SSH bootstrap target → source — skipped when the
+            // pre-flight probe already confirmed passwordless access.
+            if (sshTrustOk === true) {
+                addStep(t("repl_setup_step_ssh") + " — " + t("repl_ssh_skipped"), "ok");
+                toast(installedSomething ? t("repl_setup_ok") : t("repl_setup_nothing_todo"), "success");
+                if (installedSomething) renderAll();
+                setupBtn.disabled = false;
+                setupBtn.textContent = t("repl_setup_btn");
+                return;
+            }
             setupBtn.textContent = t("repl_setup_step_ssh");
             addStep(t("repl_setup_step_ssh"), "pending");
             try {
@@ -3941,9 +3977,8 @@ async function viewReplication() {
                 if (r.probe_output && !r.probe_ok) {
                     setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
                 }
-                sshBadgeWrap.innerHTML = "";
-                sshBadgeWrap.appendChild(h("span", { className: "badge " + (r.success ? "badge-success" : "badge-warning") },
-                    (r.success ? "\u2713 " : "") + "SSH: " + (r.success ? t("repl_ssh_ok") : t("repl_ssh_not_ok"))));
+                sshTrustOk = !!r.success;
+                fillSshBadge();
                 if (r.success) {
                     toast(t("repl_setup_ok"), "success");
                     // re-render to unlock the following sections (status refresh)

@@ -981,18 +981,35 @@ def bootstrap_ssh(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> D
         return out
 
     # Step 5: probe from target
+    pr = probe_ssh_trust(target_host, source_host)
+    out["probe_output"] = pr["output"]
+    out["probe_ok"] = pr["probe_ok"]
+    out["success"] = out["probe_ok"]
+    if not out["probe_ok"] and not out["error"]:
+        out["error"] = "SSH probe failed"
+    return out
+
+
+def probe_ssh_trust(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-only check: can the target SSH into the source without a password?
+
+    Used as the pre-flight indicator in the setup step (green/red) and as the
+    final verification inside bootstrap_ssh. BatchMode ensures no interactive
+    prompt; StrictHostKeyChecking makes an unknown host key a failure too.
+    """
+    src_addr = source_host["address"]
+    src_port = int(source_host.get("port") or 22)
+    src_user = source_host.get("user") or "root"
     probe = (
         f"ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 "
         f"-p {src_port} {shlex.quote(src_user + '@' + src_addr)} 'echo __PROBE_OK__'"
     )
     r = run_command(target_host, probe, timeout=20)
     combined = (r.get("stdout") or "") + (r.get("stderr") or "")
-    out["probe_output"] = combined.strip()[-500:]
-    out["probe_ok"] = r.get("success", False) and "__PROBE_OK__" in (r.get("stdout") or "")
-    out["success"] = out["probe_ok"]
-    if not out["probe_ok"] and not out["error"]:
-        out["error"] = "SSH probe failed"
-    return out
+    return {
+        "probe_ok": r.get("success", False) and "__PROBE_OK__" in (r.get("stdout") or ""),
+        "output": combined.strip()[-500:],
+    }
 
 
 def create_target_dataset(host: Dict[str, Any], dataset: str) -> Dict[str, Any]:
