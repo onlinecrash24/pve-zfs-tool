@@ -2124,11 +2124,11 @@ async function viewSnapshotCheck() {
             );
             body.appendChild(tbl);
         }
-        // Replica datasets (com.sun:auto-snapshot=false) are excluded from the
-        // count comparison -- their snapshot counts follow the source host.
-        if (info.count_mismatch_excluded > 0) {
+        // Datasets with com.sun:auto-snapshot=false are excluded from the
+        // count check at every level (counts follow the source / a manual set).
+        if (info.excluded_datasets > 0) {
             body.appendChild(h("p", { style: "color:var(--text-secondary);font-size:12px;margin-top:8px" },
-                t("count_mismatch_excluded", String(info.count_mismatch_excluded))));
+                t("excluded_datasets_hint", String(info.excluded_datasets))));
         }
 
         if (!hasIssues) {

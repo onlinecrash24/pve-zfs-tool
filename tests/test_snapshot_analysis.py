@@ -31,7 +31,7 @@ def test_local_dataset_mismatch_still_reported():
     lg = a["per_label"]["daily"]
     assert len(lg["count_mismatches"]) == 1
     assert lg["count_mismatches"][0]["dataset"] == "rpool/data/vm-100"
-    assert lg["count_mismatch_excluded"] == 0
+    assert lg["excluded_datasets"] == 0
 
 
 def test_replica_dataset_excluded_from_mismatch():
@@ -40,7 +40,7 @@ def test_replica_dataset_excluded_from_mismatch():
                           autosnap_disabled={"rpool/repl/rpool/ROOT/pve-1"})
     lg = a["per_label"]["daily"]
     assert lg["count_mismatches"] == []
-    assert lg["count_mismatch_excluded"] == 1
+    assert lg["excluded_datasets"] == 1
 
 
 def test_mixed_local_and_replica():
@@ -50,16 +50,34 @@ def test_mixed_local_and_replica():
                           autosnap_disabled={"rpool/repl/rpool/data/vm-100"})
     lg = a["per_label"]["daily"]
     assert [m["dataset"] for m in lg["count_mismatches"]] == ["rpool/data/vm-100"]
-    assert lg["count_mismatch_excluded"] == 1
+    assert lg["excluded_datasets"] == 1
 
 
-def test_replica_with_matching_count_not_counted_as_excluded():
-    # no mismatch at all -> nothing to exclude
+def test_excluded_counted_even_when_count_matches():
+    # the whole point of the fix: a disabled dataset present at a level is
+    # excluded/counted there even when its count equals the local keep, so the
+    # hint shows consistently (hourly/monthly) and not only where it mismatched
     data = _data(NOW, {"rpool/repl/x": 14})
     a = analyze_snapshots(data, CFG, autosnap_disabled={"rpool/repl/x"})
     lg = a["per_label"]["daily"]
     assert lg["count_mismatches"] == []
-    assert lg["count_mismatch_excluded"] == 0
+    assert lg["excluded_datasets"] == 1
+
+
+def test_excluded_counted_per_label_across_levels():
+    # one disabled dataset with hourly + daily snapshots -> counted at BOTH,
+    # regardless of whether each level's count matches its keep
+    now = NOW
+    hts = _ages(now, 96, step=3600)
+    dts = _ages(now, 14, step=86400)
+    data = {"datasets": {"rpool/repl/x": {
+        "hourly": {"count": 96, "oldest": hts[0], "newest": hts[-1], "timestamps": hts},
+        "daily": {"count": 14, "oldest": dts[0], "newest": dts[-1], "timestamps": dts},
+    }}, "manual": {}}
+    a = analyze_snapshots(data, {"hourly": 96, "daily": 14},
+                          autosnap_disabled={"rpool/repl/x"})
+    assert a["per_label"]["hourly"]["excluded_datasets"] == 1
+    assert a["per_label"]["daily"]["excluded_datasets"] == 1
 
 
 def test_replica_stale_detection_still_applies():
@@ -112,4 +130,4 @@ def test_default_no_exclusions_backwards_compatible():
     a = analyze_snapshots(data, CFG)
     lg = a["per_label"]["daily"]
     assert len(lg["count_mismatches"]) == 1
-    assert lg["count_mismatch_excluded"] == 0
+    assert lg["excluded_datasets"] == 0

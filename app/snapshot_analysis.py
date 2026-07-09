@@ -59,9 +59,10 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
             (e.g. zsync replication targets). Their snapshot counts follow the
             *source* host's retention, not the local cron --keep, so they are
             excluded from the count-mismatch comparison (counted per label in
-            ``count_mismatch_excluded`` instead). Stale detection still applies
-            but with REPLICA_STALE_FACTOR x the threshold (replication lag);
-            gap detection is unchanged.
+            ``excluded_datasets`` -- every present disabled dataset, not just
+            the mismatching ones). Stale detection still applies but with
+            REPLICA_STALE_FACTOR x the threshold (replication lag); gap
+            detection is unchanged.
 
     Returns:
         dict with: per_label, missing_labels, manual_snapshots, datasets_analyzed
@@ -105,7 +106,7 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
                     "oldest_age_sec": 0,
                     "newest_age_sec": age_sec,
                     "count_mismatches": [],
-                    "count_mismatch_excluded": 0,
+                    "excluded_datasets": 0,
                     "stale_datasets": [],
                     "gaps": [],
                 }
@@ -118,14 +119,16 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
             if age_sec > lg["oldest_age_sec"]:
                 lg["oldest_age_sec"] = age_sec
 
-            # Check: count vs configured --keep. Datasets with
-            # com.sun:auto-snapshot=false (replication targets) follow the
-            # source host's retention -- the local --keep doesn't apply.
-            configured = retention_cfg.get(label)
-            if configured and count != configured:
-                if ds in autosnap_disabled:
-                    lg["count_mismatch_excluded"] += 1
-                else:
+            # Datasets with com.sun:auto-snapshot=false (replication targets or
+            # manually disabled) follow the source's retention / a manual
+            # setting, not the local --keep. Exclude them from the count check
+            # entirely and count them per label so the exclusion is visible at
+            # EVERY level -- not only where a count happened to mismatch.
+            if ds in autosnap_disabled:
+                lg["excluded_datasets"] += 1
+            else:
+                configured = retention_cfg.get(label)
+                if configured and count != configured:
                     lg["count_mismatches"].append({
                         "dataset": ds,
                         "actual": count,
