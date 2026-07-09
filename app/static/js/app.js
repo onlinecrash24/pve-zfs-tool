@@ -1331,7 +1331,10 @@ async function upgradePool(pool) {
 async function viewDatasets() {
     if (!requireHost()) return;
     setContent(loading());
-    const datasets = await API.get(`/api/datasets?host=${currentHost}`);
+    const [datasets, asMap] = await Promise.all([
+        API.get(`/api/datasets?host=${currentHost}`),
+        API.get(`/api/auto-snapshot/map?host=${currentHost}`),
+    ]);
 
     const filesystems = datasets.filter(ds => ds.type === "filesystem");
     const volumes = datasets.filter(ds => ds.type === "volume");
@@ -1354,7 +1357,8 @@ async function viewDatasets() {
         fsTable.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("name")), h("th", {}, t("used")),
             h("th", {}, t("avail")), h("th", {}, t("refer")), h("th", {}, t("compress")),
-            h("th", {}, t("ratio")), h("th", {}, t("mountpoint") || "Mountpoint"), h("th", {}, t("actions")),
+            h("th", {}, t("ratio")), h("th", {}, t("mountpoint") || "Mountpoint"),
+            h("th", {}, t("as_col")), h("th", {}, t("actions")),
         ])));
         const fsTbody = h("tbody");
         for (const ds of filesystems) {
@@ -1366,6 +1370,7 @@ async function viewDatasets() {
             tr.appendChild(h("td", {}, ds.compression));
             tr.appendChild(h("td", {}, ds.compressratio));
             tr.appendChild(h("td", { style: "font-size:12px;color:var(--text-secondary)" }, ds.mountpoint || "-"));
+            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name]));
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
@@ -1389,7 +1394,7 @@ async function viewDatasets() {
         volTable.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("name")), h("th", {}, t("used")),
             h("th", {}, t("avail")), h("th", {}, t("refer")), h("th", {}, t("compress")),
-            h("th", {}, t("ratio")), h("th", {}, t("actions")),
+            h("th", {}, t("ratio")), h("th", {}, t("as_col")), h("th", {}, t("actions")),
         ])));
         const volTbody = h("tbody");
         for (const ds of volumes) {
@@ -1400,6 +1405,7 @@ async function viewDatasets() {
             tr.appendChild(h("td", {}, ds.refer));
             tr.appendChild(h("td", {}, ds.compression));
             tr.appendChild(h("td", {}, ds.compressratio));
+            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name]));
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
@@ -1423,16 +1429,81 @@ async function showDatasetProps(ds) {
     openModal(`${t("properties")}: ${ds}`, `<pre class="output">${escapeHtml(r.stdout || r.stderr || t("no_data"))}</pre>`);
 }
 
+// Per-dataset com.sun:auto-snapshot control. Distinguishes local overrides
+// from inherited values: for an inherited value only the meaningful override
+// (the opposite) is offered (no no-op same-value button), guarded by a
+// confirm because it breaks inheritance; a local value can be toggled or
+// reset to inherit.
+function _autoSnapCell(name, info) {
+    info = info || { value: "-", source: "-" };
+    const val = info.value;                 // "true" | "false" | "-"
+    const src = info.source || "-";         // "local" | "inherited from X" | "-"
+    const isLocal = src === "local" || src === "received";
+    const isInherited = src.indexOf("inherited") === 0 || src === "default";
+
+    const td = h("td", { style: "white-space:nowrap" });
+    let chipCls = "badge-stopped", chipTxt = t("as_notset");
+    if (val === "true") { chipCls = "badge-success"; chipTxt = t("as_on"); }
+    else if (val === "false") { chipCls = "badge-danger"; chipTxt = t("as_off"); }
+    const head = h("div", { style: "display:flex;align-items:center;gap:4px" }, [
+        h("span", { className: "badge " + chipCls }, chipTxt),
+    ]);
+    if (isInherited && (val === "true" || val === "false"))
+        head.appendChild(h("span", { style: "font-size:10px;color:var(--text-secondary)" }, t("as_inherited")));
+    else if (isLocal)
+        head.appendChild(h("span", { style: "font-size:10px;color:var(--text-secondary)" }, t("as_local")));
+    td.appendChild(head);
+
+    const bg = h("div", { className: "btn-group", style: "margin-top:4px" });
+    const mk = (label, cls, fn) => h("button", { className: "btn btn-sm " + cls, onClick: fn }, label);
+    if (isLocal) {
+        if (val === "true") bg.appendChild(mk(t("as_set_off"), "btn-danger", () => setAutoSnap(name, "false")));
+        else if (val === "false") bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
+        bg.appendChild(mk(t("as_inherit"), "", () => setAutoSnap(name, "inherit")));
+    } else if (isInherited && val === "true") {
+        bg.appendChild(mk(t("as_override_off"), "btn-danger",
+            () => setAutoSnap(name, "false", t("as_confirm_override", name, "true", "false"))));
+    } else if (isInherited && val === "false") {
+        bg.appendChild(mk(t("as_override_on"), "btn-success",
+            () => setAutoSnap(name, "true", t("as_confirm_override", name, "false", "true"))));
+    } else {
+        // not set anywhere -> a local value breaks nothing, offer both
+        bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
+        bg.appendChild(mk(t("as_set_off"), "btn-danger", () => setAutoSnap(name, "false")));
+    }
+    td.appendChild(bg);
+    return td;
+}
+
+async function setAutoSnap(ds, value, confirmMsg) {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    const r = await API.post("/api/auto-snapshot/set", { host: currentHost, dataset: ds, value });
+    toast(r.success ? t("as_saved", ds) : (r.stderr || r.error || t("failed")),
+          r.success ? "success" : "error");
+    viewDatasets();
+}
+
 function showCreateDatasetForm() {
     openModal(t("create_dataset"), `
         <div class="form-group"><label>${escapeHtml(t("dataset_name"))}</label><input class="form-control" id="new-ds-name" placeholder="rpool/data/new-dataset"></div>
         <div class="form-group"><label>${escapeHtml(t("compression_optional"))}</label><input class="form-control" id="new-ds-compress" placeholder="lz4"></div>
+        <div class="form-group"><label>${escapeHtml(t("as_col"))} (com.sun:auto-snapshot)</label>
+            <select class="form-control" id="new-ds-autosnap">
+                <option value="">${escapeHtml(t("as_inherit_opt"))}</option>
+                <option value="true">${escapeHtml(t("as_on"))}</option>
+                <option value="false">${escapeHtml(t("as_off"))}</option>
+            </select></div>
     `, async () => {
         const name = document.getElementById("new-ds-name").value.trim();
         if (!name) { toast(t("name_required"), "error"); return; }
         const compress = document.getElementById("new-ds-compress").value.trim();
-        const opts = compress ? { compression: compress } : null;
-        const r = await API.post("/api/datasets/create", { host: currentHost, name, options: opts });
+        const autosnap = document.getElementById("new-ds-autosnap").value;
+        const opts = {};
+        if (compress) opts.compression = compress;
+        if (autosnap) opts["com.sun:auto-snapshot"] = autosnap;
+        const r = await API.post("/api/datasets/create", {
+            host: currentHost, name, options: Object.keys(opts).length ? opts : null,
+        });
         toast(r.success ? t("dataset_created") : (r.stderr || t("failed")), r.success ? "success" : "error");
         closeModal();
         viewDatasets();

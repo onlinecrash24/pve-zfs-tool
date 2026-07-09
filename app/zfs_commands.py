@@ -811,6 +811,38 @@ def set_auto_snapshot(host, dataset, enabled=True, label=None):
     return result
 
 
+def inherit_auto_snapshot(host, dataset, label=None):
+    """Remove the LOCAL com.sun:auto-snapshot override so the dataset inherits
+    from its parent/pool again (``zfs inherit``)."""
+    try:
+        dataset = validate_dataset_name(dataset)
+        if label and not re.match(r'^[a-zA-Z0-9_-]+$', label):
+            raise ValueError("Invalid auto-snapshot label")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
+    prop = "com.sun:auto-snapshot" + (f":{label}" if label else "")
+    result = run_command(host, f"zfs inherit {prop} {dataset}")
+    if result.get("success"):
+        _invalidate(host)
+    return result
+
+
+def get_autosnap_map(host):
+    """{dataset: {"value": str, "source": str}} for com.sun:auto-snapshot over
+    all filesystems + volumes in one call, so the Datasets view can render the
+    per-dataset control (value + local/inherited) without N round-trips."""
+    r = run_command(host,
+                    "zfs get -H -o name,value,source com.sun:auto-snapshot -t filesystem,volume 2>/dev/null",
+                    cache_ttl=_TTL_SHORT)
+    out = {}
+    if r.get("success"):
+        for line in r["stdout"].splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                out[parts[0]] = {"value": parts[1], "source": parts[2]}
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Proxmox VM/CT helpers
 # ---------------------------------------------------------------------------

@@ -643,18 +643,38 @@ def api_auto_snap_prop():
     return jsonify({"dataset": ds, "value": prop["value"], "source": prop["source"]})
 
 
+@app.route("/api/auto-snapshot/map")
+def api_auto_snap_map():
+    from app.zfs_commands import get_autosnap_map
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(get_autosnap_map(host))
+
+
 @app.route("/api/auto-snapshot/set", methods=["POST"])
 def api_set_auto_snap():
     data = request.json
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    enabled = data.get("enabled", True)
     label = data.get("label")
-    result = set_auto_snapshot(host, data["dataset"], enabled=enabled, label=label)
-    audit_log("auto_snapshot.set", target=data["dataset"], host=host["address"],
+    dataset = data["dataset"]
+    # New: value in {"true","false","inherit"}. Legacy: enabled bool.
+    value = data.get("value")
+    if value == "inherit":
+        from app.zfs_commands import inherit_auto_snapshot
+        result = inherit_auto_snapshot(host, dataset, label=label)
+        enabled = "inherit"
+    else:
+        if value in ("true", "false"):
+            enabled = value == "true"
+        else:
+            enabled = data.get("enabled", True)
+        result = set_auto_snapshot(host, dataset, enabled=enabled, label=label)
+    audit_log("auto_snapshot.set", target=dataset, host=host["address"],
               success=result.get("success", False),
-              details={"enabled": enabled, "label": label})
+              details={"value": value or enabled, "label": label})
     return jsonify(result)
 
 
@@ -1076,18 +1096,14 @@ def api_snapshot_check():
 def api_snapshot_tags_get():
     """Discovered snapshot tags on the host + the saved per-host selection."""
     from app.zfs_commands import discover_snapshot_tags
-    from app.snaptags import load_tag_selection, DEFAULT_TAGS
+    from app.snaptags import load_tag_selection, visible_tags
     host, err, code = _require_host()
     if err:
         return err, code
     counts = discover_snapshot_tags(host)
     selection = load_tag_selection(host["address"])
-    selected = set(selection) if selection is not None else set(DEFAULT_TAGS)
-    # Show every discovered tag, plus selected/default tags even at count 0.
-    tags = sorted(set(counts) | selected)
     return jsonify({
-        "tags": [{"tag": tg, "count": counts.get(tg, 0), "selected": tg in selected}
-                 for tg in tags],
+        "tags": visible_tags(counts, selection),
         "custom_selection": selection is not None,
     })
 

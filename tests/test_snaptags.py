@@ -89,6 +89,38 @@ def test_invalid_tags_dropped_on_save(tags_store):
     assert saved == ["ok-tag"]
 
 
+# --- visible_tags (only real tags shown, not blanket defaults) ------------
+
+def test_visible_tags_hides_zero_count_defaults():
+    # yearly/backup-zfs/bashclub-zfs (defaults, not present) must NOT appear
+    out = st.visible_tags({"daily": 310, "hourly": 2976}, None)
+    assert {t["tag"] for t in out} == {"daily", "hourly"}
+    assert all(t["selected"] for t in out)          # standard labels pre-checked
+
+
+def test_visible_tags_custom_tag_unchecked_by_default():
+    out = {t["tag"]: t for t in st.visible_tags({"daily": 5, "mybackup": 12}, None)}
+    assert out["daily"]["selected"] is True         # default label
+    assert out["mybackup"]["selected"] is False     # custom -> off until chosen
+    assert out["mybackup"]["count"] == 12
+
+
+def test_visible_tags_saved_selection_drives_checkboxes():
+    out = {t["tag"]: t for t in st.visible_tags({"daily": 5, "mybackup": 12}, ["mybackup"])}
+    assert out["mybackup"]["selected"] is True
+    assert out["daily"]["selected"] is False
+
+
+def test_visible_tags_keeps_selected_tag_even_at_zero():
+    # a saved tag whose snapshots are all gone stays toggleable
+    out = {t["tag"]: t for t in st.visible_tags({"daily": 5}, ["daily", "gone"])}
+    assert "gone" in out and out["gone"]["count"] == 0 and out["gone"]["selected"] is True
+
+
+def test_visible_tags_empty_when_nothing_discovered():
+    assert st.visible_tags({}, None) == []
+
+
 # --- integration: get_snapshot_ages respects the selection ----------------
 
 def test_snapshot_ages_uses_selected_tags(tags_store, monkeypatch):

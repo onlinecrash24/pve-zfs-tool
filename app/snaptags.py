@@ -123,3 +123,17 @@ def save_tag_selection(address: str, tags) -> List[str]:
 
 def effective_tags(address: str) -> List[str]:
     return load_tag_selection(address) or list(DEFAULT_TAGS)
+
+
+def visible_tags(counts: Dict[str, int], selection: Optional[List[str]]):
+    """Tags to offer in the selection UI as ``[{tag, count, selected}]``.
+
+    Only tags that actually exist on the host are shown (discovered, count>0),
+    plus any explicitly saved tag so a now-empty saved tag stays toggleable.
+    The blanket default tags are NOT listed at count 0 -- suggesting labels
+    that don't exist on the host is just clutter. Checkbox state comes from
+    the saved selection, or DEFAULT_TAGS membership when nothing is saved."""
+    checked = set(selection) if selection is not None else set(DEFAULT_TAGS)
+    shown = set(counts) | (set(selection) if selection is not None else set())
+    return [{"tag": tg, "count": counts.get(tg, 0), "selected": tg in checked}
+            for tg in sorted(shown)]
