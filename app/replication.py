@@ -196,6 +196,7 @@ def get_status(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, 
         "version": None,
         "is_pve": False,
         "pve_version": None,
+        "repo_present": False,
         "config_exists": False,
         "config": None,
         "config_path": cfg_path,
@@ -207,6 +208,13 @@ def get_status(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, 
     pve = is_pve_host(host)
     out["is_pve"] = pve["is_pve"]
     out["pve_version"] = pve["version"]
+
+    # bashclub APT repo configured? (modern .sources or legacy .list)
+    r = run_command(host,
+                    "{ [ -s /etc/apt/sources.list.d/bashclub.sources ] || "
+                    "[ -s /etc/apt/sources.list.d/bashclub.list ]; } && echo __REPO__ || true",
+                    timeout=10)
+    out["repo_present"] = "__REPO__" in (r.get("stdout") or "")
 
     # Installed?
     r = run_command(host, f"command -v {BINARY_NAME} 2>/dev/null && {BINARY_NAME} -v 2>/dev/null | head -n 1", timeout=10)
