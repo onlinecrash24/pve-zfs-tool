@@ -1891,6 +1891,29 @@ async function renderRetentionEditor(mount) {
     if (!data.installed) {
         mount.innerHTML = "";
         mount.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("retention_not_installed")));
+        const installBtn = h("button", { className: "btn btn-primary btn-sm" }, t("autosnap_install_btn"));
+        const status = h("span", { style: "margin-left:10px;font-size:12px;color:var(--text-secondary)" });
+        installBtn.onclick = async () => {
+            if (!confirm(t("autosnap_install_confirm"))) return;
+            installBtn.disabled = true;
+            status.textContent = t("autosnap_installing");
+            try {
+                const r = await API.post("/api/auto-snapshot/install?host=" + encodeURIComponent(currentHost), {});
+                if (r.success) {
+                    toast(r.already ? t("autosnap_install_already") : t("autosnap_install_ok"), "success");
+                    renderRetentionEditor(mount);   // reload -> now shows the table
+                } else {
+                    installBtn.disabled = false;
+                    status.textContent = "";
+                    toast(t("autosnap_install_failed") + " " + ((r.stderr || "").trim().slice(0, 200)), "error");
+                }
+            } catch (e) {
+                installBtn.disabled = false;
+                status.textContent = "";
+                toast(t("autosnap_install_failed") + " " + (e.message || ""), "error");
+            }
+        };
+        mount.appendChild(h("div", { style: "margin-top:10px" }, [installBtn, status]));
         return;
     }
 

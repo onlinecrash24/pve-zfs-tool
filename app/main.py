@@ -721,6 +721,20 @@ def api_auto_snap_retention_set():
     return jsonify(result)
 
 
+@app.route("/api/auto-snapshot/install", methods=["POST"])
+@login_required
+def api_auto_snap_install():
+    """Install the zfs-auto-snapshot package on the host (idempotent)."""
+    from app.autosnap import install
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    result = install(host)
+    audit_log("auto_snapshot.install", target="zfs-auto-snapshot", host=host["address"],
+              success=result.get("success", False))
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # API: Host config backups
 # ---------------------------------------------------------------------------

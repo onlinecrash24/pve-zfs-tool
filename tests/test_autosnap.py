@@ -112,3 +112,25 @@ def test_update_only_touches_matching_label():
     out = a.update_level_content(content, "hourly", keep=12)
     assert "--label=hourly --keep=12" in out
     assert "--label=daily --keep=31" in out  # untouched
+
+
+# --- install script -------------------------------------------------------
+
+def test_install_script_installs_the_debian_package():
+    s = a._build_install_script()
+    # plain apt install of the stock Debian package -- no extra repo/key
+    assert "apt-get install -y zfs-auto-snapshot" in s
+    assert "bashclub" not in s and "sources.list" not in s
+
+
+def test_install_script_update_is_non_fatal():
+    # a broken foreign repo must not abort the install
+    s = a._build_install_script()
+    assert "apt-get update -qq || true" in s
+
+
+def test_install_script_is_idempotent():
+    # already-present binary short-circuits before apt runs
+    s = a._build_install_script()
+    assert "command -v zfs-auto-snapshot" in s
+    assert "__ALREADY__" in s

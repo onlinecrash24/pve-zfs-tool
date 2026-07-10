@@ -248,3 +248,51 @@ def set_retention(host: Dict[str, Any], changes: List[Dict[str, Any]]) -> Dict[s
         })
 
     return {"success": all_ok, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Package install
+# ---------------------------------------------------------------------------
+
+def _build_install_script() -> str:
+    """Remote bash that installs the ``zfs-auto-snapshot`` Debian package.
+
+    Unlike bashclub-zsync, zfs-auto-snapshot ships in Debian ``main`` for both
+    bookworm (PVE 8) and trixie (PVE 9), so no extra repo or key is needed --
+    a plain ``apt-get install`` suffices. ``apt-get update`` is non-fatal so a
+    broken *foreign* repo (e.g. pve-enterprise without a subscription) can't
+    abort the install. Idempotent: if the binary is already present it reports
+    ``__ALREADY__`` and skips apt. Pure string so it can be asserted in tests.
+    """
+    return r"""
+set -e
+if command -v zfs-auto-snapshot >/dev/null 2>&1; then
+  echo __ALREADY__
+  command -v zfs-auto-snapshot
+  exit 0
+fi
+DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y zfs-auto-snapshot
+command -v zfs-auto-snapshot
+""".strip()
+
+
+def install(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Install the zfs-auto-snapshot package via apt (idempotent).
+
+    On success the host's cron files (frequent/hourly/daily/weekly/monthly)
+    exist with the package defaults, so :func:`get_retention` populates the
+    editor on the next load.
+    """
+    script = _build_install_script()
+    # `bash -s` over SSH so we don't have to re-quote the multi-line script.
+    cmd = f"bash -s <<'EOF'\n{script}\nEOF"
+    r = run_command(host, cmd, timeout=180)
+    stdout = r.get("stdout", "") or ""
+    ok = bool(r.get("success")) and "zfs-auto-snapshot" in stdout
+    return {
+        "success": ok,
+        "already": "__ALREADY__" in stdout,
+        "stdout": stdout,
+        "stderr": (r.get("stderr", "") or ""),
+    }
