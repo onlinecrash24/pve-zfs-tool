@@ -128,6 +128,14 @@ def _sample_and_monitor(host):
     except Exception:
         reachable = False
 
+    # Capture the WOL MAC once while the host is up (needed to wake it later)
+    if reachable:
+        try:
+            from app.wol import ensure_host_mac
+            ensure_host_mac(host)
+        except Exception:
+            pass
+
     pools = []
     pools_valid = False   # True only when `zpool list` itself succeeded
     if reachable:

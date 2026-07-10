@@ -1,0 +1,28 @@
+# Enforce LF line endings for text files in the repository.
+# Windows working copies still get CRLF via core.autocrlf; this only fixes
+# how files are STORED, so diffs stop flipping whole files on line endings.
+* text=auto eol=lf
+
+# Shell scripts MUST be LF (CRLF breaks the shebang in the Docker image).
+*.sh   text eol=lf
+entrypoint.sh text eol=lf
+
+# Explicit for the main source types (belt and suspenders).
+*.py   text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Binary assets -- never normalize.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff  binary
+*.woff2 binary
+*.pdf  binary

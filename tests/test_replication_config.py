@@ -122,6 +122,62 @@ def test_install_script_apt_update_is_non_fatal():
     assert "apt-get update -qq || true" in s
 
 
+# --- probe_ssh_trust (setup pre-flight) ------------------------------------
+
+def _probe_hosts():
+    return ({"address": "10.0.0.2"},               # target
+            {"address": "10.0.0.1", "port": 2222, "user": "root"})  # source
+
+
+def test_probe_ok(monkeypatch):
+    captured = {}
+
+    def fake_run(host, cmd, timeout=30, **kw):
+        captured["cmd"] = cmd
+        return {"success": True, "stdout": "__PROBE_OK__\n", "stderr": ""}
+
+    monkeypatch.setattr(r, "run_command", fake_run)
+    tgt, src = _probe_hosts()
+    res = r.probe_ssh_trust(tgt, src)
+    assert res["probe_ok"] is True
+    # non-interactive + strict host key + custom port respected
+    assert "BatchMode=yes" in captured["cmd"]
+    assert "StrictHostKeyChecking=yes" in captured["cmd"]
+    assert "-p 2222" in captured["cmd"]
+    assert "root@10.0.0.1" in captured["cmd"]
+
+
+def test_get_status_reports_repo_presence(monkeypatch):
+    def fake_run(host, cmd, timeout=30, **kw):
+        if "bashclub.sources" in cmd:
+            return {"success": True, "stdout": "__REPO__\n", "stderr": ""}
+        if "pveversion" in cmd:
+            return {"success": True, "stdout": "pve-manager/8.4.1/abc (running kernel: 6.8)", "stderr": ""}
+        return {"success": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(r, "run_command", fake_run)
+    st = r.get_status({"address": "1.2.3.4"})
+    assert st["repo_present"] is True
+    assert st["is_pve"] is True
+
+
+def test_get_status_repo_absent(monkeypatch):
+    monkeypatch.setattr(r, "run_command",
+                        lambda h, c, timeout=30, **k: {"success": True, "stdout": "", "stderr": ""})
+    st = r.get_status({"address": "1.2.3.4"})
+    assert st["repo_present"] is False
+
+
+def test_probe_failure_reports_output(monkeypatch):
+    monkeypatch.setattr(r, "run_command",
+                        lambda h, c, timeout=30, **k: {"success": False, "stdout": "",
+                                                       "stderr": "Permission denied (publickey)"})
+    tgt, src = _probe_hosts()
+    res = r.probe_ssh_trust(tgt, src)
+    assert res["probe_ok"] is False
+    assert "Permission denied" in res["output"]
+
+
 # --- zsync log path: upstream convention + legacy fallback ----------------
 
 def test_log_path_matches_upstream_convention():

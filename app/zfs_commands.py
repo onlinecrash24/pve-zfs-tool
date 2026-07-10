@@ -650,6 +650,24 @@ def get_zdb_analysis(host, pool_name):
 # ZFS-auto-snapshot
 # ---------------------------------------------------------------------------
 
+# --default-exclude / -e (any short cluster containing 'e' -- 'e' is the only
+# zfs-auto-snapshot short flag with that letter). In that mode only datasets
+# with com.sun:auto-snapshot=true are snapshotted; without it, all datasets
+# except those set to false are snapshotted (so "not set" = included).
+_DEFAULT_EXCLUDE_RE = re.compile(r'(?:^|\s)(?:--default-exclude|-[a-df-zA-DF-Z]*e[a-df-zA-DF-Z]*)(?=[\s=]|$)')
+
+
+def parse_default_exclude(cron_raw):
+    """True if any active zfs-auto-snapshot cron line uses --default-exclude/-e."""
+    for line in (cron_raw or "").splitlines():
+        s = line.strip()
+        if "zfs-auto-snapshot" not in s or s.startswith("#"):
+            continue
+        if _DEFAULT_EXCLUDE_RE.search(s):
+            return True
+    return False
+
+
 def get_auto_snapshot_status(host):
     result = run_command(host, "which zfs-auto-snapshot 2>/dev/null && echo INSTALLED || echo NOT_INSTALLED",
                          cache_ttl=_TTL_LONG)
@@ -683,6 +701,7 @@ def get_auto_snapshot_status(host):
         "installed": installed,
         "cron_config": cron_raw,
         "retention_policy": retention_policy,
+        "default_exclude": parse_default_exclude(cron_raw),
     }
 
 
@@ -698,9 +717,10 @@ def get_snapshot_ages(host):
     if not result["success"]:
         return {"datasets": {}, "manual": {}}
 
-    LABELS = ("frequent", "hourly", "daily", "weekly", "monthly", "yearly",
-              "backup-zfs", "bashclub-zfs")
-    label_re = re.compile("|".join(LABELS))
+    # Which tags count as auto-snapshot labels is per-host configurable
+    # (multiple replications bring multiple tags); default = historic set.
+    from app.snaptags import effective_tags, build_label_regex
+    label_re = build_label_regex(effective_tags(host.get("address", "")))
 
     datasets = {}
     manual = {}
@@ -763,6 +783,21 @@ def get_autosnap_disabled_datasets(host):
     return disabled
 
 
+def discover_snapshot_tags(host):
+    """Tag -> snapshot count across all snapshots on the host (for the
+    Snapshot Check tag-selection UI). Reuses the cached snapshot listing."""
+    from app.snaptags import discover_tags
+    result = run_command(host, "zfs list -t snapshot -Hpo name,creation", cache_ttl=_TTL_MED)
+    if not result.get("success"):
+        return {}
+    names = []
+    for line in result["stdout"].strip().splitlines():
+        parts = line.split("\t")
+        if parts and "@" in parts[0]:
+            names.append(parts[0].rsplit("@", 1)[1])
+    return discover_tags(names)
+
+
 def get_auto_snapshot_property(host, dataset):
     try:
         dataset = validate_dataset_name(dataset)
@@ -793,6 +828,38 @@ def set_auto_snapshot(host, dataset, enabled=True, label=None):
     if result.get("success"):
         _invalidate(host)
     return result
+
+
+def inherit_auto_snapshot(host, dataset, label=None):
+    """Remove the LOCAL com.sun:auto-snapshot override so the dataset inherits
+    from its parent/pool again (``zfs inherit``)."""
+    try:
+        dataset = validate_dataset_name(dataset)
+        if label and not re.match(r'^[a-zA-Z0-9_-]+$', label):
+            raise ValueError("Invalid auto-snapshot label")
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
+    prop = "com.sun:auto-snapshot" + (f":{label}" if label else "")
+    result = run_command(host, f"zfs inherit {prop} {dataset}")
+    if result.get("success"):
+        _invalidate(host)
+    return result
+
+
+def get_autosnap_map(host):
+    """{dataset: {"value": str, "source": str}} for com.sun:auto-snapshot over
+    all filesystems + volumes in one call, so the Datasets view can render the
+    per-dataset control (value + local/inherited) without N round-trips."""
+    r = run_command(host,
+                    "zfs get -H -o name,value,source com.sun:auto-snapshot -t filesystem,volume 2>/dev/null",
+                    cache_ttl=_TTL_SHORT)
+    out = {}
+    if r.get("success"):
+        for line in r["stdout"].splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                out[parts[0]] = {"value": parts[1], "source": parts[2]}
+    return out
 
 
 # ---------------------------------------------------------------------------

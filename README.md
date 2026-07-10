@@ -184,9 +184,11 @@
 - **Public Key Display** -- Shown on the home page with copy button (works on HTTP and HTTPS)
 - **Multiple Hosts** -- Add and manage multiple Proxmox VE nodes
 - **Connection Test** -- Verify SSH connectivity per host
+- **Wake-on-LAN** -- Wake an offline host from the Hosts view: the management NIC's MAC is captured automatically while the host is online; magic packets are sent from the container **and** relayed via every other reachable host (a bridged Docker network usually can't broadcast into the LAN, a sibling PVE node can)
 
 ### Host Config Backup
 - **Config-Level Snapshot** -- One-click backup of a Proxmox host's configuration (NOT VM disks): the `/etc/pve` cluster filesystem, network config (`interfaces`, `hosts`, `resolv.conf`), plus command captures (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs` state)
+- **NIC Naming Artifacts** -- Persistent-name rules (`udev *net*.rules`, systemd `.link` files) and a per-NIC identity capture (MAC, driver via `ethtool -i`, `udevadm` path) — a PVE major upgrade can rename interfaces, and this is exactly what you need to reconstruct the mapping
 - **Pulled Into the Tool** -- The archive is fetched into the data volume via SFTP and can be downloaded any time for a worst-case recovery
 - **Scheduled** -- Per-host daily/weekly/monthly schedule with a keep-N retention; a failed scheduled backup raises a `host_backup_failed` notification
 - **Secrets Opt-In** -- `/etc/pve/priv` (cluster CA private key etc.) is **excluded by default**; an explicit toggle includes it, with an in-UI warning that those archives are highly sensitive. All downloads are login-gated

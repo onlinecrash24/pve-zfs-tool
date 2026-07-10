@@ -699,6 +699,16 @@ async function viewHosts() {
                 className: "btn btn-sm btn-success",
                 onClick: () => testHost(host.address),
             }, t("test")));
+            // WOL: disabled until the async probe reports the host offline
+            const wolBtn = h("button", {
+                className: "btn btn-sm",
+                id: `wol-${host.address}`,
+                disabled: "disabled",
+                style: "opacity:0.4",
+                title: t("wol_only_offline"),
+                onClick: () => wakeHost(host.address),
+            }, t("wol_btn"));
+            btnGroup.appendChild(wolBtn);
             btnGroup.appendChild(h("button", {
                 className: "btn btn-sm",
                 onClick: () => openHostBackupModal(host),
@@ -795,13 +805,43 @@ async function _probeHostBadge(addr) {
     if (!el) return;
     el.textContent = t("testing");
     el.className = "badge badge-stopped";
+    let online = false;
     try {
         const r = await API.post("/api/hosts/test", { address: addr });
-        el.textContent = r.success ? t("online") : t("offline");
-        el.className = r.success ? "badge badge-online" : "badge badge-offline";
+        online = !!r.success;
+        el.textContent = online ? t("online") : t("offline");
+        el.className = online ? "badge badge-online" : "badge badge-offline";
     } catch (e) {
         el.textContent = t("offline");
         el.className = "badge badge-offline";
+    }
+    // WOL only makes sense for an offline host
+    const wolBtn = document.getElementById(`wol-${addr}`);
+    if (wolBtn) {
+        if (online) {
+            wolBtn.setAttribute("disabled", "disabled");
+            wolBtn.style.opacity = "0.4";
+            wolBtn.title = t("wol_only_offline");
+        } else {
+            wolBtn.removeAttribute("disabled");
+            wolBtn.style.opacity = "1";
+            wolBtn.title = t("wol_hint");
+        }
+    }
+}
+
+async function wakeHost(addr) {
+    const btn = document.getElementById(`wol-${addr}`);
+    if (btn) btn.setAttribute("disabled", "disabled");
+    const r = await API.post("/api/hosts/wol", { address: addr });
+    if (btn) btn.removeAttribute("disabled");
+    if (r && r.success) {
+        const relaysOk = (r.relays || []).filter(x => x.ok).length;
+        toast(t("wol_sent", String(relaysOk + (r.sent_local ? 1 : 0))), "success");
+        // Re-probe after a boot-ish delay so the badge flips by itself
+        setTimeout(() => _probeHostBadge(addr), 45000);
+    } else {
+        toast((r && r.error) || t("wol_failed"), "error");
     }
 }
 
@@ -1291,7 +1331,13 @@ async function upgradePool(pool) {
 async function viewDatasets() {
     if (!requireHost()) return;
     setContent(loading());
-    const datasets = await API.get(`/api/datasets?host=${currentHost}`);
+    const [datasets, asMap, asStatus] = await Promise.all([
+        API.get(`/api/datasets?host=${currentHost}`),
+        API.get(`/api/auto-snapshot/map?host=${currentHost}`),
+        API.get(`/api/auto-snapshot/status?host=${currentHost}`),
+    ]);
+    // Cron mode: without --default-exclude, "not set" datasets ARE snapshotted.
+    const asDefaultExclude = !!(asStatus && asStatus.default_exclude);
 
     const filesystems = datasets.filter(ds => ds.type === "filesystem");
     const volumes = datasets.filter(ds => ds.type === "volume");
@@ -1314,7 +1360,8 @@ async function viewDatasets() {
         fsTable.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("name")), h("th", {}, t("used")),
             h("th", {}, t("avail")), h("th", {}, t("refer")), h("th", {}, t("compress")),
-            h("th", {}, t("ratio")), h("th", {}, t("mountpoint") || "Mountpoint"), h("th", {}, t("actions")),
+            h("th", {}, t("ratio")), h("th", {}, t("mountpoint") || "Mountpoint"),
+            h("th", {}, t("as_col")), h("th", {}, t("actions")),
         ])));
         const fsTbody = h("tbody");
         for (const ds of filesystems) {
@@ -1326,6 +1373,7 @@ async function viewDatasets() {
             tr.appendChild(h("td", {}, ds.compression));
             tr.appendChild(h("td", {}, ds.compressratio));
             tr.appendChild(h("td", { style: "font-size:12px;color:var(--text-secondary)" }, ds.mountpoint || "-"));
+            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name], asDefaultExclude));
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
@@ -1349,7 +1397,7 @@ async function viewDatasets() {
         volTable.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("name")), h("th", {}, t("used")),
             h("th", {}, t("avail")), h("th", {}, t("refer")), h("th", {}, t("compress")),
-            h("th", {}, t("ratio")), h("th", {}, t("actions")),
+            h("th", {}, t("ratio")), h("th", {}, t("as_col")), h("th", {}, t("actions")),
         ])));
         const volTbody = h("tbody");
         for (const ds of volumes) {
@@ -1360,6 +1408,7 @@ async function viewDatasets() {
             tr.appendChild(h("td", {}, ds.refer));
             tr.appendChild(h("td", {}, ds.compression));
             tr.appendChild(h("td", {}, ds.compressratio));
+            tr.appendChild(_autoSnapCell(ds.name, asMap[ds.name], asDefaultExclude));
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showDatasetProps(ds.name) }, t("properties")));
@@ -1383,16 +1432,84 @@ async function showDatasetProps(ds) {
     openModal(`${t("properties")}: ${ds}`, `<pre class="output">${escapeHtml(r.stdout || r.stderr || t("no_data"))}</pre>`);
 }
 
+// Per-dataset com.sun:auto-snapshot control. Distinguishes local overrides
+// from inherited values: for an inherited value only the meaningful override
+// (the opposite) is offered (no no-op same-value button), guarded by a
+// confirm because it breaks inheritance; a local value can be toggled or
+// reset to inherit.
+function _autoSnapCell(name, info, defaultExclude) {
+    info = info || { value: "-", source: "-" };
+    const val = info.value;                 // "true" | "false" | "-"
+    const src = info.source || "-";         // "local" | "inherited from X" | "-"
+    const isLocal = src === "local" || src === "received";
+    const isInherited = src.indexOf("inherited") === 0 || src === "default";
+    const isSet = val === "true" || val === "false";
+    // Effective behavior: explicit value if set, else the cron default
+    // (opt-out mode = snapshotted; --default-exclude = not).
+    const effOn = isSet ? (val === "true") : !defaultExclude;
+
+    const td = h("td", { style: "white-space:nowrap" });
+    const chip = h("span", { className: "badge " + (effOn ? "badge-success" : "badge-danger") },
+        effOn ? t("as_on") : t("as_off"));
+    const head = h("div", { style: "display:flex;align-items:center;gap:4px" }, [chip]);
+    const marker = (txt, title) => h("span",
+        { style: "font-size:10px;color:var(--text-secondary)", title: title || "" }, txt);
+    if (!isSet) head.appendChild(marker(t("as_default"), t("as_default_hint")));
+    else if (isInherited) head.appendChild(marker(t("as_inherited")));
+    else if (isLocal) head.appendChild(marker(t("as_local")));
+    td.appendChild(head);
+
+    const bg = h("div", { className: "btn-group", style: "margin-top:4px" });
+    const mk = (label, cls, fn) => h("button", { className: "btn btn-sm " + cls, onClick: fn }, label);
+    if (isSet && isLocal) {
+        // local override -> toggle to the opposite + reset to inherit
+        if (val === "true") bg.appendChild(mk(t("as_set_off"), "btn-danger", () => setAutoSnap(name, "false")));
+        else bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
+        bg.appendChild(mk(t("as_inherit"), "", () => setAutoSnap(name, "inherit")));
+    } else if (isSet && isInherited && val === "true") {
+        bg.appendChild(mk(t("as_override_off"), "btn-danger",
+            () => setAutoSnap(name, "false", t("as_confirm_override", name, "true", "false"))));
+    } else if (isSet && isInherited && val === "false") {
+        bg.appendChild(mk(t("as_override_on"), "btn-success",
+            () => setAutoSnap(name, "true", t("as_confirm_override", name, "false", "true"))));
+    } else {
+        // not set -> only offer the action that actually changes behavior
+        if (effOn) bg.appendChild(mk(t("as_set_off"), "btn-danger", () => setAutoSnap(name, "false")));
+        else bg.appendChild(mk(t("as_set_on"), "btn-success", () => setAutoSnap(name, "true")));
+    }
+    td.appendChild(bg);
+    return td;
+}
+
+async function setAutoSnap(ds, value, confirmMsg) {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    const r = await API.post("/api/auto-snapshot/set", { host: currentHost, dataset: ds, value });
+    toast(r.success ? t("as_saved", ds) : (r.stderr || r.error || t("failed")),
+          r.success ? "success" : "error");
+    viewDatasets();
+}
+
 function showCreateDatasetForm() {
     openModal(t("create_dataset"), `
         <div class="form-group"><label>${escapeHtml(t("dataset_name"))}</label><input class="form-control" id="new-ds-name" placeholder="rpool/data/new-dataset"></div>
         <div class="form-group"><label>${escapeHtml(t("compression_optional"))}</label><input class="form-control" id="new-ds-compress" placeholder="lz4"></div>
+        <div class="form-group"><label>${escapeHtml(t("as_col"))} (com.sun:auto-snapshot)</label>
+            <select class="form-control" id="new-ds-autosnap">
+                <option value="">${escapeHtml(t("as_inherit_opt"))}</option>
+                <option value="true">${escapeHtml(t("as_on"))}</option>
+                <option value="false">${escapeHtml(t("as_off"))}</option>
+            </select></div>
     `, async () => {
         const name = document.getElementById("new-ds-name").value.trim();
         if (!name) { toast(t("name_required"), "error"); return; }
         const compress = document.getElementById("new-ds-compress").value.trim();
-        const opts = compress ? { compression: compress } : null;
-        const r = await API.post("/api/datasets/create", { host: currentHost, name, options: opts });
+        const autosnap = document.getElementById("new-ds-autosnap").value;
+        const opts = {};
+        if (compress) opts.compression = compress;
+        if (autosnap) opts["com.sun:auto-snapshot"] = autosnap;
+        const r = await API.post("/api/datasets/create", {
+            host: currentHost, name, options: Object.keys(opts).length ? opts : null,
+        });
         toast(r.success ? t("dataset_created") : (r.stderr || t("failed")), r.success ? "success" : "error");
         closeModal();
         viewDatasets();
@@ -1861,6 +1978,59 @@ async function renderRetentionEditor(mount) {
 
 
 // -- Snapshot Check -------------------------------------------------------
+async function renderSnapshotTagSelector(mount) {
+    let data;
+    try {
+        data = await API.get(`/api/snapshot-tags?host=${currentHost}`);
+    } catch (e) {
+        data = null;
+    }
+    mount.innerHTML = "";
+    const tags = (data && data.tags) || [];
+    if (!tags.length) {
+        mount.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("no_data")));
+        return;
+    }
+    mount.appendChild(h("p", {
+        style: "color:var(--text-secondary);font-size:13px;margin-bottom:10px"
+    }, t("snap_tags_hint")));
+
+    const row = h("div", { style: "display:flex;flex-wrap:wrap;gap:10px 18px;margin-bottom:12px" });
+    const boxes = [];
+    for (const entry of tags) {
+        const cb = h("input", { type: "checkbox" });
+        cb.checked = !!entry.selected;
+        boxes.push([entry.tag, cb]);
+        const label = h("label", { style: "display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px" }, [
+            cb,
+            h("span", { style: "font-family:monospace" }, entry.tag),
+            h("span", { className: "badge badge-stopped", title: t("snap_tags_count") }, String(entry.count)),
+        ]);
+        row.appendChild(label);
+    }
+    mount.appendChild(row);
+
+    const saveBtn = h("button", { className: "btn btn-primary btn-sm" }, t("save"));
+    saveBtn.addEventListener("click", async () => {
+        const selected = boxes.filter(([, cb]) => cb.checked).map(([tag]) => tag);
+        saveBtn.setAttribute("disabled", "disabled");
+        const r = await API.post("/api/snapshot-tags", { host: currentHost, tags: selected });
+        saveBtn.removeAttribute("disabled");
+        if (r && r.success) {
+            toast(t("snap_tags_saved"), "success");
+            viewSnapshotCheck();   // re-run the analysis with the new selection
+        } else {
+            toast((r && r.error) || t("snap_tags_save_failed"), "error");
+        }
+    });
+    mount.appendChild(saveBtn);
+    if (data.custom_selection) {
+        mount.appendChild(h("span", {
+            style: "margin-left:10px;font-size:12px;color:var(--text-secondary)"
+        }, t("snap_tags_custom_active")));
+    }
+}
+
 async function viewSnapshotCheck() {
     if (!requireHost()) return;
     setContent(loading());
@@ -1882,6 +2052,15 @@ async function viewSnapshotCheck() {
     // Load + render the editable retention table asynchronously so the rest
     // of the Snapshot Check view paints immediately.
     renderRetentionEditor(policyBody);
+
+    // Snapshot tags — which naming tags count as auto-labels for this check
+    // (users with several replications have several tags). Async like above.
+    const tagsCard = h("div", { className: "card", style: "margin-top:16px" });
+    tagsCard.appendChild(h("div", { className: "card-header" }, t("snap_tags_title")));
+    const tagsBody = h("div", { className: "card-body" }, loading());
+    tagsCard.appendChild(tagsBody);
+    container.appendChild(tagsCard);
+    renderSnapshotTagSelector(tagsBody);
 
     // Per-Label Status, in the same order as the retention table above
     // (frequent -> monthly); unknown labels follow alphabetically.
@@ -1945,11 +2124,11 @@ async function viewSnapshotCheck() {
             );
             body.appendChild(tbl);
         }
-        // Replica datasets (com.sun:auto-snapshot=false) are excluded from the
-        // count comparison -- their snapshot counts follow the source host.
-        if (info.count_mismatch_excluded > 0) {
+        // Datasets with com.sun:auto-snapshot=false are excluded from the
+        // count check at every level (counts follow the source / a manual set).
+        if (info.excluded_datasets > 0) {
             body.appendChild(h("p", { style: "color:var(--text-secondary);font-size:12px;margin-top:8px" },
-                t("count_mismatch_excluded", String(info.count_mismatch_excluded))));
+                t("excluded_datasets_hint", String(info.excluded_datasets))));
         }
 
         if (!hasIssues) {
@@ -3788,26 +3967,57 @@ async function viewReplication() {
         // Status badges — show PVE + zsync status for BOTH hosts
         const mkPveBadge = (label, st) => {
             const cls = st.is_pve ? "badge-success" : "badge-danger";
-            const txt = (st.is_pve ? "\u2713 " : "\u2717 ") + label + " PVE" + (st.pve_version ? " (" + (st.pve_version.split(/\s+/)[1] || "") + ")" : "");
+            // pveversion output: "pve-manager/8.4.1/abc (running kernel: ...)"
+            // -> show just the bare version number (was: split[1] => "((running")
+            const ver = (st.pve_version && (st.pve_version.match(/\/(\d+[\d.]*)/) || [])[1]) || "";
+            const txt = (st.is_pve ? "\u2713 " : "\u2717 ") + label + " PVE" + (ver ? " " + ver : "");
             return h("span", { className: "badge " + cls, title: st.pve_version || "" }, txt);
         };
+        const mkRepoBadge = (label, st) => {
+            const ok = !!st.repo_present;
+            return h("span", { className: "badge " + (ok ? "badge-success" : "badge-danger") },
+                (ok ? "\u2713 " : "\u2717 ") + label + " " + t("repl_repo") + ": " + (ok ? t("repl_repo_present") : t("repl_repo_missing")));
+        };
         const mkZsyncBadge = (label, st) => {
-            const cls = st.installed ? "badge-success" : "badge-warning";
+            const cls = st.installed ? "badge-success" : "badge-danger";
             return h("span", { className: "badge " + cls },
-                (st.installed ? "\u2713 " : "") + label + " " + t("repl_setup_zsync") + ": " + (st.installed ? t("repl_installed") : t("repl_not_installed")));
+                (st.installed ? "\u2713 " : "\u2717 ") + label + " " + t("repl_setup_zsync") + ": " + (st.installed ? t("repl_installed") : t("repl_not_installed")));
         };
         const srcLabel = "[" + t("repl_source_short") + "]";
         const tgtLabel = "[" + t("repl_target_short") + "]";
         const badgeRow = h("div", { style: "display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap" });
         badgeRow.appendChild(mkPveBadge(srcLabel, srcStatus));
         badgeRow.appendChild(mkPveBadge(tgtLabel, status));
+        badgeRow.appendChild(mkRepoBadge(srcLabel, srcStatus));
+        badgeRow.appendChild(mkRepoBadge(tgtLabel, status));
         const zsyncBadgeSrc = mkZsyncBadge(srcLabel, srcStatus);
         const zsyncBadge = mkZsyncBadge(tgtLabel, status);
         badgeRow.appendChild(zsyncBadgeSrc);
         badgeRow.appendChild(zsyncBadge);
-        const sshBadgeWrap = h("span", {}); // filled after probe
+        const sshBadgeWrap = h("span", {}); // pre-flight probe fills this
         badgeRow.appendChild(sshBadgeWrap);
         setupBody.appendChild(badgeRow);
+
+        // Pre-flight: does passwordless SSH target->source already work?
+        // Drives the green/red badge AND lets the setup button skip the
+        // bootstrap when trust is already established.
+        let sshTrustOk = null;   // null = unknown (probe pending or errored)
+        const sshDir = "SSH " + tgtLabel + "→" + srcLabel + ": ";
+        const fillSshBadge = () => {
+            sshBadgeWrap.innerHTML = "";
+            const cls = sshTrustOk === true ? "badge-success" : (sshTrustOk === false ? "badge-danger" : "badge-stopped");
+            const icon = sshTrustOk === true ? "✓ " : (sshTrustOk === false ? "✗ " : "⋯ ");
+            sshBadgeWrap.appendChild(h("span", { className: "badge " + cls },
+                icon + sshDir + (sshTrustOk === true ? t("repl_ssh_ok") : (sshTrustOk === false ? t("repl_ssh_not_ok") : "…"))));
+        };
+        fillSshBadge();
+        (async () => {
+            try {
+                const p = await API.post("/api/replication/ssh-probe", { target: tgt.address, source: src.address });
+                sshTrustOk = !!(p && p.probe_ok);
+            } catch (e) { sshTrustOk = null; }
+            fillSshBadge();
+        })();
 
         // Warn if either host isn't PVE
         if (!srcStatus.is_pve || !status.is_pve) {
@@ -3836,9 +4046,14 @@ async function viewReplication() {
                 ]));
             };
 
-            // Step A: install on BOTH hosts (zsync needs to be on both ends)
+            // Step A: install on BOTH hosts (zsync needs to be on both ends).
+            // Already-installed hosts are skipped (green pre-check badge).
+            let installedSomething = false;
             const installOn = async (label, hostAddr, statusRef, badge) => {
-                if (statusRef.installed) return true;
+                if (statusRef.installed) {
+                    addStep(t("repl_setup_step_install") + " " + label + " — " + t("repl_installed"), "ok");
+                    return true;
+                }
                 setupBtn.textContent = t("repl_installing") + " " + label;
                 addStep(t("repl_setup_step_install") + " " + label, "pending");
                 try {
@@ -3850,6 +4065,7 @@ async function viewReplication() {
                         return false;
                     }
                     statusRef.installed = true;
+                    installedSomething = true;
                     badge.className = "badge badge-success";
                     badge.textContent = "\u2713 " + label + " " + t("repl_setup_zsync") + ": " + t("repl_installed");
                     return true;
@@ -3866,7 +4082,16 @@ async function viewReplication() {
                 setupBtn.disabled = false; setupBtn.textContent = t("repl_setup_btn"); return;
             }
 
-            // Step B: SSH bootstrap target → source
+            // Step B: SSH bootstrap target → source — skipped when the
+            // pre-flight probe already confirmed passwordless access.
+            if (sshTrustOk === true) {
+                addStep(t("repl_setup_step_ssh") + " — " + t("repl_ssh_skipped"), "ok");
+                toast(installedSomething ? t("repl_setup_ok") : t("repl_setup_nothing_todo"), "success");
+                if (installedSomething) renderAll();
+                setupBtn.disabled = false;
+                setupBtn.textContent = t("repl_setup_btn");
+                return;
+            }
             setupBtn.textContent = t("repl_setup_step_ssh");
             addStep(t("repl_setup_step_ssh"), "pending");
             try {
@@ -3879,9 +4104,8 @@ async function viewReplication() {
                 if (r.probe_output && !r.probe_ok) {
                     setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
                 }
-                sshBadgeWrap.innerHTML = "";
-                sshBadgeWrap.appendChild(h("span", { className: "badge " + (r.success ? "badge-success" : "badge-warning") },
-                    (r.success ? "\u2713 " : "") + "SSH: " + (r.success ? t("repl_ssh_ok") : t("repl_ssh_not_ok"))));
+                sshTrustOk = !!r.success;
+                fillSshBadge();
                 if (r.success) {
                     toast(t("repl_setup_ok"), "success");
                     // re-render to unlock the following sections (status refresh)

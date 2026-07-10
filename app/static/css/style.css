@@ -276,6 +276,11 @@ tr:hover td { background: rgba(88, 166, 255, 0.04); }
 .badge-degraded { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
 .badge-running { background: rgba(63, 185, 80, 0.15); color: var(--success); }
 .badge-stopped { background: rgba(139, 148, 158, 0.15); color: var(--text-secondary); }
+/* Semantic aliases — used by the setup pre-flight badges and action flows;
+   were referenced in JS but never defined, so those badges rendered plain. */
+.badge-success { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+.badge-danger { background: rgba(248, 81, 73, 0.15); color: var(--danger); }
+.badge-warning { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
 
 /* Key display */
 .key-display {

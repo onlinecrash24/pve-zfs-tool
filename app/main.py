@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import secrets
@@ -8,6 +9,17 @@ import hmac
 import logging
 import traceback
 from datetime import timedelta
+
+# App logging to stdout so background threads (backup/report schedulers,
+# monitor) are actually observable in `docker compose logs`. Without this the
+# root logger defaults to WARNING and every log.info() call is silently
+# dropped. Level via LOG_LEVEL env (default INFO).
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, make_response
 
 from app.ssh_manager import (
@@ -318,6 +330,24 @@ def api_test_host():
     return jsonify({"success": ok, "message": "Connection OK" if ok else "Connection failed"})
 
 
+@app.route("/api/hosts/wol", methods=["POST"])
+@login_required
+def api_host_wol():
+    """Send Wake-on-LAN magic packets to an offline host (local + relays)."""
+    from app.wol import wake
+    data = request.get_json(silent=True) or {}
+    address = (data.get("address") or "").strip()
+    if not _find_host(address):
+        return jsonify({"success": False, "error": "Host not found"}), 404
+    result = wake(address)
+    audit_log("host.wol", target=address, host=address,
+              success=result.get("success", False),
+              details={"mac": result.get("mac"), "sent_local": result.get("sent_local"),
+                       "relays_ok": sum(1 for rl in result.get("relays", []) if rl.get("ok")),
+                       "error": result.get("error", "")})
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # API: Pools
 # ---------------------------------------------------------------------------
@@ -625,18 +655,38 @@ def api_auto_snap_prop():
     return jsonify({"dataset": ds, "value": prop["value"], "source": prop["source"]})
 
 
+@app.route("/api/auto-snapshot/map")
+def api_auto_snap_map():
+    from app.zfs_commands import get_autosnap_map
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(get_autosnap_map(host))
+
+
 @app.route("/api/auto-snapshot/set", methods=["POST"])
 def api_set_auto_snap():
     data = request.json
     host = _find_host(data.get("host", ""))
     if not host:
         return jsonify({"error": "Host not found"}), 404
-    enabled = data.get("enabled", True)
     label = data.get("label")
-    result = set_auto_snapshot(host, data["dataset"], enabled=enabled, label=label)
-    audit_log("auto_snapshot.set", target=data["dataset"], host=host["address"],
+    dataset = data["dataset"]
+    # New: value in {"true","false","inherit"}. Legacy: enabled bool.
+    value = data.get("value")
+    if value == "inherit":
+        from app.zfs_commands import inherit_auto_snapshot
+        result = inherit_auto_snapshot(host, dataset, label=label)
+        enabled = "inherit"
+    else:
+        if value in ("true", "false"):
+            enabled = value == "true"
+        else:
+            enabled = data.get("enabled", True)
+        result = set_auto_snapshot(host, dataset, enabled=enabled, label=label)
+    audit_log("auto_snapshot.set", target=dataset, host=host["address"],
               success=result.get("success", False),
-              details={"enabled": enabled, "label": label})
+              details={"value": value or enabled, "label": label})
     return jsonify(result)
 
 
@@ -1044,13 +1094,51 @@ def api_snapshot_check():
         return err, code
     from app.snapshot_analysis import analyze_snapshots
     from app.zfs_commands import get_autosnap_disabled_datasets
-    snap_age_data = get_snapshot_ages(host)
+    snap_age_data = get_snapshot_ages(host)   # respects the per-host tag selection
     auto_snap = get_auto_snapshot_status(host)
     retention_cfg = auto_snap.get("retention_policy", {})
     analysis = analyze_snapshots(snap_age_data, retention_cfg,
                                  autosnap_disabled=get_autosnap_disabled_datasets(host))
     analysis["retention_policy"] = retention_cfg
     return jsonify(analysis)
+
+
+@app.route("/api/snapshot-tags", methods=["GET"])
+@login_required
+def api_snapshot_tags_get():
+    """Discovered snapshot tags on the host + the saved per-host selection."""
+    from app.zfs_commands import discover_snapshot_tags
+    from app.snaptags import load_tag_selection, visible_tags
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    counts = discover_snapshot_tags(host)
+    selection = load_tag_selection(host["address"])
+    return jsonify({
+        "tags": visible_tags(counts, selection),
+        "custom_selection": selection is not None,
+    })
+
+
+@app.route("/api/snapshot-tags", methods=["POST"])
+@login_required
+def api_snapshot_tags_set():
+    """Persist which tags the Snapshot Check should treat as auto-labels."""
+    from app.snaptags import save_tag_selection, is_valid_tag
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    tags = data.get("tags")
+    if not isinstance(tags, list):
+        return jsonify({"success": False, "error": "tags must be a list"}), 400
+    bad = [t for t in tags if not is_valid_tag(str(t))]
+    if bad:
+        return jsonify({"success": False, "error": f"invalid tag(s): {', '.join(map(str, bad[:5]))}"}), 400
+    saved = save_tag_selection(host["address"], [str(t) for t in tags])
+    audit_log("snapcheck.tags.save", target=host["address"], host=host["address"],
+              success=True, details={"tags": saved or "defaults"})
+    return jsonify({"success": True, "tags": saved})
 
 
 # ---------------------------------------------------------------------------
@@ -1560,6 +1648,19 @@ def api_replication_bootstrap_ssh():
                        "key_generated": result.get("key_generated"),
                        "error": result.get("error")})
     return jsonify(result)
+
+
+@app.route("/api/replication/ssh-probe", methods=["POST"])
+@login_required
+def api_replication_ssh_probe():
+    """Read-only pre-flight: does passwordless SSH target->source already work?"""
+    from app.replication import probe_ssh_trust
+    data = request.get_json(silent=True) or {}
+    target = _find_host((data.get("target") or "").strip())
+    source = _find_host((data.get("source") or "").strip())
+    if not target or not source:
+        return jsonify({"error": "target and source hosts are required"}), 404
+    return jsonify(probe_ssh_trust(target, source))
 
 
 @app.route("/api/replication/create-target", methods=["POST"])

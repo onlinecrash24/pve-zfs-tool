@@ -19,8 +19,16 @@ MAX_AGE = {
     "monthly":  2764800,  # 32 days
 }
 
-# Gap detection: factor above threshold = suspicious gap
+# Gap detection: a hole larger than GAP_FACTOR x the dataset's OWN typical
+# cadence (the median gap between its snapshots) is suspicious. The cadence is
+# derived empirically per dataset+label instead of hardcoded, so it adapts to
+# the real cron schedule (15 vs 30 min etc.) and never flags the normal
+# spacing as a gap.
 GAP_FACTOR = 1.5
+
+# Need at least this many gaps (>= this+1 snapshots) to estimate a reliable
+# median cadence; below it, a single hole would skew the median itself.
+GAP_MIN_DELTAS = 3
 
 # Replica datasets get double the stale threshold: their newest snapshot is
 # inherently older than local ones (source snapshot up to 1 interval old +
@@ -59,9 +67,10 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
             (e.g. zsync replication targets). Their snapshot counts follow the
             *source* host's retention, not the local cron --keep, so they are
             excluded from the count-mismatch comparison (counted per label in
-            ``count_mismatch_excluded`` instead). Stale detection still applies
-            but with REPLICA_STALE_FACTOR x the threshold (replication lag);
-            gap detection is unchanged.
+            ``excluded_datasets`` -- every present disabled dataset, not just
+            the mismatching ones). Stale detection still applies but with
+            REPLICA_STALE_FACTOR x the threshold (replication lag); gap
+            detection is unchanged.
 
     Returns:
         dict with: per_label, missing_labels, manual_snapshots, datasets_analyzed
@@ -105,7 +114,7 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
                     "oldest_age_sec": 0,
                     "newest_age_sec": age_sec,
                     "count_mismatches": [],
-                    "count_mismatch_excluded": 0,
+                    "excluded_datasets": 0,
                     "stale_datasets": [],
                     "gaps": [],
                 }
@@ -118,14 +127,16 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
             if age_sec > lg["oldest_age_sec"]:
                 lg["oldest_age_sec"] = age_sec
 
-            # Check: count vs configured --keep. Datasets with
-            # com.sun:auto-snapshot=false (replication targets) follow the
-            # source host's retention -- the local --keep doesn't apply.
-            configured = retention_cfg.get(label)
-            if configured and count != configured:
-                if ds in autosnap_disabled:
-                    lg["count_mismatch_excluded"] += 1
-                else:
+            # Datasets with com.sun:auto-snapshot=false (replication targets or
+            # manually disabled) follow the source's retention / a manual
+            # setting, not the local --keep. Exclude them from the count check
+            # entirely and count them per label so the exclusion is visible at
+            # EVERY level -- not only where a count happened to mismatch.
+            if ds in autosnap_disabled:
+                lg["excluded_datasets"] += 1
+            else:
+                configured = retention_cfg.get(label)
+                if configured and count != configured:
                     lg["count_mismatches"].append({
                         "dataset": ds,
                         "actual": count,
@@ -146,21 +157,23 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
                     "threshold_sec": threshold,
                 })
 
-            # Gap detection: find holes in the snapshot chain
-            if label in MAX_AGE and len(timestamps) >= 2:
-                gap_threshold = MAX_AGE[label] * GAP_FACTOR
-                for idx in range(len(timestamps) - 1):
-                    delta = timestamps[idx + 1] - timestamps[idx]
-                    if delta > gap_threshold:
-                        lg["gaps"].append({
-                            "dataset": ds,
-                            "gap_hours": round(delta / 3600, 1),
-                            "from_epoch": timestamps[idx],
-                            "to_epoch": timestamps[idx + 1],
-                            "from_age": format_age(now_epoch - timestamps[idx]),
-                            "to_age": format_age(now_epoch - timestamps[idx + 1]),
-                            "threshold_hours": round(MAX_AGE[label] / 3600, 1),
-                        })
+            # Gap detection: a hole > GAP_FACTOR x this dataset's median cadence.
+            deltas = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+            if len(deltas) >= GAP_MIN_DELTAS:
+                cadence = sorted(deltas)[len(deltas) // 2]   # robust median-ish
+                gap_threshold = cadence * GAP_FACTOR
+                if gap_threshold > 0:
+                    for idx, delta in enumerate(deltas):
+                        if delta > gap_threshold:
+                            lg["gaps"].append({
+                                "dataset": ds,
+                                "gap_hours": round(delta / 3600, 1),
+                                "from_epoch": timestamps[idx],
+                                "to_epoch": timestamps[idx + 1],
+                                "from_age": format_age(now_epoch - timestamps[idx]),
+                                "to_age": format_age(now_epoch - timestamps[idx + 1]),
+                                "threshold_hours": round(gap_threshold / 3600, 1),
+                            })
 
     # Build summary
     for label, lg in label_global.items():
