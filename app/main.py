@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import secrets
@@ -8,6 +9,17 @@ import hmac
 import logging
 import traceback
 from datetime import timedelta
+
+# App logging to stdout so background threads (backup/report schedulers,
+# monitor) are actually observable in `docker compose logs`. Without this the
+# root logger defaults to WARNING and every log.info() call is silently
+# dropped. Level via LOG_LEVEL env (default INFO).
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, make_response
 
 from app.ssh_manager import (

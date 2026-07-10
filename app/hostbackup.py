@@ -24,6 +24,7 @@ import re
 import shlex
 import threading
 import time
+from datetime import datetime
 
 from app.timezone import now as tz_now
 from app.ssh_manager import run_command, fetch_file, load_hosts
@@ -36,11 +37,17 @@ CONFIG_FILE = os.path.join(DATA_DIR, "host_backup_config.json")
 
 # A stored backup file name: pve-backup-<ts>[-withpriv].tar.gz
 _FILE_RE = re.compile(r"^pve-backup-\d{8}-\d{6}(?:-withpriv)?\.tar\.gz$")
+_FILE_TS_RE = re.compile(r"^pve-backup-(\d{8})-(\d{6})")
+
+_INTERVAL_SECONDS = {"daily": 86400, "weekly": 604800, "monthly": 2592000}
 
 _sched_thread = None
 _sched_stop = threading.Event()
 _sched_start_lock = threading.Lock()
-_last_run_keys = {}
+# Per-host timestamp of the last create attempt -- throttles retries after a
+# failure so a persistently unreachable host isn't hammered every poll.
+_last_attempt = {}
+_RETRY_THROTTLE_SEC = 1800   # 30 min
 
 
 # ---------------------------------------------------------------------------
@@ -325,19 +332,67 @@ def set_schedule(address, sched):
 # Scheduler
 # ---------------------------------------------------------------------------
 
-def _run_key(now, interval):
+def backup_filename_dt(filename):
+    """Parse the local timestamp embedded in a backup filename, or None."""
+    m = _FILE_TS_RE.match(filename or "")
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+
+
+def _same_period(dt, now, interval):
+    """Whether ``dt`` falls in the same day/week/month as ``now``."""
     if interval == "weekly":
-        return f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
+        return dt.isocalendar()[:2] == now.isocalendar()[:2]
     if interval == "monthly":
-        return now.strftime("%Y-%m")
-    return now.strftime("%Y-%m-%d")
+        return (dt.year, dt.month) == (now.year, now.month)
+    return dt.date() == now.date()
+
+
+def backup_due(newest_dt, now, sched):
+    """Decide whether a scheduled backup should run now (pure, testable).
+
+    Robust against restarts and a missed target-hour window:
+      * skip if a backup already exists for the current period,
+      * otherwise fire at/after the preferred hour (and weekday for weekly),
+      * OR catch up whenever the newest backup is clearly overdue (older than
+        1.5x the interval), regardless of the hour -- so a window missed while
+        the container was down is backfilled as soon as it runs again.
+    ``now`` is naive local time; ``newest_dt`` is naive local or None.
+    """
+    interval = sched.get("interval", "daily")
+    if newest_dt is not None and _same_period(newest_dt, now, interval):
+        return False
+
+    target_hour = int(sched.get("hour", 3))
+    if interval == "weekly":
+        on_day = now.weekday() >= int(sched.get("weekday", 0))
+    else:                       # daily / monthly: any day of the period
+        on_day = True
+    preferred = on_day and now.hour >= target_hour
+
+    interval_secs = _INTERVAL_SECONDS.get(interval, 86400)
+    overdue = (newest_dt is None
+               or (now - newest_dt).total_seconds() > interval_secs * 1.5)
+    return preferred or overdue
+
+
+def _newest_backup_dt(host):
+    for b in list_backups(host).get("backups", []):   # newest first
+        dt = backup_filename_dt(b.get("filename", ""))
+        if dt:
+            return dt
+    return None
 
 
 def _scheduler_loop():
     log.info("Host backup scheduler started")
     while not _sched_stop.is_set():
         try:
-            now = tz_now()
+            now = tz_now().replace(tzinfo=None)   # naive local for comparisons
             cfg = load_config()
             hosts = {h["address"]: h for h in load_hosts()}
             for address, sched in (cfg.get("schedules") or {}).items():
@@ -346,18 +401,14 @@ def _scheduler_loop():
                 host = hosts.get(address)
                 if not host:
                     continue
-                interval = sched.get("interval", "weekly")
-                target_hour = int(sched.get("hour", 3))
-                key = f"{address}:{_run_key(now, interval)}"
-                if now.hour < target_hour or _last_run_keys.get(address) == key:
+                if not backup_due(_newest_backup_dt(host), now, sched):
                     continue
-                due = (interval == "daily"
-                       or (interval == "weekly" and now.weekday() == int(sched.get("weekday", 0)))
-                       or (interval == "monthly" and now.day == 1))
-                if not due:
+                # Throttle retries so a failing host isn't hammered every poll.
+                if time.time() - _last_attempt.get(address, 0) < _RETRY_THROTTLE_SEC:
                     continue
-                _last_run_keys[address] = key
-                log.info("Scheduled host backup for %s (%s)", address, interval)
+                _last_attempt[address] = time.time()
+                log.info("Scheduled host backup for %s (%s)", address,
+                         sched.get("interval", "daily"))
                 try:
                     res = create_backup(host, include_priv=bool(sched.get("include_priv")))
                     if res.get("success"):

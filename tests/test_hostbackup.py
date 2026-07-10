@@ -1,7 +1,72 @@
-"""Host config backup: filename validation, prune selection, backup script."""
+"""Host config backup: filename validation, prune selection, backup script,
+and the scheduler due-logic (robust against restarts + missed windows)."""
 
+from datetime import datetime
 import pytest
 from app import hostbackup as hb
+
+
+# --- backup_filename_dt ---------------------------------------------------
+
+def test_backup_filename_dt_parses():
+    assert hb.backup_filename_dt("pve-backup-20260708-120232.tar.gz") == datetime(2026, 7, 8, 12, 2, 32)
+    assert hb.backup_filename_dt("pve-backup-20260708-120232-withpriv.tar.gz") == datetime(2026, 7, 8, 12, 2, 32)
+
+
+def test_backup_filename_dt_invalid():
+    assert hb.backup_filename_dt("garbage.tar.gz") is None
+    assert hb.backup_filename_dt("") is None
+
+
+# --- backup_due (the reliability fix) -------------------------------------
+
+DAILY = {"interval": "daily", "hour": 23, "keep": 8}
+NOW = datetime(2026, 7, 10, 6, 19)      # 06:19, before the 23:00 target hour
+
+
+def test_not_due_if_backup_exists_today():
+    newest = datetime(2026, 7, 10, 0, 5)   # already have one today
+    assert hb.backup_due(newest, NOW, DAILY) is False
+
+
+def test_daily_waits_for_target_hour_when_recent():
+    # last backup was yesterday; it's morning (before 23:00) and not overdue
+    newest = datetime(2026, 7, 9, 23, 0)
+    assert hb.backup_due(newest, NOW, DAILY) is False
+
+
+def test_daily_fires_at_or_after_target_hour():
+    now_evening = datetime(2026, 7, 10, 23, 5)
+    newest = datetime(2026, 7, 9, 23, 0)
+    assert hb.backup_due(newest, now_evening, DAILY) is True
+
+
+def test_daily_catch_up_when_overdue_regardless_of_hour():
+    # the 23:00 window on 7/9 was missed (container down); newest is 2 days old
+    newest = datetime(2026, 7, 8, 12, 2)   # ~2 days before NOW (06:19 on 7/10)
+    assert hb.backup_due(newest, NOW, DAILY) is True   # catches up at 06:19
+
+
+def test_due_when_no_backup_at_all():
+    assert hb.backup_due(None, NOW, DAILY) is True
+
+
+def test_weekly_only_on_or_after_target_weekday():
+    sched = {"interval": "weekly", "hour": 3, "weekday": 2}   # Wed
+    # Tuesday morning, no backup this week, not overdue -> not yet
+    tue = datetime(2026, 7, 7, 10, 0)      # 2026-07-07 is a Tuesday
+    assert hb.backup_due(None, tue, sched) in (True,)  # None newest => overdue => catch up
+    # with a recent backup last week, on Tuesday before the Wed target -> wait
+    last_week = datetime(2026, 7, 1, 3, 0)
+    assert hb.backup_due(last_week, tue, sched) is False
+    wed = datetime(2026, 7, 8, 3, 5)       # Wednesday, at hour
+    assert hb.backup_due(last_week, wed, sched) is True
+
+
+def test_weekly_not_due_if_backup_this_week():
+    sched = {"interval": "weekly", "hour": 3, "weekday": 2}
+    this_week = datetime(2026, 7, 6, 3, 0)   # same ISO week as the 8th
+    assert hb.backup_due(this_week, datetime(2026, 7, 8, 5, 0), sched) is False
 
 
 # --- filename safety ------------------------------------------------------
@@ -130,10 +195,10 @@ def test_list_all_backups_aggregates_and_sorts(tmp_path, monkeypatch):
 
 # --- run-key (schedule period) -------------------------------------------
 
-def test_run_key_periods():
-    import datetime
-    now = datetime.datetime(2026, 6, 27, 3, 0, 0)
-    assert hb._run_key(now, "daily") == "2026-06-27"
-    assert hb._run_key(now, "monthly") == "2026-06"
-    wk = hb._run_key(now, "weekly")
-    assert wk.startswith("2026-W")
+def test_same_period():
+    now = datetime(2026, 7, 8, 3, 0, 0)
+    assert hb._same_period(datetime(2026, 7, 8, 23, 0), now, "daily") is True
+    assert hb._same_period(datetime(2026, 7, 7, 23, 0), now, "daily") is False
+    assert hb._same_period(datetime(2026, 7, 1, 3, 0), now, "monthly") is True
+    assert hb._same_period(datetime(2026, 6, 30, 3, 0), now, "monthly") is False
+    assert hb._same_period(datetime(2026, 7, 6, 3, 0), now, "weekly") is True   # same ISO week
