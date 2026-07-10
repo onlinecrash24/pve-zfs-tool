@@ -446,10 +446,8 @@ def start_scheduler():
     with _sched_start_lock:
         if _sched_thread and _sched_thread.is_alive():
             return
-        # seed last-run so we don't immediately fire on startup
-        now = tz_now()
-        for address, sched in (load_config().get("schedules") or {}).items():
-            _last_run_keys.setdefault(address, f"{address}:{_run_key(now, sched.get('interval', 'weekly'))}")
+        # No in-memory seeding needed: backup_due() decides from the newest
+        # stored backup's timestamp (persistent across restarts).
         _sched_stop.clear()
         _sched_thread = threading.Thread(target=_scheduler_loop, daemon=True,
                                          name="host-backup-scheduler")

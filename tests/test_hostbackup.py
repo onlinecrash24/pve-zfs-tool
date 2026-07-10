@@ -202,3 +202,28 @@ def test_same_period():
     assert hb._same_period(datetime(2026, 7, 1, 3, 0), now, "monthly") is True
     assert hb._same_period(datetime(2026, 6, 30, 3, 0), now, "monthly") is False
     assert hb._same_period(datetime(2026, 7, 6, 3, 0), now, "weekly") is True   # same ISO week
+
+
+# --- scheduler startup ----------------------------------------------------
+
+def test_start_scheduler_does_not_crash_with_schedules(monkeypatch):
+    # Regression: start_scheduler() must spawn the loop without referencing any
+    # removed globals (it once left a stale `_last_run_keys` seed loop, which
+    # raised NameError on boot AND on every POST /host-backup/schedule -> 500).
+    monkeypatch.setattr(hb, "load_config", lambda: {"schedules": {
+        "10.0.0.1": {"enabled": True, "interval": "daily", "hour": 3, "keep": 8},
+    }})
+    monkeypatch.setattr(hb, "load_hosts", lambda: [])   # no host -> no real SSH
+    # ensure a clean slate (another test may have started it)
+    hb._sched_stop.set()
+    if hb._sched_thread:
+        hb._sched_thread.join(timeout=2)
+    hb._sched_thread = None
+    try:
+        hb.start_scheduler()                       # must not raise
+        assert hb._sched_thread is not None and hb._sched_thread.is_alive()
+    finally:
+        hb._sched_stop.set()
+        if hb._sched_thread:
+            hb._sched_thread.join(timeout=2)
+        hb._sched_thread = None
