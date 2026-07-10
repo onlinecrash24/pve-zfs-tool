@@ -42,12 +42,20 @@ def test_healthy_frequent_chain_has_no_gap():
     assert a["per_label"]["frequent"]["gaps"] == []
 
 
+def test_uniform_30min_cadence_no_false_gap():
+    # regression: cadence is derived from the data, so a host whose frequent
+    # actually runs every 30 min must NOT flag every 30-min interval as a gap
+    tss = [NOW - 1800 * i for i in range(10)]         # 10 snapshots @ 30 min
+    a = analyze_snapshots(_label_chain(NOW, "frequent", tss), {})
+    assert a["per_label"]["frequent"]["gaps"] == []
+
+
 def test_short_frequent_hole_is_detected():
-    # 3 snapshots @15min ending 1h ago, then a ~45 min hole, then 2 more.
-    # interval*1.5 = 22.5 min catches it; the old MAX_AGE*1.5 (90 min) missed it.
-    before = [NOW - 3600 - 1800, NOW - 3600 - 900, NOW - 3600]
-    after = [NOW - 900, NOW]
-    a = analyze_snapshots(_label_chain(NOW, "frequent", before + after), {})
+    # steady 15-min cadence with one ~45 min hole -> that one interval flags,
+    # the normal 15-min intervals do not
+    steady = [NOW - 900 * (i + 3) for i in range(5)]  # 5 @ 15 min, ending 45 min ago
+    after = [NOW - 900, NOW]                           # 2 more, ~30+ min hole before them
+    a = analyze_snapshots(_label_chain(NOW, "frequent", steady + after), {})
     gaps = a["per_label"]["frequent"]["gaps"]
     assert len(gaps) == 1 and gaps[0]["dataset"] == "rpool/data/x"
 
@@ -64,17 +72,24 @@ def test_disable_reenable_daily_gap_detected():
 
 
 def test_single_missed_daily_is_a_gap():
-    tss = [NOW - 86400 * 3, NOW - 86400 * 2, NOW]        # one daily missing (~48h hole)
+    # steady dailies with exactly one missing -> the ~48h interval flags
+    tss = [NOW - 86400 * 6, NOW - 86400 * 5, NOW - 86400 * 4,
+           NOW - 86400 * 2, NOW - 86400, NOW]           # day-3 missing
     a = analyze_snapshots(_label_chain(NOW, "daily", tss), CFG)
     assert len(a["per_label"]["daily"]["gaps"]) == 1
 
 
+def test_too_few_snapshots_no_gap_guess():
+    # 3 snapshots = 2 deltas: not enough to estimate a cadence -> no gap guess
+    tss = [NOW - 86400 * 5, NOW - 86400, NOW]
+    a = analyze_snapshots(_label_chain(NOW, "daily", tss), CFG)
+    assert a["per_label"]["daily"]["gaps"] == []
+
+
 def test_gap_detection_applies_to_disabled_datasets_too():
-    # gap detection is not gated on the exclusion -- a re-enabled dataset that
-    # is momentarily still flagged disabled must still get its hole detected
-    before = [NOW - 3600 - 1800, NOW - 3600 - 900, NOW - 3600]
+    steady = [NOW - 900 * (i + 3) for i in range(5)]
     after = [NOW - 900, NOW]
-    a = analyze_snapshots(_label_chain(NOW, "frequent", before + after), {},
+    a = analyze_snapshots(_label_chain(NOW, "frequent", steady + after), {},
                           autosnap_disabled={"rpool/data/x"})
     assert len(a["per_label"]["frequent"]["gaps"]) == 1
 

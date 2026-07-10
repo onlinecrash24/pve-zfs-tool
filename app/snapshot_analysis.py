@@ -19,19 +19,16 @@ MAX_AGE = {
     "monthly":  2764800,  # 32 days
 }
 
-# Gap detection: a hole larger than GAP_FACTOR x the *expected interval*
-# (the cron cadence) is a suspicious gap. Using the interval -- not MAX_AGE,
-# the loose stale threshold -- means a one-missed-cycle hole is caught for
-# frequent/hourly too (MAX_AGE for those needs 6 / 3 missed cycles).
+# Gap detection: a hole larger than GAP_FACTOR x the dataset's OWN typical
+# cadence (the median gap between its snapshots) is suspicious. The cadence is
+# derived empirically per dataset+label instead of hardcoded, so it adapts to
+# the real cron schedule (15 vs 30 min etc.) and never flags the normal
+# spacing as a gap.
 GAP_FACTOR = 1.5
 
-LABEL_INTERVAL = {
-    "frequent": 900,       # every 15 min
-    "hourly":   3600,      # hourly
-    "daily":    86400,     # daily
-    "weekly":   604800,    # weekly
-    "monthly":  2592000,   # ~monthly (30 d)
-}
+# Need at least this many gaps (>= this+1 snapshots) to estimate a reliable
+# median cadence; below it, a single hole would skew the median itself.
+GAP_MIN_DELTAS = 3
 
 # Replica datasets get double the stale threshold: their newest snapshot is
 # inherently older than local ones (source snapshot up to 1 interval old +
@@ -160,22 +157,23 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
                     "threshold_sec": threshold,
                 })
 
-            # Gap detection: a hole > GAP_FACTOR x the expected cron interval.
-            interval = LABEL_INTERVAL.get(label)
-            if interval and len(timestamps) >= 2:
-                gap_threshold = interval * GAP_FACTOR
-                for idx in range(len(timestamps) - 1):
-                    delta = timestamps[idx + 1] - timestamps[idx]
-                    if delta > gap_threshold:
-                        lg["gaps"].append({
-                            "dataset": ds,
-                            "gap_hours": round(delta / 3600, 1),
-                            "from_epoch": timestamps[idx],
-                            "to_epoch": timestamps[idx + 1],
-                            "from_age": format_age(now_epoch - timestamps[idx]),
-                            "to_age": format_age(now_epoch - timestamps[idx + 1]),
-                            "threshold_hours": round(gap_threshold / 3600, 1),
-                        })
+            # Gap detection: a hole > GAP_FACTOR x this dataset's median cadence.
+            deltas = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+            if len(deltas) >= GAP_MIN_DELTAS:
+                cadence = sorted(deltas)[len(deltas) // 2]   # robust median-ish
+                gap_threshold = cadence * GAP_FACTOR
+                if gap_threshold > 0:
+                    for idx, delta in enumerate(deltas):
+                        if delta > gap_threshold:
+                            lg["gaps"].append({
+                                "dataset": ds,
+                                "gap_hours": round(delta / 3600, 1),
+                                "from_epoch": timestamps[idx],
+                                "to_epoch": timestamps[idx + 1],
+                                "from_age": format_age(now_epoch - timestamps[idx]),
+                                "to_age": format_age(now_epoch - timestamps[idx + 1]),
+                                "threshold_hours": round(gap_threshold / 3600, 1),
+                            })
 
     # Build summary
     for label, lg in label_global.items():
