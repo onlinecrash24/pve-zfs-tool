@@ -100,12 +100,44 @@ def parse_pool_errors(status_stdout, pool_name):
     return None
 
 
+def _store_disk_metrics(host_addr, disks):
+    """Insert one SMART sample row per disk. ``disks`` is the normalised list
+    from smart.collect_smart()."""
+    if not disks:
+        return
+    now = int(time.time())
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for d in disks:
+            cur.execute(
+                """INSERT INTO disk_metrics
+                   (timestamp, host, device, type, model, serial, temp_c,
+                    power_on_hours, health_passed, realloc_sectors,
+                    pending_sectors, wear_pct)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    now, host_addr, d.get("device", ""), d.get("type"),
+                    d.get("model"), d.get("serial"), d.get("temp_c"),
+                    d.get("power_on_hours"),
+                    (None if d.get("health_passed") is None
+                     else (1 if d.get("health_passed") else 0)),
+                    d.get("realloc_sectors"), d.get("pending_sectors"),
+                    d.get("wear_pct"),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _cleanup_old():
     """Delete samples older than RETENTION_DAYS."""
     cutoff = int(time.time()) - RETENTION_DAYS * 86400
     try:
         conn = get_conn()
         conn.execute("DELETE FROM pool_metrics WHERE timestamp < ?", (cutoff,))
+        conn.execute("DELETE FROM disk_metrics WHERE timestamp < ?", (cutoff,))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -179,6 +211,18 @@ def _sample_and_monitor(host):
             n = len(pools)
         finally:
             conn.close()
+
+    # Per-disk SMART metrics (temperature + health/wear) — best effort, so a
+    # host without smartmontools or a flaky controller never breaks sampling.
+    if reachable:
+        try:
+            from app.smart import collect_smart
+            res = collect_smart(host)
+            if res.get("installed"):
+                _store_disk_metrics(host["address"], res.get("disks", []))
+        except Exception as e:
+            log.warning("metrics: smart sample failed for %s: %s",
+                        host.get("address"), e)
 
     # Collect error counters (cheap — uses cached status)
     pools_status = {}
@@ -297,6 +341,52 @@ def list_pools(host_addr):
             (host_addr,),
         ).fetchall()
         return [r["pool"] for r in rows]
+    finally:
+        conn.close()
+
+
+_DISK_COLS = ("timestamp, host, device, type, model, serial, temp_c, "
+              "power_on_hours, health_passed, realloc_sectors, "
+              "pending_sectors, wear_pct")
+
+
+def query_disk_series(host_addr, device=None, hours=24):
+    """Return per-disk SMART time series (list of dicts sorted by time).
+    ``device`` omitted => all disks on the host."""
+    since = int(time.time()) - int(hours) * 3600
+    conn = get_conn()
+    try:
+        if device:
+            rows = conn.execute(
+                f"SELECT {_DISK_COLS} FROM disk_metrics "
+                "WHERE host=? AND device=? AND timestamp >= ? ORDER BY timestamp",
+                (host_addr, device, since),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {_DISK_COLS} FROM disk_metrics "
+                "WHERE host=? AND timestamp >= ? ORDER BY device, timestamp",
+                (host_addr, since),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def latest_disks(host_addr):
+    """Return the most recent SMART sample per disk on a host."""
+    cols_d = ", ".join("d." + c.strip() for c in _DISK_COLS.split(","))
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"""SELECT {cols_d} FROM disk_metrics d
+               JOIN (SELECT device, MAX(timestamp) AS mt FROM disk_metrics
+                     WHERE host=? GROUP BY device) m
+                 ON d.device = m.device AND d.timestamp = m.mt
+               WHERE d.host=? ORDER BY d.device""",
+            (host_addr, host_addr),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 

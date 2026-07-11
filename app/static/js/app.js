@@ -3514,6 +3514,8 @@ async function viewMetrics() {
         container.appendChild(card);
     }
 
+    await renderDisksCard(container, hours);
+
     setContent(container);
     const rangeSel = document.getElementById("m-range");
     rangeSel.value = String(hours);
@@ -3526,6 +3528,126 @@ async function viewMetrics() {
             else { toast(r.error || "Error", "error"); }
         } catch (e) { toast(e.message, "error"); }
     };
+}
+
+
+// -- Disks (SMART) ---------------------------------------------------------
+// Temperature thresholds differ by media: HDDs run cooler and age faster when
+// hot (warn 45 / crit 55), SSD/NVMe tolerate more (warn 60 / crit 70).
+function _diskTempColor(temp, type) {
+    if (temp == null || isNaN(temp)) return "";
+    const hdd = type === "hdd";
+    const warn = hdd ? 45 : 60, crit = hdd ? 55 : 70;
+    if (temp >= crit) return "color:var(--danger)";
+    if (temp >= warn) return "color:var(--warning)";
+    return "color:var(--success)";
+}
+// Any reallocated/pending sector is a concern; pending sectors are the more
+// urgent (unreadable, awaiting reallocation) so they go red immediately.
+function _sectorColor(v, critical) {
+    if (v == null) return "";
+    if (v > 0) return critical ? "color:var(--danger)" : "color:var(--warning)";
+    return "color:var(--success)";
+}
+function _formatHours(hrs) {
+    if (hrs == null || isNaN(hrs)) return "—";
+    if (hrs < 48) return `${hrs} h`;
+    const days = hrs / 24;
+    return days < 365 ? `${days.toFixed(0)} d` : `${(days / 365).toFixed(1)} a`;
+}
+
+async function renderDisksCard(container, hours) {
+    let resp;
+    try {
+        resp = await API.get("/api/metrics/disks?host=" + encodeURIComponent(currentHost));
+    } catch (e) { return; }   // metrics are best-effort — never break the page
+    const disks = (resp && resp.disks) || [];
+
+    const card = h("div", { className: "card" });
+    card.appendChild(h("div", { className: "card-header" }, [
+        h("span", {}, t("disks_title")),
+        disks.length
+            ? h("span", { className: "badge badge-online", style: "font-weight:600" }, `${disks.length} ${t("disks_count")}`)
+            : h("span", {}),
+    ]));
+
+    if (!disks.length) {
+        // No stored samples yet — is smartmontools even installed?
+        const body = h("div", { style: "padding:16px" });
+        let installed = true;
+        try {
+            const st = await API.get("/api/smart/status?host=" + encodeURIComponent(currentHost));
+            installed = !!(st && st.installed);
+        } catch (e) { installed = true; }
+        if (!installed) {
+            body.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("smart_not_installed")));
+            const btn = h("button", { className: "btn btn-primary btn-sm" }, t("smart_install_btn"));
+            const status = h("span", { style: "margin-left:10px;font-size:12px;color:var(--text-secondary)" });
+            btn.onclick = async () => {
+                if (!confirm(t("smart_install_confirm"))) return;
+                btn.disabled = true; status.textContent = t("smart_installing");
+                try {
+                    const r = await API.post("/api/smart/install?host=" + encodeURIComponent(currentHost), {});
+                    if (r.success) { toast(r.already ? t("smart_install_already") : t("smart_install_ok"), "success"); viewMetrics(); }
+                    else { btn.disabled = false; status.textContent = ""; toast(t("smart_install_failed") + " " + ((r.stderr || "").trim().slice(0, 200)), "error"); }
+                } catch (e) { btn.disabled = false; status.textContent = ""; toast(t("smart_install_failed") + " " + (e.message || ""), "error"); }
+            };
+            body.appendChild(h("div", { style: "margin-top:10px" }, [btn, status]));
+        } else {
+            body.appendChild(h("p", { className: "muted" }, t("disks_no_samples")));
+        }
+        card.appendChild(body);
+        container.appendChild(card);
+        return;
+    }
+
+    // Fetch every disk's series for this range in one call, group by device.
+    const seriesByDev = {};
+    try {
+        const s = await API.get(`/api/metrics/disk-series?host=${encodeURIComponent(currentHost)}&hours=${hours}`);
+        (s.data || []).forEach(row => { (seriesByDev[row.device] = seriesByDev[row.device] || []).push(row); });
+    } catch (e) { /* charts are optional */ }
+
+    const grid = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;padding:16px" });
+    disks.forEach(d => {
+        const box = h("div", { style: "min-width:0;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-card)" });
+
+        const typeLabel = { hdd: "HDD", ssd: "SSD", nvme: "NVMe" }[d.type] || "Disk";
+        const hp = d.health_passed;
+        const healthBadge = hp == null
+            ? h("span", { className: "badge badge-stopped" }, "SMART ?")
+            : h("span", { className: hp ? "badge badge-online" : "badge badge-danger" }, hp ? t("disk_health_passed") : t("disk_health_failed"));
+        box.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap" }, [
+            h("span", { style: "font-weight:700" }, d.device),
+            h("span", { className: "badge badge-stopped", style: "font-weight:600" }, typeLabel),
+            healthBadge,
+        ]));
+        if (d.model) box.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, d.model));
+
+        box.appendChild(h("div", { className: "stat-label" }, t("disk_temp")));
+        box.appendChild(h("div", { style: "font-size:22px;font-weight:700;margin-bottom:6px;" + _diskTempColor(d.temp_c, d.type) },
+            d.temp_c != null ? `${d.temp_c.toFixed(0)} °C` : "—"));
+
+        const pts = (seriesByDev[d.device] || []).map(r => ({ x: r.timestamp, y: r.temp_c }));
+        const chartWrap = document.createElement("div");
+        chartWrap.innerHTML = _svgLineChart(pts, { yZero: false, color: "#58a6ff", height: 120, yFmt: v => v.toFixed(0) + "°" });
+        box.appendChild(chartWrap);
+
+        const stat = (label, value, style) => h("div", {}, [
+            h("div", { className: "stat-label", style: "font-size:10px" }, label),
+            h("div", { style: "font-weight:600;font-size:13px;" + (style || "") }, value),
+        ]);
+        box.appendChild(h("div", { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px" }, [
+            stat(t("disk_wear"), d.wear_pct != null ? d.wear_pct + "%" : "—", ampelColor(d.wear_pct, 80, 50, false)),
+            stat(t("disk_realloc"), d.realloc_sectors != null ? String(d.realloc_sectors) : "—", _sectorColor(d.realloc_sectors, false)),
+            stat(t("disk_pending"), d.pending_sectors != null ? String(d.pending_sectors) : "—", _sectorColor(d.pending_sectors, true)),
+            stat(t("disk_power_on"), _formatHours(d.power_on_hours), ""),
+        ]));
+
+        grid.appendChild(box);
+    });
+    card.appendChild(grid);
+    container.appendChild(card);
 }
 
 

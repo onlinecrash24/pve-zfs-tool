@@ -702,6 +702,25 @@ const TRANSLATIONS = {
         metrics_alloc: "Allocated",
         metrics_current: "Current",
 
+        // Disks (SMART)
+        disks_title: "Disks (SMART)",
+        disks_count: "disks",
+        disk_temp: "Temperature",
+        disk_wear: "Wear",
+        disk_realloc: "Realloc",
+        disk_pending: "Pending",
+        disk_power_on: "Power-on",
+        disk_health_passed: "PASSED",
+        disk_health_failed: "FAILED",
+        disks_no_samples: "No SMART samples yet. The sampler runs every 15 minutes, or click 'Sample Now'.",
+        smart_not_installed: "smartmontools (smartctl) is not installed on this host, so disk temperatures and health can't be read.",
+        smart_install_btn: "Install smartmontools",
+        smart_install_confirm: "Install the smartmontools package on this host via apt? It provides smartctl for reading disk temperatures and SMART health.",
+        smart_installing: "Installing…",
+        smart_install_ok: "smartmontools installed",
+        smart_install_already: "smartmontools was already installed",
+        smart_install_failed: "Installation failed:",
+
         // Audit
         audit_time: "Time",
         audit_user: "User",
@@ -1619,6 +1638,25 @@ const TRANSLATIONS = {
         metrics_frag_hint: "Hinweis: Auf SSD/NVMe ist hohe Fragmentierung normal und ohne Performance-Einfluss.",
         metrics_alloc: "Belegt",
         metrics_current: "Aktuell",
+
+        // Disks (SMART)
+        disks_title: "Datenträger (SMART)",
+        disks_count: "Datenträger",
+        disk_temp: "Temperatur",
+        disk_wear: "Verschleiß",
+        disk_realloc: "Realloc",
+        disk_pending: "Pending",
+        disk_power_on: "Betriebszeit",
+        disk_health_passed: "BESTANDEN",
+        disk_health_failed: "FEHLER",
+        disks_no_samples: "Noch keine SMART-Messwerte. Der Sampler läuft alle 15 Minuten, oder klicke auf 'Jetzt abfragen'.",
+        smart_not_installed: "smartmontools (smartctl) ist auf diesem Host nicht installiert — Platten-Temperaturen und -Gesundheit können nicht gelesen werden.",
+        smart_install_btn: "smartmontools installieren",
+        smart_install_confirm: "Das Paket smartmontools auf diesem Host per apt installieren? Es liefert smartctl zum Auslesen von Platten-Temperaturen und SMART-Gesundheit.",
+        smart_installing: "Installation läuft …",
+        smart_install_ok: "smartmontools installiert",
+        smart_install_already: "smartmontools war bereits installiert",
+        smart_install_failed: "Installation fehlgeschlagen:",
 
         // Audit
         audit_time: "Zeit",

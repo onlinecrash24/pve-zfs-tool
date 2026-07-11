@@ -55,6 +55,26 @@ def init_db():
                     ON pool_metrics(host, pool, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_pm_ts ON pool_metrics(timestamp);
 
+                -- Per-disk SMART samples (temperature + health/wear).
+                CREATE TABLE IF NOT EXISTS disk_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    host TEXT NOT NULL,
+                    device TEXT NOT NULL,
+                    type TEXT,
+                    model TEXT,
+                    serial TEXT,
+                    temp_c REAL,
+                    power_on_hours INTEGER,
+                    health_passed INTEGER,
+                    realloc_sectors INTEGER,
+                    pending_sectors INTEGER,
+                    wear_pct INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_dm_host_dev_ts
+                    ON disk_metrics(host, device, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_dm_ts ON disk_metrics(timestamp);
+
                 CREATE TABLE IF NOT EXISTS audit_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp INTEGER NOT NULL,
