@@ -37,6 +37,7 @@
 - **Lifecycle Control** -- Start, graceful shutdown, reboot and hard stop per guest (status-dependent buttons, confirmation for disruptive actions, audit-logged)
 - **Per-Guest Snapshots** -- View ZFS snapshots specific to a VM or container
 - **Smart Rollback** -- Automatically stops VM/LXC before rollback and restarts afterwards
+- **Replication Status** -- Per-guest indicator in the guest list: green (all disks tagged & not lagging), yellow (only some disks tagged, or the source is lagging), red (not replicated); derived from the `bashclub:zsync` tags plus the replication monitor
 - **LXC File-Level Restore** -- Browse and restore individual files from LXC container snapshots:
   - Mounts snapshot as readonly clone
   - Navigate files via breadcrumb file browser
@@ -54,8 +55,9 @@
   - Cleanup on modal close, tab close (sendBeacon), and via Health page
 
 ### Replication (bashclub-zsync)
-- **5-Step Wizard** -- Source/target host pair → setup → datasets → config → log, with progressive disclosure
-- **One-Click Setup** -- Installs `bashclub-zsync` on **both** hosts via the official deb822 APT repo (`apt.bashclub.org/release/`) and bootstraps passwordless SSH from target to source (key generation, `ssh-keyscan` for `known_hosts`, `authorized_keys` append, BatchMode probe)
+- **Setup Wizard** -- Source/target host pair → setup → datasets → config → log, with progressive disclosure
+- **Green/Red Pre-Flight** -- Before setup, checks what already exists (PVE, bashclub repo, `bashclub-zsync` installed, SSH trust) and only performs the missing steps
+- **One-Click Setup** -- Installs `bashclub-zsync` on **both** hosts via the official deb822 APT repo (`apt.bashclub.org/release/`, suite derived from the host: bookworm/trixie) and bootstraps passwordless SSH from target to source (key generation, `ssh-keyscan` for `known_hosts`, `authorized_keys` append, BatchMode probe)
 - **PVE Detection** -- Per-host PVE-version badge (warns if a host is not Proxmox VE)
 - **Per-Source Config Files** -- Each replication pair lives in its own `/etc/bashclub/<source-ip>.conf` so multiple pairs coexist on a single target host (matches the upstream bashclub convention)
 - **Dataset Tagging** -- Checkbox list of all source datasets/zvols; sets/clears the `bashclub:zsync` user property (value `all`) so the upstream filter actually picks them up
@@ -70,6 +72,7 @@
 
 ### Disaster Recovery
 - **Reverse Sync** -- Send a replica back to a rebuilt source host with `zfs send -R | ssh <source> zfs recv`, reusing the SSH trust established during replication setup
+- **Guest Config Restore** -- Reverse sync restores only the disk; this step puts the VM/CT config (`/etc/pve/{qemu-server,lxc}/<vmid>.conf`) back from a host-config backup so Proxmox shows the guest again -- derives the VMID/type from the replica dataset, previews the config, and won't overwrite an existing one unless confirmed
 - **Replica Discovery** -- Scans every registered host for replica roots and lists the replicated datasets and their snapshots
 - **Flexible Target** -- Pick a registered host or a free-form address/port/user (a rebuilt host may have a new IP); the destination dataset defaults to the original source path
 - **Snapshot Choice** -- Send the newest replica snapshot (default) or any older one; `zfs send -R` carries all descendants and properties
@@ -78,6 +81,7 @@
 - **File-Level Recovery** -- Individual files are restored through the existing Snapshots view (mount any replica snapshot read-only, browse, preview, restore)
 
 ### Snapshot Check
+- **Install zfs-auto-snapshot** -- One-click install of the package (stock Debian, no extra repo) directly from the retention card when it's missing on a host
 - **Retention Policy Editor** -- View and **edit** the configured `--keep=N` value per level (frequent/hourly/daily/weekly/monthly) and enable/disable individual levels, written straight back to the zfs-auto-snapshot cron files with a timestamped backup
 - **Per-Label Analysis** -- Total snapshots, dataset count, per-dataset average, newest age
 - **Gap Detection** -- Identifies gaps in snapshot chains exceeding `MAX_AGE * 1.5`
@@ -91,7 +95,7 @@
 - **ARC Limit Editor** -- View runtime + persistent (`/etc/modprobe.d/zfs.conf`) ARC limits, current size and fill %; set a new limit with Min / Recommended / Max reference buttons (Proxmox floor `2 GiB + 1 GiB/TiB pool`, ~25 % RAM, 50 % RAM). Writes the modprobe config with a timestamped backup, rebuilds the initramfs for **all** kernels (`update-initramfs -u -k all`) and applies the runtime value immediately; `arc_max=0` resets to the ZFS default
 - **Monitoring State Hygiene** -- A pool destroyed/exported while DEGRADED is announced once and its monitoring state cleared (no eternal ghosts); the cleanup only runs on a verified pool listing, never on a failed `zpool list`. Dashboard tiles likewise exclude pools of offline hosts (rendered as "stale" instead of a confident green ONLINE)
 - **ZFS Events** -- Recent ZFS kernel events
-- **SMART Status** -- Disk health for all drives in each pool (resolved via `/dev/disk/by-id/`)
+- **SMART Status** -- Disk health for all drives in each pool (resolved via `/dev/disk/by-id/`); one-click `smartmontools` install when missing (per-disk temperature/wear trends live under Metrics)
 - **LXC Restore Clone Cleanup** -- View and destroy leftover restore-mount datasets with one-click cleanup
 - **VM Zvol Restore Sessions** -- Overview of active mounts, kpartx mappings, and snapdev status with per-item unmount and bulk cleanup
 - **Scheduled Tasks Overview** -- Shows active AI report schedules (per-host and combined) with next-run and last-run times
@@ -99,8 +103,9 @@
 
 ### Historical Metrics (Trends)
 - **Background Sampler** -- Captures pool capacity, fragmentation, allocation, health and dedup ratio every 15 minutes per host
-- **SQLite Storage** -- 90-day retention in `/app/data/pvezfs.db` (WAL journaling)
-- **Inline Trend Charts** -- Capacity%, fragmentation%, allocated GB per pool rendered as lightweight inline SVG (no external JS)
+- **Per-Disk SMART** -- Temperature (traffic-light by media type -- HDD 45/55 °C, SSD/NVMe 60/70 °C), SMART health, wear/percentage-used, reallocated/pending sectors and power-on hours for every physical disk, with a temperature trend chart; `smartmontools` installable inline when missing
+- **SQLite Storage** -- Configurable retention (default 90 days for metrics, 365 for the audit log -- `METRICS_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`) in `/app/data/pvezfs.db`; auto-trimmed each cycle with a WAL checkpoint-truncate so the volume stays bounded
+- **Inline Trend Charts** -- Theme-aware inline SVG (gradient area fill, no external JS): pool capacity%, fragmentation%, allocated GB, and per-disk temperature
 - **Configurable Range** -- 6 h / 24 h / 7 d / 30 d / 90 d views
 - **Sample Now** -- Trigger an immediate sample after adding a new host
 
@@ -358,6 +363,8 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
+| `METRICS_RETENTION_DAYS` | `90` | How long pool + disk (SMART) samples are kept before auto-cleanup; `<=0` keeps forever |
+| `AUDIT_RETENTION_DAYS` | `365` | How long audit-log entries are kept; `<=0` keeps forever |
 | `PROMETHEUS_TOKEN` | _(unset)_ | Opt-in bearer token for `/metrics` endpoint. If unset, the Prometheus exporter is disabled |
 
 ### Persistent Volumes
