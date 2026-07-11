@@ -5095,6 +5095,42 @@ async function viewDR() {
             ]));
             body.appendChild(grid);
 
+            // Pre-flight: does the destination still exist on the source with
+            // snapshots? Then a reverse sync would fail / destroy live data.
+            const preflight = h("div", { style: "margin-top:8px;font-size:12px" });
+            body.appendChild(preflight);
+            let preflightState = null;
+            const runPreflight = async () => {
+                preflightState = null;
+                preflight.innerHTML = "";
+                if (srcHostSel.value === "__custom__") {
+                    preflight.appendChild(h("span", { className: "muted" }, t("dr_pf_custom")));
+                    return;
+                }
+                const sds = dsInput.value.trim();
+                if (!sds) return;
+                preflight.appendChild(h("span", { className: "muted" }, t("dr_pf_checking")));
+                let r;
+                try {
+                    r = await API.get("/api/dr/reverse-precheck?host=" + encodeURIComponent(srcHostSel.value) +
+                                      "&dataset=" + encodeURIComponent(sds));
+                } catch (e) { preflight.innerHTML = ""; return; }
+                preflight.innerHTML = "";
+                if (!r || r.unavailable || r.error) return;
+                preflightState = r;
+                if (!r.exists) {
+                    preflight.appendChild(h("span", { style: "color:var(--success)" }, "✓ " + t("dr_pf_empty")));
+                } else if (r.snapshot_count > 0) {
+                    preflight.appendChild(h("div", { style: "color:var(--danger);background:rgba(248,81,73,0.08);border:1px solid var(--danger);border-radius:6px;padding:8px" },
+                        "✗ " + t("dr_pf_exists_snaps").replace("{n}", r.snapshot_count)));
+                } else {
+                    preflight.appendChild(h("div", { style: "color:var(--warning)" }, "⚠ " + t("dr_pf_exists_nosnap")));
+                }
+            };
+            dsInput.addEventListener("change", runPreflight);
+            srcHostSel.addEventListener("change", runPreflight);
+            runPreflight();
+
             // Snapshot picker (default: newest)
             const snapRow = h("div", { style: "margin-top:12px" });
             snapRow.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_reverse_snapshot")));
@@ -5145,6 +5181,12 @@ async function viewDR() {
                               : (hosts.find(h2 => h2.address === srcHostSel.value) || {}).user || "root";
                 const srcDs = dsInput.value.trim();
                 if (!srcAddr || !srcDs) { toast(t("dr_reverse_missing"), "error"); return; }
+
+                // Live-data guard: the destination still exists with snapshots,
+                // so a reverse sync would fail (and is only for a lost source).
+                if (preflightState && preflightState.exists && preflightState.snapshot_count > 0) {
+                    if (!confirm(t("dr_pf_confirm").replace("{n}", preflightState.snapshot_count))) return;
+                }
 
                 const force = forceCb.checked;
                 const phrase = t("dr_reverse_confirm")
@@ -5199,7 +5241,10 @@ async function viewDR() {
                             statusBlock.appendChild(h("p", {}, "✅ " + t("dr_reverse_ok")));
                         } else {
                             const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
-                            openModal(t("dr_reverse_failed"), `<p>${escapeHtml(t("dr_reverse_failed_intro"))} (exit=${escapeHtml(String(res.exit_code))})</p>${tail}`);
+                            const hint = /destination has snapshots|must destroy them/i.test(res.log_tail || "")
+                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("dr_reverse_failed_snapshots"))}</div>`
+                                : "";
+                            openModal(t("dr_reverse_failed"), `${hint}<p>${escapeHtml(t("dr_reverse_failed_intro"))} (exit=${escapeHtml(String(res.exit_code))})</p>${tail}`);
                         }
                         runBtn.disabled = false;
                     },

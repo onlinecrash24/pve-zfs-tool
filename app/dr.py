@@ -288,6 +288,33 @@ def reverse_sync_task(task_id: str) -> Optional[Dict[str, Any]]:
     return get_task(task_id)
 
 
+def check_reverse_target(source_host: Dict[str, Any], source_dataset: str) -> Dict[str, Any]:
+    """Pre-flight for a reverse sync: does the destination dataset still exist
+    on the source, and does it hold snapshots?
+
+    A full ``zfs send -R`` receiving onto an existing dataset that has its own
+    snapshots is refused by ZFS ("destination has snapshots ... must destroy
+    them"), even with ``recv -F`` -- that only prunes diverging snapshots on an
+    *incremental* stream. So an existing dataset-with-snapshots means the
+    source is intact (steady state), not a disaster: reverse sync isn't the
+    right tool and forcing it would require destroying live data (which we
+    never do). Returns ``{exists, snapshot_count, examples}``.
+    """
+    if not source_dataset or not _DS_RE.match(source_dataset) or "/" not in source_dataset:
+        return {"error": "invalid dataset"}
+    r = run_command(source_host,
+                    f"zfs list -H -o name {shlex.quote(source_dataset)} 2>/dev/null",
+                    timeout=10)
+    exists = bool(r.get("success")) and (r.get("stdout") or "").strip() == source_dataset
+    if not exists:
+        return {"exists": False, "snapshot_count": 0, "examples": []}
+    rs = run_command(source_host,
+                     f"zfs list -H -t snapshot -o name -r -d 1 {shlex.quote(source_dataset)} 2>/dev/null",
+                     timeout=15)
+    snaps = [ln.strip() for ln in (rs.get("stdout") or "").splitlines() if ln.strip()]
+    return {"exists": True, "snapshot_count": len(snaps), "examples": snaps[:5]}
+
+
 # ---------------------------------------------------------------------------
 # Guest config restore (from a host-config backup onto the rebuilt source)
 # ---------------------------------------------------------------------------

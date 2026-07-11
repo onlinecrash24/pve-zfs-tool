@@ -107,3 +107,40 @@ def test_restore_writes_when_absent(monkeypatch):
     r = dr.restore_guest_config({"address": "h"}, "qemu", "100", "x")
     assert r["success"] is True and r["exists"] is False
     assert r["dest"] == "/etc/pve/qemu-server/100.conf"
+
+
+# --- check_reverse_target (pre-flight) ------------------------------------
+
+def _fake_zfs(exists_name=None, snaps=None):
+    def run(host, cmd, timeout=10):
+        if "-t snapshot" in cmd:
+            return {"stdout": "\n".join(snaps or []), "success": True}
+        return {"stdout": exists_name or "", "success": bool(exists_name)}
+    return run
+
+
+def test_precheck_destination_absent(monkeypatch):
+    monkeypatch.setattr(dr, "run_command", _fake_zfs(exists_name=None))
+    r = dr.check_reverse_target({"address": "h"}, "rpool/data/subvol-253-disk-0")
+    assert r == {"exists": False, "snapshot_count": 0, "examples": []}
+
+
+def test_precheck_exists_with_snapshots(monkeypatch):
+    snaps = ["rpool/data/subvol-253-disk-0@zfs-auto-snap_hourly-1",
+             "rpool/data/subvol-253-disk-0@zfs-auto-snap_hourly-2"]
+    monkeypatch.setattr(dr, "run_command",
+                        _fake_zfs(exists_name="rpool/data/subvol-253-disk-0", snaps=snaps))
+    r = dr.check_reverse_target({"address": "h"}, "rpool/data/subvol-253-disk-0")
+    assert r["exists"] is True and r["snapshot_count"] == 2 and len(r["examples"]) == 2
+
+
+def test_precheck_exists_no_snapshots(monkeypatch):
+    monkeypatch.setattr(dr, "run_command",
+                        _fake_zfs(exists_name="rpool/data/vm-100-disk-0", snaps=[]))
+    r = dr.check_reverse_target({"address": "h"}, "rpool/data/vm-100-disk-0")
+    assert r["exists"] is True and r["snapshot_count"] == 0
+
+
+def test_precheck_invalid_dataset():
+    assert "error" in dr.check_reverse_target({"address": "h"}, "nodataset")
+    assert "error" in dr.check_reverse_target({"address": "h"}, "")

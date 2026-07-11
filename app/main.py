@@ -2000,6 +2000,19 @@ def api_dr_reverse_sync():
     return jsonify({"success": True, "task_id": task_id})
 
 
+@app.route("/api/dr/reverse-precheck")
+@login_required
+def api_dr_reverse_precheck():
+    """Does the reverse-sync destination still exist on the source (with
+    snapshots)? Lets the UI warn before an overwrite that would fail / destroy
+    live data. Only works for a registered source host."""
+    from app.dr import check_reverse_target
+    host = _find_host(request.args.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found", "unavailable": True}), 200
+    return jsonify(check_reverse_target(host, (request.args.get("dataset") or "").strip()))
+
+
 @app.route("/api/dr/guest-config")
 @login_required
 def api_dr_guest_config():
