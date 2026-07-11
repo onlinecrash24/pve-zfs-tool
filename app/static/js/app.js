@@ -4283,7 +4283,7 @@ async function viewReplication() {
                 addStep(t("repl_ssh_step_ak"), r.authorized_keys_updated ? "ok" : "fail");
                 addStep(t("repl_ssh_step_probe"), r.probe_ok ? "ok" : "fail");
                 if (r.probe_output && !r.probe_ok) {
-                    setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
+                    setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg-primary);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
                 }
                 sshTrustOk = !!r.success;
                 fillSshBadge();
@@ -4324,7 +4324,7 @@ async function viewReplication() {
         const tagRefreshBtn = tagInputRow.querySelector("button");
         dsBody.appendChild(tagInputRow);
 
-        const dsListWrap = h("div", { style: "max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:8px;background:var(--bg)" }, t("loading"));
+        const dsListWrap = h("div", { style: "max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:8px;background:var(--bg-primary)" }, t("loading"));
         dsBody.appendChild(dsListWrap);
 
         const dsActionRow = h("div", { style: "margin-top:10px;display:flex;gap:8px;flex-wrap:wrap" });
@@ -4470,7 +4470,7 @@ async function viewReplication() {
 
         const srcCell = h("div");
         srcCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_source")));
-        const srcInput = h("input", { type: "text", className: "form-input", value: defSourceStr, readonly: true, style: "background:var(--bg)" });
+        const srcInput = h("input", { type: "text", className: "form-input", value: defSourceStr, readonly: true, style: "color:var(--text-primary);background:var(--bg-input);cursor:not-allowed" });
         srcCell.appendChild(srcInput);
         srcCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_source_auto")));
         form.appendChild(srcCell);
@@ -4755,7 +4755,7 @@ async function viewReplication() {
         ckBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:8px" },
             t("repl_checkzfs_desc").replace("{src}", src.name || src.address).replace("{tgt}", tgt.name || tgt.address)));
         const ckSummary = h("div", { style: "margin-bottom:8px;font-size:13px" });
-        const ckTableWrap = h("div", { style: "max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg)" }, t("loading"));
+        const ckTableWrap = h("div", { style: "max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary)" }, t("loading"));
         ckBody.appendChild(ckSummary);
         ckBody.appendChild(ckTableWrap);
         ckCard.appendChild(ckBody);
@@ -4878,7 +4878,7 @@ async function viewReplication() {
         const logHeader = h("div", { className: "card-header" }, [h("span", {}, "7. " + t("repl_log_title")), refreshBtn]);
         logCard.appendChild(logHeader);
         const logBody = h("div", { className: "card-body" });
-        const logPre = h("pre", { style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
+        const logPre = h("pre", { style: "background:var(--bg-primary);color:var(--text-primary);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
         logBody.appendChild(logPre);
         logCard.appendChild(logBody);
         logMount.appendChild(logCard);
