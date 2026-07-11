@@ -7,6 +7,7 @@ entries via query() to render the Audit Log view.
 
 import json
 import logging
+import os
 import time
 
 try:
@@ -21,9 +22,24 @@ from app.database import get_conn
 
 log = logging.getLogger(__name__)
 
-# Retention — keep everything unless explicitly trimmed. Queries paginate.
 DEFAULT_QUERY_LIMIT = 200
 MAX_QUERY_LIMIT = 5000
+
+
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Retention: audit rows are tiny but security-relevant, so they're kept much
+# longer than metrics by default. Configurable via AUDIT_RETENTION_DAYS; a
+# value <= 0 disables trimming (keep everything).
+AUDIT_RETENTION_DAYS = _env_int("AUDIT_RETENTION_DAYS", 365)
 
 
 def _current_user():
@@ -155,6 +171,25 @@ def count(action=None, host=None, user=None, since=None, only_failures=False):
     conn = get_conn()
     try:
         return conn.execute(q, args).fetchone()["n"]
+    finally:
+        conn.close()
+
+
+def cleanup_old(retention_days=None):
+    """Delete audit entries older than the retention window.
+
+    ``retention_days`` defaults to AUDIT_RETENTION_DAYS; a value <= 0 disables
+    trimming (keep everything). Returns the number of rows deleted.
+    """
+    days = AUDIT_RETENTION_DAYS if retention_days is None else retention_days
+    if not days or days <= 0:
+        return 0
+    cutoff = int(time.time()) - int(days) * 86400
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM audit_log WHERE timestamp < ?", (cutoff,))
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 

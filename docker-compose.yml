@@ -14,6 +14,10 @@ services:
       - ADMIN_PASSWORD=password
       - FORCE_HTTPS=true  # HTTPS behind reverse proxy
       - TZ=Europe/Berlin  # Timezone (e.g. Europe/Berlin, UTC, America/New_York)
+      # Data retention (days) — auto-cleaned; lower these if the zfs-data
+      # volume grows too large. <=0 keeps forever.
+      - METRICS_RETENTION_DAYS=90    # pool + disk (SMART) history
+      - AUDIT_RETENTION_DAYS=365     # audit log history
 
 volumes:
   ssh-keys:

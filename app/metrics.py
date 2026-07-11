@@ -5,6 +5,7 @@ exposes query helpers for the frontend trend charts.
 """
 
 import logging
+import os
 import re
 import threading
 import time
@@ -13,9 +14,21 @@ from app.database import get_conn
 
 log = logging.getLogger(__name__)
 
-# Defaults — override via env if needed.
-SAMPLE_INTERVAL = 900   # 15 minutes
-RETENTION_DAYS = 90     # keep 90 days of samples
+
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Configurable via environment (see docker-compose). Lower the retention if the
+# zfs-data volume gets too large; RETENTION_DAYS <= 0 keeps samples forever.
+SAMPLE_INTERVAL = _env_int("METRICS_SAMPLE_INTERVAL", 900)   # seconds (15 min)
+RETENTION_DAYS = _env_int("METRICS_RETENTION_DAYS", 90)      # days of samples
 _FIRST_DELAY = 30       # wait 30s after startup before first sample
 
 _thread = None
@@ -132,16 +145,32 @@ def _store_disk_metrics(host_addr, disks):
 
 
 def _cleanup_old():
-    """Delete samples older than RETENTION_DAYS."""
-    cutoff = int(time.time()) - RETENTION_DAYS * 86400
+    """Trim old metric samples + the audit log and keep the WAL bounded.
+
+    Runs every sampler cycle. SQLite reuses freed pages for new inserts, so the
+    DB plateaus at the ~retention working set rather than growing forever; the
+    WAL checkpoint (TRUNCATE) stops the -wal side file from ballooning.
+    """
     try:
         conn = get_conn()
-        conn.execute("DELETE FROM pool_metrics WHERE timestamp < ?", (cutoff,))
-        conn.execute("DELETE FROM disk_metrics WHERE timestamp < ?", (cutoff,))
-        conn.commit()
-        conn.close()
+        try:
+            if RETENTION_DAYS and RETENTION_DAYS > 0:
+                cutoff = int(time.time()) - RETENTION_DAYS * 86400
+                conn.execute("DELETE FROM pool_metrics WHERE timestamp < ?", (cutoff,))
+                conn.execute("DELETE FROM disk_metrics WHERE timestamp < ?", (cutoff,))
+                conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("metrics cleanup failed: %s", e)
+
+    # Audit log has its own (longer, env-configurable) retention window.
+    try:
+        from app.audit import cleanup_old as audit_cleanup
+        audit_cleanup()
+    except Exception as e:
+        log.warning("audit cleanup failed: %s", e)
 
 
 def _sample_and_monitor(host):
