@@ -30,8 +30,10 @@ Safety rails:
 
 from __future__ import annotations
 
+import base64
 import re
 import shlex
+import tarfile
 from typing import Any, Dict, List, Optional
 
 from app.ssh_manager import run_command, load_hosts
@@ -284,3 +286,84 @@ def reverse_sync_async(target_host: Dict[str, Any],
 
 def reverse_sync_task(task_id: str) -> Optional[Dict[str, Any]]:
     return get_task(task_id)
+
+
+# ---------------------------------------------------------------------------
+# Guest config restore (from a host-config backup onto the rebuilt source)
+# ---------------------------------------------------------------------------
+#
+# Reverse sync only brings back the ZFS dataset (the disk). Proxmox won't show
+# the VM/CT until its /etc/pve/{qemu-server,lxc}/<vmid>.conf exists again. That
+# config lives in the tool's host-config backup (/etc/pve is captured there),
+# so we can extract it and drop it back onto the rebuilt host.
+
+# vm-/base- -> VM (qemu), subvol-/basevol- -> LXC. VMID is the number.
+_GUEST_KIND = {"vm": "qemu", "base": "qemu", "subvol": "lxc", "basevol": "lxc"}
+_GUEST_DS_RE = re.compile(r"(?:^|/)(vm|subvol|base|basevol)-(\d+)-disk-\d+")
+
+
+def guest_ref_from_dataset(dataset: str):
+    """(gtype, vmid) parsed from a dataset name, e.g. '.../subvol-253-disk-0'
+    -> ('lxc', '253'); '.../vm-100-disk-1' -> ('qemu', '100'). (None, None) if
+    the name isn't a guest disk dataset."""
+    m = _GUEST_DS_RE.search(dataset or "")
+    if not m:
+        return None, None
+    return _GUEST_KIND.get(m.group(1)), m.group(2)
+
+
+def extract_guest_config(backup_file: str, gtype: str, vmid: str) -> Dict[str, Any]:
+    """Pull ``<vmid>.conf`` for the guest out of a host-config backup tarball.
+
+    Handles the pmxcfs layout where ``/etc/pve/qemu-server`` is a symlink to
+    ``/etc/pve/nodes/<node>/qemu-server`` -- we match any regular file whose
+    path ends in ``/<subdir>/<vmid>.conf``. Returns
+    ``{found, content, member, subdir}``.
+    """
+    subdir = "lxc" if gtype == "lxc" else "qemu-server" if gtype == "qemu" else ""
+    if not subdir or not re.match(r"^\d+$", str(vmid)):
+        return {"found": False, "content": "", "member": "", "subdir": subdir}
+    suffix = f"/{subdir}/{vmid}.conf"
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                if m.isfile() and m.name.rstrip("/").endswith(suffix):
+                    f = tf.extractfile(m)
+                    if not f:
+                        continue
+                    content = f.read().decode("utf-8", "replace")
+                    return {"found": True, "content": content,
+                            "member": m.name, "subdir": subdir}
+    except (tarfile.TarError, OSError) as e:
+        return {"found": False, "content": "", "member": "", "subdir": subdir,
+                "error": str(e)[:200]}
+    return {"found": False, "content": "", "member": "", "subdir": subdir}
+
+
+def restore_guest_config(source_host: Dict[str, Any], gtype: str, vmid: str,
+                         content: str, force: bool = False) -> Dict[str, Any]:
+    """Write ``<vmid>.conf`` into /etc/pve/{qemu-server,lxc}/ on the (rebuilt)
+    source host. Refuses to overwrite an existing config unless ``force``."""
+    subdir = "lxc" if gtype == "lxc" else "qemu-server" if gtype == "qemu" else ""
+    if not subdir:
+        return {"success": False, "error": "invalid guest type"}
+    if not re.match(r"^\d+$", str(vmid)):
+        return {"success": False, "error": "invalid vmid"}
+    dest = f"/etc/pve/{subdir}/{vmid}.conf"
+
+    r = run_command(source_host,
+                    f"[ -e {shlex.quote(dest)} ] && echo __EXISTS__ || echo __NO__",
+                    timeout=10)
+    exists = "__EXISTS__" in (r.get("stdout") or "")
+    if exists and not force:
+        return {"success": False, "exists": True, "dest": dest,
+                "error": "config already exists"}
+
+    b64 = base64.b64encode((content or "").encode("utf-8")).decode("ascii")
+    script = (
+        f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(dest)} && echo __OK__"
+    )
+    rw = run_command(source_host, script, timeout=20)
+    ok = "__OK__" in (rw.get("stdout") or "")
+    return {"success": ok, "exists": exists, "dest": dest,
+            "stderr": (rw.get("stderr") or "").strip()[:200]}

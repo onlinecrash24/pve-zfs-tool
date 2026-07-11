@@ -4920,6 +4920,13 @@ async function viewReplication() {
 // view can mount and browse any snapshot, including replica ones, so
 // duplicating that here would only fragment the UX.
 //
+// (gtype, vmid) from a replica/source dataset name, mirrors dr.guest_ref_from_dataset.
+function _guestRefFromDataset(ds) {
+    const m = /(?:^|\/)(vm|subvol|base|basevol)-(\d+)-disk-\d+/.exec(ds || "");
+    if (!m) return null;
+    return { gtype: (m[1] === "subvol" || m[1] === "basevol") ? "lxc" : "qemu", vmid: m[2] };
+}
+
 async function viewDR() {
     setContent(loading());
     let pairs, hosts;
@@ -5041,6 +5048,8 @@ async function viewDR() {
 
             body.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:10px" },
                 t("dr_reverse_intro").replace("{ds}", ds)));
+            body.appendChild(h("div", { style: "font-size:12px;color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:10px" },
+                t("dr_reverse_disk_only_note")));
 
             // Default source dataset = strip replica root
             const defaultSrcDs = ds.startsWith(pair.target + "/")
@@ -5200,6 +5209,85 @@ async function viewDR() {
                     },
                 });
             };
+
+            // -- Card 4: restore the guest config from a host-config backup --
+            const gref = _guestRefFromDataset(ds);
+            const gcCard = h("div", { className: "card", style: "margin-top:16px" });
+            gcCard.appendChild(h("div", { className: "card-header" }, "4. " + t("dr_gc_title")));
+            const gcBody = h("div", { className: "card-body" });
+            gcCard.appendChild(gcBody);
+            reverseMount.appendChild(gcCard);
+            gcBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:10px" }, t("dr_gc_intro")));
+
+            if (!gref) {
+                gcBody.appendChild(h("p", { className: "muted" }, t("dr_gc_no_vmid")));
+            } else {
+                const typeLabel = gref.gtype === "lxc" ? "LXC" : "VM";
+                gcBody.appendChild(h("div", { style: "margin-bottom:10px" }, [
+                    h("span", { className: "stat-label" }, t("dr_gc_guest") + ": "),
+                    h("strong", {}, `${typeLabel} ${gref.vmid}`),
+                ]));
+
+                const gcHostSel = h("select", { className: "form-input" },
+                    hosts.map(h2 => h("option", { value: h2.address }, (h2.name || h2.address) + " (" + h2.address + ")")));
+                if (sourceHost) gcHostSel.value = sourceHost.address;
+                const backupSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+
+                const loadBackups = async () => {
+                    backupSel.innerHTML = ""; backupSel.appendChild(h("option", { value: "" }, t("loading")));
+                    try {
+                        const rb = await API.get("/api/host-backup/list?host=" + encodeURIComponent(gcHostSel.value));
+                        const bs = rb.backups || [];
+                        backupSel.innerHTML = "";
+                        if (!bs.length) { backupSel.appendChild(h("option", { value: "" }, t("dr_gc_no_backups"))); return; }
+                        bs.forEach(b => backupSel.appendChild(h("option", { value: b.filename }, b.filename)));
+                    } catch (e) { backupSel.innerHTML = ""; backupSel.appendChild(h("option", { value: "" }, e.message || "")); }
+                };
+                gcHostSel.onchange = loadBackups;
+                loadBackups();
+
+                gcBody.appendChild(h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px" }, [
+                    h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_gc_host")), gcHostSel]),
+                    h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_gc_backup")), backupSel]),
+                ]));
+
+                const pre = h("pre", { className: "output", style: "max-height:240px;font-size:11px;margin-top:10px;display:none;white-space:pre-wrap" });
+                const previewBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px" }, t("dr_gc_preview"));
+                previewBtn.onclick = async () => {
+                    if (!backupSel.value) { toast(t("dr_gc_pick_backup"), "warning"); return; }
+                    pre.style.display = "block"; pre.textContent = t("loading");
+                    try {
+                        const r = await API.get(`/api/dr/guest-config?host=${encodeURIComponent(gcHostSel.value)}&file=${encodeURIComponent(backupSel.value)}&gtype=${gref.gtype}&vmid=${gref.vmid}`);
+                        pre.textContent = r.found ? (r.content || "") : t("dr_gc_not_in_backup");
+                    } catch (e) { pre.textContent = e.message || ""; }
+                };
+                gcBody.appendChild(previewBtn);
+                gcBody.appendChild(pre);
+
+                const overwriteCb = h("input", { type: "checkbox" });
+                gcBody.appendChild(h("label", { style: "display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer" },
+                    [overwriteCb, h("span", { style: "font-size:13px" }, t("dr_gc_overwrite"))]));
+
+                const gcStatus = h("div", { style: "margin-top:8px" });
+                const restoreBtn = h("button", { className: "btn btn-primary", style: "margin-top:10px" }, t("dr_gc_restore"));
+                restoreBtn.onclick = async () => {
+                    if (!backupSel.value) { toast(t("dr_gc_pick_backup"), "warning"); return; }
+                    if (!confirm(t("dr_gc_confirm").replace("{g}", `${typeLabel} ${gref.vmid}`).replace("{h}", gcHostSel.value))) return;
+                    restoreBtn.disabled = true; gcStatus.innerHTML = "";
+                    try {
+                        const r = await API.post("/api/dr/restore-guest-config", {
+                            host: gcHostSel.value, file: backupSel.value,
+                            gtype: gref.gtype, vmid: gref.vmid, force: overwriteCb.checked,
+                        });
+                        if (r.success) { toast(t("dr_gc_ok"), "success"); gcStatus.appendChild(h("p", {}, "✅ " + (r.dest || ""))); }
+                        else if (r.exists) { toast(t("dr_gc_exists"), "error"); }
+                        else { toast(r.error || t("failed"), "error"); }
+                    } catch (e) { toast(e.message || t("failed"), "error"); }
+                    finally { restoreBtn.disabled = false; }
+                };
+                gcBody.appendChild(restoreBtn);
+                gcBody.appendChild(gcStatus);
+            }
         }
     }
 }
