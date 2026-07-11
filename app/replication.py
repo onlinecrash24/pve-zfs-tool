@@ -280,7 +280,11 @@ fi
 mkdir -p /usr/share/keyrings
 if [ ! -s "$KEY" ]; then
   curl -fsSL https://apt.bashclub.org/gpg/bashclub.pub -o /tmp/bashclub.pub
-  gpg --dearmor -o "$KEY" < /tmp/bashclub.pub
+  # Non-interactive: an SSH session has no TTY, and a stale 0-byte key from a
+  # prior failed run would make `gpg -o` prompt to overwrite -> "gpg: cannot
+  # open '/dev/tty'". --batch/--yes/--no-tty keep it fully non-interactive.
+  rm -f "$KEY"
+  gpg --batch --yes --no-tty --dearmor -o "$KEY" < /tmp/bashclub.pub
   rm -f /tmp/bashclub.pub
   chmod 0644 "$KEY"
 fi

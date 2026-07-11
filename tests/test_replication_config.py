@@ -124,6 +124,13 @@ def test_install_script_uses_current_gpg_key_url():
     assert "apt.bashclub.org/gpg.key" not in s
 
 
+def test_install_script_gpg_is_noninteractive():
+    # Regression: over SSH there is no TTY, and a stale key file would make
+    # `gpg -o` prompt to overwrite -> "gpg: cannot open '/dev/tty'".
+    s = r._build_install_script()
+    assert "--batch" in s and "--no-tty" in s
+
+
 def test_install_script_apt_update_is_non_fatal():
     # a broken foreign repo must not abort before zsync is installed
     s = r._build_install_script()
