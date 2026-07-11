@@ -265,6 +265,18 @@ def run_checks_for_host(host: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _state_value(snap: Dict[str, Any], status: Optional[str] = None) -> Dict[str, Any]:
+    """The dict persisted in monitor_state. Includes source/target so
+    source_health_map() can map a source host to its worst status cheaply,
+    without re-reading the (target-side) config files."""
+    return {"status": status if status is not None else snap.get("status"),
+            "last_sync_ts": snap.get("last_sync_ts"),
+            "lag_seconds": snap.get("lag_seconds"),
+            "schedule": snap.get("schedule"),
+            "source": snap.get("source"),
+            "target": snap.get("target")}
+
+
 def _maybe_alert(snap: Dict[str, Any]) -> None:
     key = _state_key(snap["host_address"], snap["config_path"])
     prev = _load_state(key)
@@ -275,11 +287,7 @@ def _maybe_alert(snap: Dict[str, Any]) -> None:
     last_alert_ts = prev.get("last_alert_ts")
 
     # Persist current snapshot regardless
-    _save_state(key, {"status": new_status,
-                      "last_sync_ts": snap.get("last_sync_ts"),
-                      "lag_seconds": snap.get("lag_seconds"),
-                      "schedule": snap.get("schedule")},
-                last_alert_ts)
+    _save_state(key, _state_value(snap, new_status), last_alert_ts)
 
     # Decide whether to alert
     fire = False
@@ -326,11 +334,7 @@ def _maybe_alert(snap: Dict[str, Any]) -> None:
     except Exception as e:
         log.warning("repl_monitor: send_notification failed: %s", e)
     # Mark alert ts
-    _save_state(key, {"status": new_status,
-                      "last_sync_ts": snap.get("last_sync_ts"),
-                      "lag_seconds": snap.get("lag_seconds"),
-                      "schedule": snap.get("schedule")},
-                int(time.time()))
+    _save_state(key, _state_value(snap, new_status), int(time.time()))
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +361,38 @@ def health_snapshot() -> Dict[str, Any]:
         summary[s] = summary.get(s, 0) + 1
     return {"pairs": pairs, "summary": summary,
             "checked_at": int(time.time())}
+
+
+# Higher = worse; used to pick the worst status when a source feeds several pairs.
+_STATUS_RANK = {"ok": 0, "no_schedule": 1, "pending": 1, "warn": 2, "crit": 3}
+
+
+def source_health_map() -> Dict[str, str]:
+    """Return ``{source_ip: worst_status}`` across all persisted replication
+    pairs (scope ``repl`` in monitor_state).
+
+    Cheap DB read of the last monitor round — no live cross-host SSH — so the
+    VMs & CTs page can cheaply tell whether a host's outgoing replication is
+    lagging. Requires source/target to have been persisted (see _state_value).
+    """
+    out: Dict[str, str] = {}
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT value FROM monitor_state WHERE scope='repl'"
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        try:
+            v = json.loads(row["value"]) if row["value"] else {}
+        except Exception:
+            continue
+        source = v.get("source")
+        status = v.get("status")
+        if not source or not status:
+            continue
+        ip = _extract_ip(source) or source
+        if ip not in out or _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(out[ip], 0):
+            out[ip] = status
+    return out

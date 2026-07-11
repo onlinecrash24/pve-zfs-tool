@@ -2218,13 +2218,29 @@ function _buildTable(headers, rows) {
 }
 
 // -- Guests (VMs/CTs) -----------------------------------------------------
+// Replication status pill for a guest: green check / yellow warn / red X.
+// `entry` comes from /api/pve/guest-replication; undefined = no ZFS disks found.
+function _replBadge(entry) {
+    if (!entry) return h("span", { className: "muted", title: t("repl_state_unknown"), style: "font-size:13px" }, "–");
+    const map = {
+        green: { cls: "badge-online", icon: "✓", key: "repl_state_ok" },
+        yellow: { cls: "badge-warning", icon: "⚠", key: entry.reason === "lag" ? "repl_state_lag" : "repl_state_partial" },
+        red: { cls: "badge-danger", icon: "✗", key: "repl_state_none" },
+    };
+    const m = map[entry.state] || map.red;
+    const title = t(m.key) + (entry.total ? ` (${entry.tagged}/${entry.total})` : "");
+    return h("span", { className: "badge " + m.cls, title, style: "font-weight:700" }, m.icon);
+}
+
 async function viewGuests() {
     if (!requireHost()) return;
     setContent(loading());
-    const [guests, pools] = await Promise.all([
+    const [guests, pools, repl] = await Promise.all([
         API.get(`/api/pve/guests?host=${currentHost}`),
         API.get(`/api/pools?host=${currentHost}`),
+        API.get(`/api/pve/guest-replication?host=${encodeURIComponent(currentHost)}`).catch(() => ({ states: {} })),
     ]);
+    const replStates = (repl && repl.states) || {};
 
     const all = [...(guests.vms || []), ...(guests.cts || [])];
     const container = h("div");
@@ -2249,7 +2265,7 @@ async function viewGuests() {
         const table = h("table");
         table.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("vmid")), h("th", {}, t("name")), h("th", {}, t("type")),
-            h("th", {}, t("status")), h("th", {}, t("actions")),
+            h("th", {}, t("status")), h("th", {}, t("repl_col")), h("th", {}, t("actions")),
         ])));
         const tbody = h("tbody");
         for (const g of all) {
@@ -2258,6 +2274,7 @@ async function viewGuests() {
             tr.appendChild(h("td", {}, g.name));
             tr.appendChild(h("td", {}, g.type === "qemu" ? "VM" : "LXC"));
             const sTd = h("td"); sTd.appendChild(statusBadge(g.status)); tr.appendChild(sTd);
+            const rTd = h("td"); rTd.appendChild(_replBadge(replStates[String(g.vmid)])); tr.appendChild(rTd);
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             // Lifecycle: status-dependent (start when stopped; graceful

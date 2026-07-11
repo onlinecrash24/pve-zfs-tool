@@ -847,6 +847,26 @@ def api_pve_guests():
     return jsonify({"vms": vms, "cts": cts})
 
 
+@app.route("/api/pve/guest-replication")
+@login_required
+def api_pve_guest_replication():
+    """Per-VMID replication state (green/yellow/red) for the VMs & CTs page.
+
+    green  = every disk of the guest is tagged for replication and not lagging
+    yellow = only some disks tagged, or the source's replication is behind
+    red    = no disk tagged (not replicated)
+    """
+    from app.replication import list_tagged_datasets, guest_replication_states
+    from app.replication_monitor import source_health_map
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    datasets = list_tagged_datasets(host).get("datasets", [])
+    src_status = source_health_map().get(host.get("address"))
+    states = guest_replication_states(datasets, src_status)
+    return jsonify({"states": states, "source_status": src_status})
+
+
 @app.route("/api/pve/guest-action", methods=["POST"])
 @login_required
 def api_pve_guest_action():

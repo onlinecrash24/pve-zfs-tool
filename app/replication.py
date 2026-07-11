@@ -1089,6 +1089,69 @@ def list_tagged_datasets(host: Dict[str, Any], tag: str = "bashclub:zsync") -> D
     return {"datasets": datasets, "tag": tag}
 
 
+# Guest disk datasets: rpool/data/vm-100-disk-0, .../subvol-111-disk-0,
+# .../base-9000-disk-0. The VMID is the number; only real disks count (state /
+# cloudinit datasets are transient / often untagged and would cause false
+# "partial" flags, so they're excluded).
+_GUEST_DISK_RE = re.compile(r"(?:^|/)(?:vm|subvol|base|basevol)-(\d+)-disk-\d+$")
+
+
+def guest_replication_map(datasets: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Group a list_tagged_datasets() ``datasets`` list by VMID.
+
+    Returns ``{vmid: {total, tagged, state}}`` where ``state`` is:
+      * ``none``    — no disk of the guest carries the tag
+      * ``partial`` — some but not all disks are tagged (a disk would be missing
+                      from the replica)
+      * ``full``    — every disk is tagged
+    """
+    agg: Dict[str, Dict[str, int]] = {}
+    for d in datasets or []:
+        m = _GUEST_DISK_RE.search(d.get("name", "") or "")
+        if not m:
+            continue
+        a = agg.setdefault(m.group(1), {"total": 0, "tagged": 0})
+        a["total"] += 1
+        if d.get("tagged"):
+            a["tagged"] += 1
+    out: Dict[str, Dict[str, Any]] = {}
+    for vmid, a in agg.items():
+        if a["tagged"] == 0:
+            state = "none"
+        elif a["tagged"] == a["total"]:
+            state = "full"
+        else:
+            state = "partial"
+        out[vmid] = {"total": a["total"], "tagged": a["tagged"], "state": state}
+    return out
+
+
+def guest_replication_states(datasets: List[Dict[str, Any]],
+                             source_status: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Combine the tag map with this host's replication health as a *source*.
+
+    ``source_status`` is the worst status the target-side monitor reports for
+    this host as a replication source (``ok|warn|crit|pending|None``). A
+    lagging source (warn/crit) downgrades otherwise-fully-tagged guests to
+    yellow. Returns ``{vmid: {state: green|yellow|red, reason, tagged, total}}``.
+    """
+    lagging = source_status in ("warn", "crit")
+    out: Dict[str, Dict[str, Any]] = {}
+    for vmid, info in guest_replication_map(datasets).items():
+        st = info["state"]
+        if st == "none":
+            color, reason = "red", "none"
+        elif st == "partial":
+            color, reason = "yellow", "partial"
+        elif lagging:
+            color, reason = "yellow", "lag"
+        else:
+            color, reason = "green", "ok"
+        out[vmid] = {"state": color, "reason": reason,
+                     "tagged": info["tagged"], "total": info["total"]}
+    return out
+
+
 def set_dataset_tags(host: Dict[str, Any], tag: str,
                      enable: List[str], disable: List[str],
                      value: str = "all") -> Dict[str, Any]:
