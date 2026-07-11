@@ -3330,54 +3330,67 @@ function formatBytes(bytes) {
 
 // -- Metrics (historical pool trends) --------------------------------------
 function _svgLineChart(points, opts = {}) {
-    // points: [{x: number, y: number}, ...]  — x is epoch, y is value
+    // points: [{x: number, y: number}, ...]  — x is epoch, y is value.
+    // Theme-aware: panel/grid/axis colours come from CSS variables so the
+    // chart blends into the dark cards; the series colour is passed explicitly.
     const w = opts.width || 760;
-    const hgt = opts.height || 180;
-    const pad = { l: 40, r: 12, t: 12, b: 26 };
-    if (!points || points.length === 0) {
-        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
-    }
+    const hgt = opts.height || 170;
+    const pad = { l: 42, r: 12, t: 12, b: 24 };
+    const empty = () => `<div class="muted" style="padding:24px;text-align:center;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px">${t("metrics_no_data")}</div>`;
+    if (!points || points.length === 0) return empty();
     const xs = points.map(p => p.x);
     const ys = points.map(p => p.y).filter(v => v != null && !isNaN(v));
-    if (ys.length === 0) {
-        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
-    }
+    if (ys.length === 0) return empty();
     const xmin = Math.min(...xs), xmax = Math.max(...xs);
     let ymin = Math.min(...ys), ymax = Math.max(...ys);
     if (ymin === ymax) { ymin -= 1; ymax += 1; }
     if (opts.yZero) ymin = 0;
     if (opts.yMax != null) ymax = Math.max(ymax, opts.yMax);
+    else ymax += (ymax - ymin) * 0.08;   // headroom so the line isn't glued to the top
     const xRange = xmax - xmin || 1;
     const yRange = ymax - ymin || 1;
     const plotW = w - pad.l - pad.r;
     const plotH = hgt - pad.t - pad.b;
     const px = x => pad.l + ((x - xmin) / xRange) * plotW;
     const py = y => pad.t + plotH - ((y - ymin) / yRange) * plotH;
-    const path = points
-        .filter(p => p.y != null && !isNaN(p.y))
+    const valid = points.filter(p => p.y != null && !isNaN(p.y));
+    const linePath = valid
         .map((p, i) => (i === 0 ? "M" : "L") + px(p.x).toFixed(1) + "," + py(p.y).toFixed(1))
         .join(" ");
-    // Y axis ticks (5 steps)
+    // Area fill: close the line down to the baseline and back.
+    const areaPath = linePath +
+        ` L${px(valid[valid.length - 1].x).toFixed(1)},${py(ymin).toFixed(1)}` +
+        ` L${px(valid[0].x).toFixed(1)},${py(ymin).toFixed(1)} Z`;
+    // Y axis ticks (5 steps), subtle dashed grid.
     let yTicks = "";
     for (let i = 0; i <= 4; i++) {
         const v = ymin + (yRange * i / 4);
-        const yp = py(v);
+        const yp = py(v).toFixed(1);
         const label = opts.yFmt ? opts.yFmt(v) : v.toFixed(1);
-        yTicks += `<line x1="${pad.l}" y1="${yp}" x2="${w - pad.r}" y2="${yp}" stroke="#eee" stroke-width="1"/>`;
-        yTicks += `<text x="${pad.l - 6}" y="${yp + 3}" text-anchor="end" font-size="10" fill="#888">${label}</text>`;
+        yTicks += `<line x1="${pad.l}" y1="${yp}" x2="${w - pad.r}" y2="${yp}" style="stroke:var(--border)" stroke-width="1" stroke-dasharray="2 3"/>`;
+        yTicks += `<text x="${pad.l - 6}" y="${(parseFloat(yp) + 3).toFixed(1)}" text-anchor="end" font-size="10" style="fill:var(--text-secondary)">${label}</text>`;
     }
-    // X axis ticks (start/end timestamps)
+    // X axis ticks (start/end timestamps).
     const fmtTs = ts => {
         const d = new Date(ts * 1000);
         return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     };
     const xTicks =
-        `<text x="${pad.l}" y="${hgt - 8}" font-size="10" fill="#888">${fmtTs(xmin)}</text>` +
-        `<text x="${w - pad.r}" y="${hgt - 8}" font-size="10" fill="#888" text-anchor="end">${fmtTs(xmax)}</text>`;
-    const color = opts.color || "#4a90e2";
-    return `<svg viewBox="0 0 ${w} ${hgt}" style="width:100%;height:${hgt}px;background:#fafbfc;border-radius:4px">
+        `<text x="${pad.l}" y="${hgt - 7}" font-size="10" style="fill:var(--text-secondary)">${fmtTs(xmin)}</text>` +
+        `<text x="${w - pad.r}" y="${hgt - 7}" font-size="10" style="fill:var(--text-secondary)" text-anchor="end">${fmtTs(xmax)}</text>`;
+    const color = opts.color || "#58a6ff";
+    const gid = "mg" + Math.random().toString(36).slice(2, 9);
+    const last = valid[valid.length - 1];
+    const dot = `<circle cx="${px(last.x).toFixed(1)}" cy="${py(last.y).toFixed(1)}" r="3" fill="${color}"/>`;
+    return `<svg viewBox="0 0 ${w} ${hgt}" style="width:100%;height:${hgt}px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px">
+        <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="${color}" stop-opacity="0.25"/>
+            <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+        </linearGradient></defs>
         ${yTicks}
-        <path d="${path}" fill="none" stroke="${color}" stroke-width="2"/>
+        <path d="${areaPath}" fill="url(#${gid})" stroke="none"/>
+        <path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        ${dot}
         ${xTicks}
     </svg>`;
 }
@@ -3399,25 +3412,28 @@ async function viewMetrics() {
     const top = h("div", { className: "card" });
     const lastTs = summary.newest ? new Date(summary.newest * 1000).toLocaleString() : "—";
     const oldTs = summary.oldest ? new Date(summary.oldest * 1000).toLocaleString() : "—";
+    const intervalMin = Math.round((summary.interval_seconds || 900) / 60);
     top.innerHTML = `
-        <div class="row" style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
-            <div><b>${t("metrics_samples")}:</b> ${summary.samples || 0}</div>
-            <div><b>${t("metrics_pools")}:</b> ${summary.pools || 0}</div>
-            <div><b>${t("metrics_oldest")}:</b> ${oldTs}</div>
-            <div><b>${t("metrics_newest")}:</b> ${lastTs}</div>
-            <div><b>${t("metrics_interval")}:</b> ${Math.round((summary.interval_seconds || 900) / 60)} min</div>
-        </div>
-        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <label>${t("metrics_range")}:</label>
-            <select id="m-range">
-                <option value="6">6 h</option>
-                <option value="24" selected>24 h</option>
-                <option value="168">7 d</option>
-                <option value="720">30 d</option>
-                <option value="2160">90 d</option>
-            </select>
-            <button class="btn btn-sm" id="m-refresh">${t("refresh")}</button>
-            <button class="btn btn-sm" id="m-sample-now">${t("metrics_sample_now")}</button>
+        <div class="card-body">
+            <div class="grid grid-4" style="gap:12px;margin-bottom:14px">
+                <div class="stat-card"><div class="stat-label">${t("metrics_samples")}</div><div class="stat-value">${(summary.samples || 0).toLocaleString()}</div></div>
+                <div class="stat-card"><div class="stat-label">${t("metrics_pools")}</div><div class="stat-value">${summary.pools || 0}</div></div>
+                <div class="stat-card"><div class="stat-label">${t("metrics_interval")}</div><div class="stat-value">${intervalMin} min</div></div>
+                <div class="stat-card"><div class="stat-label">${t("metrics_newest")}</div><div class="stat-value" style="font-size:15px;line-height:1.5">${lastTs}</div></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <label style="margin:0;color:var(--text-secondary);font-weight:600;font-size:13px">${t("metrics_range")}:</label>
+                <select id="m-range" class="form-control" style="width:auto">
+                    <option value="6">6 h</option>
+                    <option value="24" selected>24 h</option>
+                    <option value="168">7 d</option>
+                    <option value="720">30 d</option>
+                    <option value="2160">90 d</option>
+                </select>
+                <button class="btn btn-sm" id="m-refresh">${t("refresh")}</button>
+                <button class="btn btn-sm" id="m-sample-now">${t("metrics_sample_now")}</button>
+                <span class="muted" style="margin-left:auto;font-size:12px">${t("metrics_oldest")}: ${oldTs}</span>
+            </div>
         </div>
     `;
     container.appendChild(top);
@@ -3443,36 +3459,56 @@ async function viewMetrics() {
         const series = await API.get(`/api/metrics/series?host=${encodeURIComponent(currentHost)}&pool=${encodeURIComponent(pool)}&hours=${hours}`);
         const data = (series.data || []);
         const card = h("div", { className: "card" });
-        card.innerHTML = `<h3 style="margin-top:0">${pool} <span class="muted" style="font-weight:normal;font-size:0.85em">(${data.length} ${t("metrics_samples")})</span></h3>`;
+        card.appendChild(h("div", { className: "card-header" }, [
+            h("span", {}, pool),
+            h("span", { className: "badge badge-online", style: "font-weight:600" },
+                `${data.length} ${t("metrics_samples")}`),
+        ]));
 
         // Three charts: capacity%, fragmentation%, alloc GB
         const capPts = data.map(d => ({ x: d.timestamp, y: d.cap_pct }));
         const fragPts = data.map(d => ({ x: d.timestamp, y: d.frag_pct }));
         const allocPts = data.map(d => ({ x: d.timestamp, y: d.alloc_bytes != null ? d.alloc_bytes / (1024 ** 3) : null }));
+        const latest = data[data.length - 1] || {};
 
-        const grid = h("div", { className: "metric-grid", style: "display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px" });
-        const chartBox = (label, svgHtml, sub) => {
-            const box = document.createElement("div");
-            box.innerHTML = `<div style="font-weight:600;font-size:0.9em;margin-bottom:4px">${label}</div>
-                ${svgHtml}
-                <div class="muted" style="font-size:0.8em;margin-top:4px">${sub || ""}</div>`;
+        // One panel = label + prominent current value (traffic-light where it
+        // means something) + the chart + an optional hint.
+        const panel = (label, curValue, curStyle, svgHtml, hintHtml) => {
+            const box = h("div", { style: "min-width:0" });
+            box.appendChild(h("div", { className: "stat-label", style: "margin-bottom:2px" }, label));
+            box.appendChild(h("div", { style: "font-size:20px;font-weight:700;margin-bottom:6px;" + (curStyle || "") }, curValue));
+            const chartWrap = document.createElement("div");
+            chartWrap.innerHTML = svgHtml;
+            box.appendChild(chartWrap);
+            if (hintHtml) {
+                const hintEl = h("div", { className: "muted", style: "font-size:11px;margin-top:6px;line-height:1.4" });
+                hintEl.innerHTML = hintHtml;
+                box.appendChild(hintEl);
+            }
             return box;
         };
-        const latest = data[data.length - 1] || {};
-        grid.appendChild(chartBox(
+
+        const grid = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;padding:16px" });
+        // Capacity: lower is better -> traffic light (green <=70, orange <=85, red above)
+        grid.appendChild(panel(
             t("metrics_capacity") + " (%)",
-            _svgLineChart(capPts, { yZero: true, yMax: 100, color: "#4a90e2", yFmt: v => v.toFixed(0) + "%" }),
-            `${t("metrics_current")}: ${latest.cap_pct != null ? latest.cap_pct.toFixed(1) + "%" : "—"}`,
+            latest.cap_pct != null ? latest.cap_pct.toFixed(1) + "%" : "—",
+            ampelColor(latest.cap_pct, 85, 70, false),
+            _svgLineChart(capPts, { yZero: true, yMax: 100, color: "#58a6ff", yFmt: v => v.toFixed(0) + "%" }),
+            "",
         ));
-        grid.appendChild(chartBox(
+        // Fragmentation: informational only (harmless on SSD/NVMe) -> no colour
+        grid.appendChild(panel(
             t("metrics_frag") + " (%)",
-            _svgLineChart(fragPts, { yZero: true, color: "#e67e22", yFmt: v => v.toFixed(0) + "%" }),
-            `${t("metrics_current")}: ${latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—"}<br><span style="font-size:0.75em;opacity:0.8">${escapeHtml(t("metrics_frag_hint"))}</span>`,
+            latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—", "",
+            _svgLineChart(fragPts, { yZero: true, color: "#e3b341", yFmt: v => v.toFixed(0) + "%" }),
+            escapeHtml(t("metrics_frag_hint")),
         ));
-        grid.appendChild(chartBox(
+        grid.appendChild(panel(
             t("metrics_alloc") + " (GB)",
-            _svgLineChart(allocPts, { yZero: true, color: "#27ae60", yFmt: v => v.toFixed(1) }),
-            `${t("metrics_current")}: ${latest.alloc_bytes != null ? formatBytes(latest.alloc_bytes) : "—"}`,
+            latest.alloc_bytes != null ? formatBytes(latest.alloc_bytes) : "—", "",
+            _svgLineChart(allocPts, { yZero: true, color: "#3fb950", yFmt: v => v.toFixed(1) }),
+            "",
         ));
         card.appendChild(grid);
         container.appendChild(card);
