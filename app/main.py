@@ -847,6 +847,26 @@ def api_pve_guests():
     return jsonify({"vms": vms, "cts": cts})
 
 
+@app.route("/api/pve/guest-replication")
+@login_required
+def api_pve_guest_replication():
+    """Per-VMID replication state (green/yellow/red) for the VMs & CTs page.
+
+    green  = every disk of the guest is tagged for replication and not lagging
+    yellow = only some disks tagged, or the source's replication is behind
+    red    = no disk tagged (not replicated)
+    """
+    from app.replication import list_tagged_datasets, guest_replication_states
+    from app.replication_monitor import source_health_map
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    datasets = list_tagged_datasets(host).get("datasets", [])
+    src_status = source_health_map().get(host.get("address"))
+    states = guest_replication_states(datasets, src_status)
+    return jsonify({"states": states, "source_status": src_status})
+
+
 @app.route("/api/pve/guest-action", methods=["POST"])
 @login_required
 def api_pve_guest_action():
@@ -1978,6 +1998,54 @@ def api_dr_reverse_sync():
                        "source_address": data.get("source_address"),
                        "force": bool(data.get("force"))})
     return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/dr/guest-config")
+@login_required
+def api_dr_guest_config():
+    """Preview a guest's <vmid>.conf extracted from a host-config backup."""
+    from app.dr import extract_guest_config
+    from app.hostbackup import backup_path
+    host = _find_host(request.args.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    path = backup_path(host, (request.args.get("file") or "").strip())
+    if not path:
+        return jsonify({"found": False, "error": "backup not found"}), 404
+    return jsonify(extract_guest_config(
+        path, (request.args.get("gtype") or "").strip(),
+        (request.args.get("vmid") or "").strip()))
+
+
+@app.route("/api/dr/restore-guest-config", methods=["POST"])
+@login_required
+def api_dr_restore_guest_config():
+    """Write a guest's <vmid>.conf from a host-config backup onto the host.
+
+    Reverse-sync restores only the disk; this re-registers the VM/CT with PVE
+    by putting its config back under /etc/pve. Refuses to overwrite unless the
+    caller passes force=true.
+    """
+    from app.dr import extract_guest_config, restore_guest_config
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    gtype = (data.get("gtype") or "").strip()
+    vmid = str(data.get("vmid") or "").strip()
+    force = bool(data.get("force"))
+    path = backup_path(host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    cfg = extract_guest_config(path, gtype, vmid)
+    if not cfg.get("found"):
+        return jsonify({"success": False, "error": "guest config not found in backup"}), 404
+    res = restore_guest_config(host, gtype, vmid, cfg["content"], force=force)
+    audit_log("dr.restore_guest_config", target=f"{gtype}/{vmid}",
+              host=host["address"], success=res.get("success", False),
+              details={"file": data.get("file"), "force": force})
+    return jsonify(res)
 
 
 @app.route("/api/replication/configs")

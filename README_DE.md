@@ -37,6 +37,7 @@
 - **Lifecycle-Steuerung** -- Start, sauberes Herunterfahren, Neustart und harter Stopp pro Gast (statusabhängige Buttons, Bestätigung bei eingreifenden Aktionen, im Audit-Log erfasst)
 - **Per-Guest-Snapshots** -- ZFS-Snapshots zu einer bestimmten VM bzw. Container anzeigen
 - **Smart-Rollback** -- Stoppt VM/LXC automatisch vor dem Rollback und startet sie danach neu
+- **Replikations-Status** -- Anzeige pro Gast in der Liste: grün (alle Disks getaggt & kein Rückstand), gelb (nur manche Disks getaggt oder Quelle im Rückstand), rot (nicht repliziert); abgeleitet aus den `bashclub:zsync`-Tags plus dem Replikations-Monitor
 - **LXC-Datei-Restore** -- Einzelne Dateien aus LXC-Container-Snapshots durchsuchen und wiederherstellen:
   - Mountet den Snapshot als readonly-Clone
   - Datei-Browser mit Breadcrumbs
@@ -54,8 +55,9 @@
   - Cleanup beim Schließen des Modals, Tab-Schließen (sendBeacon) und über die Health-Seite
 
 ### Replikation (bashclub-zsync)
-- **5-Schritt-Wizard** -- Quell-/Ziel-Host-Paar → Setup → Datasets → Konfiguration → Log, mit progressiver Freischaltung
-- **Ein-Klick-Einrichtung** -- Installiert `bashclub-zsync` auf **beiden** Hosts über das offizielle deb822-APT-Repo (`apt.bashclub.org/release/`) und richtet passwortlosen SSH-Zugang vom Ziel zur Quelle ein (Key-Generierung, `ssh-keyscan` für `known_hosts`, `authorized_keys` ergänzen, BatchMode-Probe)
+- **Setup-Wizard** -- Quell-/Ziel-Host-Paar → Setup → Datasets → Konfiguration → Log, mit progressiver Freischaltung
+- **Grün/Rot-Vorabprüfung** -- Prüft vor dem Setup, was schon vorhanden ist (PVE, bashclub-Repo, `bashclub-zsync` installiert, SSH-Vertrauen), und führt nur die fehlenden Schritte aus
+- **Ein-Klick-Einrichtung** -- Installiert `bashclub-zsync` auf **beiden** Hosts über das offizielle deb822-APT-Repo (`apt.bashclub.org/release/`, Suite aus dem Host abgeleitet: bookworm/trixie) und richtet passwortlosen SSH-Zugang vom Ziel zur Quelle ein (Key-Generierung, `ssh-keyscan` für `known_hosts`, `authorized_keys` ergänzen, BatchMode-Probe)
 - **PVE-Erkennung** -- Pro Host PVE-Versions-Badge (warnt, wenn ein Host kein Proxmox VE ist)
 - **Per-Source-Config-Dateien** -- Jedes Replikations-Paar lebt in einer eigenen `/etc/bashclub/<source-ip>.conf`, sodass mehrere Paare auf einem Ziel-Host nebeneinander existieren können (entspricht der Upstream-bashclub-Konvention)
 - **Dataset-Tagging** -- Checkbox-Liste aller Quell-Datasets/Zvols; setzt bzw. entfernt die `bashclub:zsync`-User-Property (Wert `all`), damit der Upstream-Filter sie auch tatsächlich aufgreift
@@ -70,6 +72,7 @@
 
 ### Disaster Recovery
 - **Reverse-Sync** -- Sendet ein Replikat zurück an einen wiederhergestellten Quell-Host via `zfs send -R | ssh <quelle> zfs recv` und nutzt das beim Replikations-Setup eingerichtete SSH-Vertrauen weiter
+- **Guest-Konfiguration wiederherstellen** -- Der Reverse-Sync stellt nur die Disk wieder her; dieser Schritt spielt die VM/CT-Konfiguration (`/etc/pve/{qemu-server,lxc}/<vmid>.conf`) aus einem Host-Config-Backup zurück, damit Proxmox den Gast wieder anzeigt -- leitet VMID/Typ aus dem Replikat-Dataset ab, zeigt die Config zur Vorschau und überschreibt eine vorhandene nur nach Bestätigung
 - **Replikat-Erkennung** -- Scannt jeden registrierten Host nach Replikat-Wurzeln und listet die replizierten Datasets samt ihren Snapshots
 - **Flexibles Ziel** -- Registrierten Host wählen oder freie Adresse/Port/User angeben (ein neu aufgesetzter Host hat evtl. eine neue IP); das Ziel-Dataset ist mit dem Original-Quellpfad vorbelegt
 - **Snapshot-Auswahl** -- Neuesten Replikat-Snapshot (Standard) oder einen älteren senden; `zfs send -R` nimmt alle Unterhierarchien und Properties mit
@@ -78,6 +81,7 @@
 - **Datei-Wiederherstellung** -- Einzelne Dateien werden über die bestehende Snapshots-Ansicht wiederhergestellt (beliebigen Replikat-Snapshot read-only mounten, durchsuchen, ansehen, wiederherstellen)
 
 ### Snapshot-Check
+- **zfs-auto-snapshot installieren** -- Ein-Klick-Installation des Pakets (Standard-Debian, kein Extra-Repo) direkt aus der Retention-Karte, falls es auf einem Host fehlt
 - **Retention-Policy-Editor** -- Konfigurierte `--keep=N`-Werte pro Ebene (frequent/hourly/daily/weekly/monthly) anzeigen **und bearbeiten**, einzelne Ebenen aktivieren/deaktivieren -- direkt in die zfs-auto-snapshot-Cron-Dateien geschrieben, mit Zeitstempel-Backup
 - **Analyse pro Label** -- Snapshot-Gesamtzahl, Dataset-Anzahl, Durchschnitt pro Dataset, Alter des neuesten Snapshots
 - **Gap-Erkennung** -- Identifiziert Lücken in Snapshot-Ketten, wenn diese `MAX_AGE * 1.5` übersteigen
@@ -91,7 +95,7 @@
 - **ARC-Limit-Editor** -- Laufzeit- + persistentes Limit (`/etc/modprobe.d/zfs.conf`), aktuelle Größe und Füllgrad anzeigen; neues Limit setzen mit Min-/Empfohlen-/Max-Richtwerten (Proxmox-Untergrenze `2 GiB + 1 GiB/TiB Pool`, ~25 % RAM, 50 % RAM). Schreibt die modprobe-Config mit Zeitstempel-Backup, baut die initramfs für **alle** Kernel neu (`update-initramfs -u -k all`) und setzt den Laufzeitwert sofort; `arc_max=0` setzt auf den ZFS-Standard zurück
 - **Monitoring-State-Hygiene** -- Ein im DEGRADED-Zustand zerstörter/exportierter Pool wird einmal gemeldet und sein Monitoring-State bereinigt (keine ewigen Geister); die Bereinigung läuft nur bei verifizierter Pool-Liste, nie nach fehlgeschlagenem `zpool list`. Dashboard-Kacheln zählen Pools offliner Hosts ebenfalls nicht mit (Anzeige „veraltet" statt grünem ONLINE)
 - **ZFS-Events** -- Aktuelle ZFS-Kernel-Events
-- **SMART-Status** -- Festplattenzustand aller Laufwerke pro Pool (aufgelöst via `/dev/disk/by-id/`)
+- **SMART-Status** -- Festplattenzustand aller Laufwerke pro Pool (aufgelöst via `/dev/disk/by-id/`); Ein-Klick-Installation von `smartmontools`, falls es fehlt (Temperatur-/Verschleiß-Trends je Platte unter Metriken)
 - **LXC-Restore-Clone-Cleanup** -- Übrig gebliebene Restore-Mount-Datasets mit einem Klick entfernen
 - **VM-Zvol-Restore-Sessions** -- Übersicht aktiver Mounts, kpartx-Mappings und snapdev-Status mit Einzel-Unmount und Sammel-Cleanup
 - **Scheduled-Tasks-Übersicht** -- Zeigt aktive AI-Report-Schedules (per Host und kombiniert) mit nächster/letzter Ausführung
@@ -99,8 +103,9 @@
 
 ### Historische Metriken (Trends)
 - **Background-Sampler** -- Erfasst alle 15 Minuten pro Host Pool-Kapazität, Fragmentierung, Allokation, Health und Dedup-Ratio
-- **SQLite-Speicherung** -- 90 Tage Retention in `/app/data/pvezfs.db` (WAL-Journaling)
-- **Inline-Trend-Charts** -- Kapazität %, Fragmentierung %, Allokiert GB pro Pool als leichtgewichtiges Inline-SVG (kein externes JS)
+- **SMART je Platte** -- Temperatur (Ampel nach Medientyp -- HDD 45/55 °C, SSD/NVMe 60/70 °C), SMART-Gesundheit, Verschleiß/percentage-used, reallocated/pending Sektoren und Betriebsstunden für jede physische Platte, samt Temperatur-Trend-Chart; `smartmontools` bei Bedarf inline installierbar
+- **SQLite-Speicherung** -- Konfigurierbare Retention (Standard 90 Tage für Metriken, 365 fürs Audit-Log -- `METRICS_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`) in `/app/data/pvezfs.db`; jeden Zyklus automatisch getrimmt mit WAL-Checkpoint-Truncate, damit das Volume beschränkt bleibt
+- **Inline-Trend-Charts** -- Theme-fähiges Inline-SVG (Flächen-Gradient, kein externes JS): Kapazität %, Fragmentierung %, Allokiert GB und Platten-Temperatur je Platte
 - **Einstellbarer Zeitbereich** -- 6 h / 24 h / 7 T / 30 T / 90 T
 - **Sample Now** -- Sofortige Messung auslösen, z. B. nach Hinzufügen eines neuen Hosts
 
@@ -358,6 +363,8 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 | `ADMIN_PASSWORD` | `password` | Login-Passwort -- **muss geändert werden!** |
 | `FORCE_HTTPS` | `true` | Sichere Session-Cookies -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
 | `TZ` | `UTC` | Zeitzone für Reports und Scheduler (z. B. `Europe/Berlin`, `America/New_York`) |
+| `METRICS_RETENTION_DAYS` | `90` | Wie lange Pool- + Disk-(SMART-)Messwerte aufbewahrt werden, bevor aufgeräumt wird; `<=0` behält für immer |
+| `AUDIT_RETENTION_DAYS` | `365` | Wie lange Audit-Log-Einträge aufbewahrt werden; `<=0` behält für immer |
 | `PROMETHEUS_TOKEN` | _(nicht gesetzt)_ | Opt-in Bearer-Token für `/metrics`. Wenn nicht gesetzt, ist der Prometheus-Exporter deaktiviert |
 
 ### Persistente Volumes

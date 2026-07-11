@@ -2218,13 +2218,29 @@ function _buildTable(headers, rows) {
 }
 
 // -- Guests (VMs/CTs) -----------------------------------------------------
+// Replication status pill for a guest: green check / yellow warn / red X.
+// `entry` comes from /api/pve/guest-replication; undefined = no ZFS disks found.
+function _replBadge(entry) {
+    if (!entry) return h("span", { className: "muted", title: t("repl_state_unknown"), style: "font-size:13px" }, "–");
+    const map = {
+        green: { cls: "badge-online", icon: "✓", key: "repl_state_ok" },
+        yellow: { cls: "badge-warning", icon: "⚠", key: entry.reason === "lag" ? "repl_state_lag" : "repl_state_partial" },
+        red: { cls: "badge-danger", icon: "✗", key: "repl_state_none" },
+    };
+    const m = map[entry.state] || map.red;
+    const title = t(m.key) + (entry.total ? ` (${entry.tagged}/${entry.total})` : "");
+    return h("span", { className: "badge " + m.cls, title, style: "font-weight:700" }, m.icon);
+}
+
 async function viewGuests() {
     if (!requireHost()) return;
     setContent(loading());
-    const [guests, pools] = await Promise.all([
+    const [guests, pools, repl] = await Promise.all([
         API.get(`/api/pve/guests?host=${currentHost}`),
         API.get(`/api/pools?host=${currentHost}`),
+        API.get(`/api/pve/guest-replication?host=${encodeURIComponent(currentHost)}`).catch(() => ({ states: {} })),
     ]);
+    const replStates = (repl && repl.states) || {};
 
     const all = [...(guests.vms || []), ...(guests.cts || [])];
     const container = h("div");
@@ -2249,7 +2265,7 @@ async function viewGuests() {
         const table = h("table");
         table.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("vmid")), h("th", {}, t("name")), h("th", {}, t("type")),
-            h("th", {}, t("status")), h("th", {}, t("actions")),
+            h("th", {}, t("status")), h("th", {}, t("repl_col")), h("th", {}, t("actions")),
         ])));
         const tbody = h("tbody");
         for (const g of all) {
@@ -2258,6 +2274,7 @@ async function viewGuests() {
             tr.appendChild(h("td", {}, g.name));
             tr.appendChild(h("td", {}, g.type === "qemu" ? "VM" : "LXC"));
             const sTd = h("td"); sTd.appendChild(statusBadge(g.status)); tr.appendChild(sTd);
+            const rTd = h("td"); rTd.appendChild(_replBadge(replStates[String(g.vmid)])); tr.appendChild(rTd);
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             // Lifecycle: status-dependent (start when stopped; graceful
@@ -4283,7 +4300,7 @@ async function viewReplication() {
                 addStep(t("repl_ssh_step_ak"), r.authorized_keys_updated ? "ok" : "fail");
                 addStep(t("repl_ssh_step_probe"), r.probe_ok ? "ok" : "fail");
                 if (r.probe_output && !r.probe_ok) {
-                    setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
+                    setupResult.appendChild(h("pre", { style: "font-size:11px;margin-top:6px;padding:6px;background:var(--bg-primary);border-radius:4px;white-space:pre-wrap" }, r.probe_output));
                 }
                 sshTrustOk = !!r.success;
                 fillSshBadge();
@@ -4324,7 +4341,7 @@ async function viewReplication() {
         const tagRefreshBtn = tagInputRow.querySelector("button");
         dsBody.appendChild(tagInputRow);
 
-        const dsListWrap = h("div", { style: "max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:8px;background:var(--bg)" }, t("loading"));
+        const dsListWrap = h("div", { style: "max-height:320px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:8px;background:var(--bg-primary)" }, t("loading"));
         dsBody.appendChild(dsListWrap);
 
         const dsActionRow = h("div", { style: "margin-top:10px;display:flex;gap:8px;flex-wrap:wrap" });
@@ -4470,7 +4487,7 @@ async function viewReplication() {
 
         const srcCell = h("div");
         srcCell.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("repl_f_source")));
-        const srcInput = h("input", { type: "text", className: "form-input", value: defSourceStr, readonly: true, style: "background:var(--bg)" });
+        const srcInput = h("input", { type: "text", className: "form-input", value: defSourceStr, readonly: true, style: "color:var(--text-primary);background:var(--bg-input);cursor:not-allowed" });
         srcCell.appendChild(srcInput);
         srcCell.appendChild(h("div", { style: "font-size:11px;color:var(--text-secondary);margin-top:3px" }, t("repl_h_source_auto")));
         form.appendChild(srcCell);
@@ -4755,7 +4772,7 @@ async function viewReplication() {
         ckBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:8px" },
             t("repl_checkzfs_desc").replace("{src}", src.name || src.address).replace("{tgt}", tgt.name || tgt.address)));
         const ckSummary = h("div", { style: "margin-bottom:8px;font-size:13px" });
-        const ckTableWrap = h("div", { style: "max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg)" }, t("loading"));
+        const ckTableWrap = h("div", { style: "max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary)" }, t("loading"));
         ckBody.appendChild(ckSummary);
         ckBody.appendChild(ckTableWrap);
         ckCard.appendChild(ckBody);
@@ -4878,7 +4895,7 @@ async function viewReplication() {
         const logHeader = h("div", { className: "card-header" }, [h("span", {}, "7. " + t("repl_log_title")), refreshBtn]);
         logCard.appendChild(logHeader);
         const logBody = h("div", { className: "card-body" });
-        const logPre = h("pre", { style: "background:var(--bg);color:var(--text);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
+        const logPre = h("pre", { style: "background:var(--bg-primary);color:var(--text-primary);padding:10px;border-radius:4px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap" }, t("loading"));
         logBody.appendChild(logPre);
         logCard.appendChild(logBody);
         logMount.appendChild(logCard);
@@ -4903,6 +4920,13 @@ async function viewReplication() {
 // view can mount and browse any snapshot, including replica ones, so
 // duplicating that here would only fragment the UX.
 //
+// (gtype, vmid) from a replica/source dataset name, mirrors dr.guest_ref_from_dataset.
+function _guestRefFromDataset(ds) {
+    const m = /(?:^|\/)(vm|subvol|base|basevol)-(\d+)-disk-\d+/.exec(ds || "");
+    if (!m) return null;
+    return { gtype: (m[1] === "subvol" || m[1] === "basevol") ? "lxc" : "qemu", vmid: m[2] };
+}
+
 async function viewDR() {
     setContent(loading());
     let pairs, hosts;
@@ -5024,6 +5048,8 @@ async function viewDR() {
 
             body.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:10px" },
                 t("dr_reverse_intro").replace("{ds}", ds)));
+            body.appendChild(h("div", { style: "font-size:12px;color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:10px" },
+                t("dr_reverse_disk_only_note")));
 
             // Default source dataset = strip replica root
             const defaultSrcDs = ds.startsWith(pair.target + "/")
@@ -5183,6 +5209,85 @@ async function viewDR() {
                     },
                 });
             };
+
+            // -- Card 4: restore the guest config from a host-config backup --
+            const gref = _guestRefFromDataset(ds);
+            const gcCard = h("div", { className: "card", style: "margin-top:16px" });
+            gcCard.appendChild(h("div", { className: "card-header" }, "4. " + t("dr_gc_title")));
+            const gcBody = h("div", { className: "card-body" });
+            gcCard.appendChild(gcBody);
+            reverseMount.appendChild(gcCard);
+            gcBody.appendChild(h("p", { style: "font-size:12px;color:var(--text-secondary);margin-bottom:10px" }, t("dr_gc_intro")));
+
+            if (!gref) {
+                gcBody.appendChild(h("p", { className: "muted" }, t("dr_gc_no_vmid")));
+            } else {
+                const typeLabel = gref.gtype === "lxc" ? "LXC" : "VM";
+                gcBody.appendChild(h("div", { style: "margin-bottom:10px" }, [
+                    h("span", { className: "stat-label" }, t("dr_gc_guest") + ": "),
+                    h("strong", {}, `${typeLabel} ${gref.vmid}`),
+                ]));
+
+                const gcHostSel = h("select", { className: "form-input" },
+                    hosts.map(h2 => h("option", { value: h2.address }, (h2.name || h2.address) + " (" + h2.address + ")")));
+                if (sourceHost) gcHostSel.value = sourceHost.address;
+                const backupSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+
+                const loadBackups = async () => {
+                    backupSel.innerHTML = ""; backupSel.appendChild(h("option", { value: "" }, t("loading")));
+                    try {
+                        const rb = await API.get("/api/host-backup/list?host=" + encodeURIComponent(gcHostSel.value));
+                        const bs = rb.backups || [];
+                        backupSel.innerHTML = "";
+                        if (!bs.length) { backupSel.appendChild(h("option", { value: "" }, t("dr_gc_no_backups"))); return; }
+                        bs.forEach(b => backupSel.appendChild(h("option", { value: b.filename }, b.filename)));
+                    } catch (e) { backupSel.innerHTML = ""; backupSel.appendChild(h("option", { value: "" }, e.message || "")); }
+                };
+                gcHostSel.onchange = loadBackups;
+                loadBackups();
+
+                gcBody.appendChild(h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px" }, [
+                    h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_gc_host")), gcHostSel]),
+                    h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_gc_backup")), backupSel]),
+                ]));
+
+                const pre = h("pre", { className: "output", style: "max-height:240px;font-size:11px;margin-top:10px;display:none;white-space:pre-wrap" });
+                const previewBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px" }, t("dr_gc_preview"));
+                previewBtn.onclick = async () => {
+                    if (!backupSel.value) { toast(t("dr_gc_pick_backup"), "warning"); return; }
+                    pre.style.display = "block"; pre.textContent = t("loading");
+                    try {
+                        const r = await API.get(`/api/dr/guest-config?host=${encodeURIComponent(gcHostSel.value)}&file=${encodeURIComponent(backupSel.value)}&gtype=${gref.gtype}&vmid=${gref.vmid}`);
+                        pre.textContent = r.found ? (r.content || "") : t("dr_gc_not_in_backup");
+                    } catch (e) { pre.textContent = e.message || ""; }
+                };
+                gcBody.appendChild(previewBtn);
+                gcBody.appendChild(pre);
+
+                const overwriteCb = h("input", { type: "checkbox" });
+                gcBody.appendChild(h("label", { style: "display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer" },
+                    [overwriteCb, h("span", { style: "font-size:13px" }, t("dr_gc_overwrite"))]));
+
+                const gcStatus = h("div", { style: "margin-top:8px" });
+                const restoreBtn = h("button", { className: "btn btn-primary", style: "margin-top:10px" }, t("dr_gc_restore"));
+                restoreBtn.onclick = async () => {
+                    if (!backupSel.value) { toast(t("dr_gc_pick_backup"), "warning"); return; }
+                    if (!confirm(t("dr_gc_confirm").replace("{g}", `${typeLabel} ${gref.vmid}`).replace("{h}", gcHostSel.value))) return;
+                    restoreBtn.disabled = true; gcStatus.innerHTML = "";
+                    try {
+                        const r = await API.post("/api/dr/restore-guest-config", {
+                            host: gcHostSel.value, file: backupSel.value,
+                            gtype: gref.gtype, vmid: gref.vmid, force: overwriteCb.checked,
+                        });
+                        if (r.success) { toast(t("dr_gc_ok"), "success"); gcStatus.appendChild(h("p", {}, "✅ " + (r.dest || ""))); }
+                        else if (r.exists) { toast(t("dr_gc_exists"), "error"); }
+                        else { toast(r.error || t("failed"), "error"); }
+                    } catch (e) { toast(e.message || t("failed"), "error"); }
+                    finally { restoreBtn.disabled = false; }
+                };
+                gcBody.appendChild(restoreBtn);
+                gcBody.appendChild(gcStatus);
+            }
         }
     }
 }
