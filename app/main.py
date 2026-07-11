@@ -66,6 +66,7 @@ from app.metrics import (
     start_sampler as start_metrics_sampler,
     query_pool_series, list_pools as list_metric_pools,
     summary as metrics_summary, sample_host as metrics_sample_host,
+    query_disk_series, latest_disks as metrics_latest_disks,
 )
 from app.audit import log_action as audit_log, query as audit_query, count as audit_count, distinct_actions as audit_actions
 from app import cache as ssh_cache
@@ -718,6 +719,20 @@ def api_auto_snap_retention_set():
               success=result.get("success", False),
               details={"changes": [{"label": c.get("label"), "keep": c.get("keep"),
                                     "enabled": c.get("enabled")} for c in changes]})
+    return jsonify(result)
+
+
+@app.route("/api/auto-snapshot/install", methods=["POST"])
+@login_required
+def api_auto_snap_install():
+    """Install the zfs-auto-snapshot package on the host (idempotent)."""
+    from app.autosnap import install
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    result = install(host)
+    audit_log("auto_snapshot.install", target="zfs-auto-snapshot", host=host["address"],
+              success=result.get("success", False))
     return jsonify(result)
 
 
@@ -1436,6 +1451,58 @@ def api_metrics_sample_now():
         return jsonify({"success": True, "pools_sampled": n})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/metrics/disks")
+@login_required
+def api_metrics_disks():
+    """Latest SMART sample per disk on a host (from stored metrics, no SSH)."""
+    host_addr = request.args.get("host", "")
+    if not host_addr:
+        return jsonify({"disks": []})
+    return jsonify({"disks": metrics_latest_disks(host_addr)})
+
+
+@app.route("/api/metrics/disk-series")
+@login_required
+def api_metrics_disk_series():
+    """Per-disk SMART time-series. Query params: host, device (optional), hours."""
+    host_addr = request.args.get("host", "")
+    device = request.args.get("device") or None
+    try:
+        hours = int(request.args.get("hours", "24"))
+    except ValueError:
+        hours = 24
+    hours = max(1, min(hours, 24 * 365))
+    if not host_addr:
+        return jsonify({"error": "host required"}), 400
+    rows = query_disk_series(host_addr, device=device, hours=hours)
+    return jsonify({"host": host_addr, "device": device, "hours": hours, "data": rows})
+
+
+@app.route("/api/smart/status")
+@login_required
+def api_smart_status():
+    """Live check whether smartmontools is installed on the host."""
+    from app.smart import smartctl_installed
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify({"installed": smartctl_installed(host)})
+
+
+@app.route("/api/smart/install", methods=["POST"])
+@login_required
+def api_smart_install():
+    """Install smartmontools (smartctl) on the host (idempotent)."""
+    from app.smart import install
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    result = install(host)
+    audit_log("smart.install", target="smartmontools", host=host["address"],
+              success=result.get("success", False))
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

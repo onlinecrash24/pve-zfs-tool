@@ -1891,6 +1891,29 @@ async function renderRetentionEditor(mount) {
     if (!data.installed) {
         mount.innerHTML = "";
         mount.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("retention_not_installed")));
+        const installBtn = h("button", { className: "btn btn-primary btn-sm" }, t("autosnap_install_btn"));
+        const status = h("span", { style: "margin-left:10px;font-size:12px;color:var(--text-secondary)" });
+        installBtn.onclick = async () => {
+            if (!confirm(t("autosnap_install_confirm"))) return;
+            installBtn.disabled = true;
+            status.textContent = t("autosnap_installing");
+            try {
+                const r = await API.post("/api/auto-snapshot/install?host=" + encodeURIComponent(currentHost), {});
+                if (r.success) {
+                    toast(r.already ? t("autosnap_install_already") : t("autosnap_install_ok"), "success");
+                    renderRetentionEditor(mount);   // reload -> now shows the table
+                } else {
+                    installBtn.disabled = false;
+                    status.textContent = "";
+                    toast(t("autosnap_install_failed") + " " + ((r.stderr || "").trim().slice(0, 200)), "error");
+                }
+            } catch (e) {
+                installBtn.disabled = false;
+                status.textContent = "";
+                toast(t("autosnap_install_failed") + " " + (e.message || ""), "error");
+            }
+        };
+        mount.appendChild(h("div", { style: "margin-top:10px" }, [installBtn, status]));
         return;
     }
 
@@ -3307,54 +3330,67 @@ function formatBytes(bytes) {
 
 // -- Metrics (historical pool trends) --------------------------------------
 function _svgLineChart(points, opts = {}) {
-    // points: [{x: number, y: number}, ...]  — x is epoch, y is value
+    // points: [{x: number, y: number}, ...]  — x is epoch, y is value.
+    // Theme-aware: panel/grid/axis colours come from CSS variables so the
+    // chart blends into the dark cards; the series colour is passed explicitly.
     const w = opts.width || 760;
-    const hgt = opts.height || 180;
-    const pad = { l: 40, r: 12, t: 12, b: 26 };
-    if (!points || points.length === 0) {
-        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
-    }
+    const hgt = opts.height || 170;
+    const pad = { l: 42, r: 12, t: 12, b: 24 };
+    const empty = () => `<div class="muted" style="padding:24px;text-align:center;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px">${t("metrics_no_data")}</div>`;
+    if (!points || points.length === 0) return empty();
     const xs = points.map(p => p.x);
     const ys = points.map(p => p.y).filter(v => v != null && !isNaN(v));
-    if (ys.length === 0) {
-        return `<div class="muted" style="padding:20px;text-align:center">${t("metrics_no_data")}</div>`;
-    }
+    if (ys.length === 0) return empty();
     const xmin = Math.min(...xs), xmax = Math.max(...xs);
     let ymin = Math.min(...ys), ymax = Math.max(...ys);
     if (ymin === ymax) { ymin -= 1; ymax += 1; }
     if (opts.yZero) ymin = 0;
     if (opts.yMax != null) ymax = Math.max(ymax, opts.yMax);
+    else ymax += (ymax - ymin) * 0.08;   // headroom so the line isn't glued to the top
     const xRange = xmax - xmin || 1;
     const yRange = ymax - ymin || 1;
     const plotW = w - pad.l - pad.r;
     const plotH = hgt - pad.t - pad.b;
     const px = x => pad.l + ((x - xmin) / xRange) * plotW;
     const py = y => pad.t + plotH - ((y - ymin) / yRange) * plotH;
-    const path = points
-        .filter(p => p.y != null && !isNaN(p.y))
+    const valid = points.filter(p => p.y != null && !isNaN(p.y));
+    const linePath = valid
         .map((p, i) => (i === 0 ? "M" : "L") + px(p.x).toFixed(1) + "," + py(p.y).toFixed(1))
         .join(" ");
-    // Y axis ticks (5 steps)
+    // Area fill: close the line down to the baseline and back.
+    const areaPath = linePath +
+        ` L${px(valid[valid.length - 1].x).toFixed(1)},${py(ymin).toFixed(1)}` +
+        ` L${px(valid[0].x).toFixed(1)},${py(ymin).toFixed(1)} Z`;
+    // Y axis ticks (5 steps), subtle dashed grid.
     let yTicks = "";
     for (let i = 0; i <= 4; i++) {
         const v = ymin + (yRange * i / 4);
-        const yp = py(v);
+        const yp = py(v).toFixed(1);
         const label = opts.yFmt ? opts.yFmt(v) : v.toFixed(1);
-        yTicks += `<line x1="${pad.l}" y1="${yp}" x2="${w - pad.r}" y2="${yp}" stroke="#eee" stroke-width="1"/>`;
-        yTicks += `<text x="${pad.l - 6}" y="${yp + 3}" text-anchor="end" font-size="10" fill="#888">${label}</text>`;
+        yTicks += `<line x1="${pad.l}" y1="${yp}" x2="${w - pad.r}" y2="${yp}" style="stroke:var(--border)" stroke-width="1" stroke-dasharray="2 3"/>`;
+        yTicks += `<text x="${pad.l - 6}" y="${(parseFloat(yp) + 3).toFixed(1)}" text-anchor="end" font-size="10" style="fill:var(--text-secondary)">${label}</text>`;
     }
-    // X axis ticks (start/end timestamps)
+    // X axis ticks (start/end timestamps).
     const fmtTs = ts => {
         const d = new Date(ts * 1000);
         return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     };
     const xTicks =
-        `<text x="${pad.l}" y="${hgt - 8}" font-size="10" fill="#888">${fmtTs(xmin)}</text>` +
-        `<text x="${w - pad.r}" y="${hgt - 8}" font-size="10" fill="#888" text-anchor="end">${fmtTs(xmax)}</text>`;
-    const color = opts.color || "#4a90e2";
-    return `<svg viewBox="0 0 ${w} ${hgt}" style="width:100%;height:${hgt}px;background:#fafbfc;border-radius:4px">
+        `<text x="${pad.l}" y="${hgt - 7}" font-size="10" style="fill:var(--text-secondary)">${fmtTs(xmin)}</text>` +
+        `<text x="${w - pad.r}" y="${hgt - 7}" font-size="10" style="fill:var(--text-secondary)" text-anchor="end">${fmtTs(xmax)}</text>`;
+    const color = opts.color || "#58a6ff";
+    const gid = "mg" + Math.random().toString(36).slice(2, 9);
+    const last = valid[valid.length - 1];
+    const dot = `<circle cx="${px(last.x).toFixed(1)}" cy="${py(last.y).toFixed(1)}" r="3" fill="${color}"/>`;
+    return `<svg viewBox="0 0 ${w} ${hgt}" style="width:100%;height:${hgt}px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px">
+        <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="${color}" stop-opacity="0.25"/>
+            <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+        </linearGradient></defs>
         ${yTicks}
-        <path d="${path}" fill="none" stroke="${color}" stroke-width="2"/>
+        <path d="${areaPath}" fill="url(#${gid})" stroke="none"/>
+        <path d="${linePath}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        ${dot}
         ${xTicks}
     </svg>`;
 }
@@ -3376,25 +3412,28 @@ async function viewMetrics() {
     const top = h("div", { className: "card" });
     const lastTs = summary.newest ? new Date(summary.newest * 1000).toLocaleString() : "—";
     const oldTs = summary.oldest ? new Date(summary.oldest * 1000).toLocaleString() : "—";
+    const intervalMin = Math.round((summary.interval_seconds || 900) / 60);
     top.innerHTML = `
-        <div class="row" style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
-            <div><b>${t("metrics_samples")}:</b> ${summary.samples || 0}</div>
-            <div><b>${t("metrics_pools")}:</b> ${summary.pools || 0}</div>
-            <div><b>${t("metrics_oldest")}:</b> ${oldTs}</div>
-            <div><b>${t("metrics_newest")}:</b> ${lastTs}</div>
-            <div><b>${t("metrics_interval")}:</b> ${Math.round((summary.interval_seconds || 900) / 60)} min</div>
-        </div>
-        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <label>${t("metrics_range")}:</label>
-            <select id="m-range">
-                <option value="6">6 h</option>
-                <option value="24" selected>24 h</option>
-                <option value="168">7 d</option>
-                <option value="720">30 d</option>
-                <option value="2160">90 d</option>
-            </select>
-            <button class="btn btn-sm" id="m-refresh">${t("refresh")}</button>
-            <button class="btn btn-sm" id="m-sample-now">${t("metrics_sample_now")}</button>
+        <div class="card-body">
+            <div class="grid grid-4" style="gap:12px;margin-bottom:14px">
+                <div class="stat-card"><div class="stat-label">${t("metrics_samples")}</div><div class="stat-value">${(summary.samples || 0).toLocaleString()}</div></div>
+                <div class="stat-card"><div class="stat-label">${t("metrics_pools")}</div><div class="stat-value">${summary.pools || 0}</div></div>
+                <div class="stat-card"><div class="stat-label">${t("metrics_interval")}</div><div class="stat-value">${intervalMin} min</div></div>
+                <div class="stat-card"><div class="stat-label">${t("metrics_newest")}</div><div class="stat-value" style="font-size:15px;line-height:1.5">${lastTs}</div></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <label style="margin:0;color:var(--text-secondary);font-weight:600;font-size:13px">${t("metrics_range")}:</label>
+                <select id="m-range" class="form-control" style="width:auto">
+                    <option value="6">6 h</option>
+                    <option value="24" selected>24 h</option>
+                    <option value="168">7 d</option>
+                    <option value="720">30 d</option>
+                    <option value="2160">90 d</option>
+                </select>
+                <button class="btn btn-sm" id="m-refresh">${t("refresh")}</button>
+                <button class="btn btn-sm" id="m-sample-now">${t("metrics_sample_now")}</button>
+                <span class="muted" style="margin-left:auto;font-size:12px">${t("metrics_oldest")}: ${oldTs}</span>
+            </div>
         </div>
     `;
     container.appendChild(top);
@@ -3420,40 +3459,62 @@ async function viewMetrics() {
         const series = await API.get(`/api/metrics/series?host=${encodeURIComponent(currentHost)}&pool=${encodeURIComponent(pool)}&hours=${hours}`);
         const data = (series.data || []);
         const card = h("div", { className: "card" });
-        card.innerHTML = `<h3 style="margin-top:0">${pool} <span class="muted" style="font-weight:normal;font-size:0.85em">(${data.length} ${t("metrics_samples")})</span></h3>`;
+        card.appendChild(h("div", { className: "card-header" }, [
+            h("span", {}, pool),
+            h("span", { className: "badge badge-online", style: "font-weight:600" },
+                `${data.length} ${t("metrics_samples")}`),
+        ]));
 
         // Three charts: capacity%, fragmentation%, alloc GB
         const capPts = data.map(d => ({ x: d.timestamp, y: d.cap_pct }));
         const fragPts = data.map(d => ({ x: d.timestamp, y: d.frag_pct }));
         const allocPts = data.map(d => ({ x: d.timestamp, y: d.alloc_bytes != null ? d.alloc_bytes / (1024 ** 3) : null }));
+        const latest = data[data.length - 1] || {};
 
-        const grid = h("div", { className: "metric-grid", style: "display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px" });
-        const chartBox = (label, svgHtml, sub) => {
-            const box = document.createElement("div");
-            box.innerHTML = `<div style="font-weight:600;font-size:0.9em;margin-bottom:4px">${label}</div>
-                ${svgHtml}
-                <div class="muted" style="font-size:0.8em;margin-top:4px">${sub || ""}</div>`;
+        // One panel = label + prominent current value (traffic-light where it
+        // means something) + the chart + an optional hint.
+        const panel = (label, curValue, curStyle, svgHtml, hintHtml) => {
+            const box = h("div", { style: "min-width:0" });
+            box.appendChild(h("div", { className: "stat-label", style: "margin-bottom:2px" }, label));
+            box.appendChild(h("div", { style: "font-size:20px;font-weight:700;margin-bottom:6px;" + (curStyle || "") }, curValue));
+            const chartWrap = document.createElement("div");
+            chartWrap.innerHTML = svgHtml;
+            box.appendChild(chartWrap);
+            if (hintHtml) {
+                const hintEl = h("div", { className: "muted", style: "font-size:11px;margin-top:6px;line-height:1.4" });
+                hintEl.innerHTML = hintHtml;
+                box.appendChild(hintEl);
+            }
             return box;
         };
-        const latest = data[data.length - 1] || {};
-        grid.appendChild(chartBox(
+
+        const grid = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;padding:16px" });
+        // Capacity: lower is better -> traffic light (green <=70, orange <=85, red above)
+        grid.appendChild(panel(
             t("metrics_capacity") + " (%)",
-            _svgLineChart(capPts, { yZero: true, yMax: 100, color: "#4a90e2", yFmt: v => v.toFixed(0) + "%" }),
-            `${t("metrics_current")}: ${latest.cap_pct != null ? latest.cap_pct.toFixed(1) + "%" : "—"}`,
+            latest.cap_pct != null ? latest.cap_pct.toFixed(1) + "%" : "—",
+            ampelColor(latest.cap_pct, 85, 70, false),
+            _svgLineChart(capPts, { yZero: true, yMax: 100, color: "#58a6ff", yFmt: v => v.toFixed(0) + "%" }),
+            "",
         ));
-        grid.appendChild(chartBox(
+        // Fragmentation: informational only (harmless on SSD/NVMe) -> no colour
+        grid.appendChild(panel(
             t("metrics_frag") + " (%)",
-            _svgLineChart(fragPts, { yZero: true, color: "#e67e22", yFmt: v => v.toFixed(0) + "%" }),
-            `${t("metrics_current")}: ${latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—"}<br><span style="font-size:0.75em;opacity:0.8">${escapeHtml(t("metrics_frag_hint"))}</span>`,
+            latest.frag_pct != null ? latest.frag_pct.toFixed(1) + "%" : "—", "",
+            _svgLineChart(fragPts, { yZero: true, color: "#e3b341", yFmt: v => v.toFixed(0) + "%" }),
+            escapeHtml(t("metrics_frag_hint")),
         ));
-        grid.appendChild(chartBox(
+        grid.appendChild(panel(
             t("metrics_alloc") + " (GB)",
-            _svgLineChart(allocPts, { yZero: true, color: "#27ae60", yFmt: v => v.toFixed(1) }),
-            `${t("metrics_current")}: ${latest.alloc_bytes != null ? formatBytes(latest.alloc_bytes) : "—"}`,
+            latest.alloc_bytes != null ? formatBytes(latest.alloc_bytes) : "—", "",
+            _svgLineChart(allocPts, { yZero: true, color: "#3fb950", yFmt: v => v.toFixed(1) }),
+            "",
         ));
         card.appendChild(grid);
         container.appendChild(card);
     }
+
+    await renderDisksCard(container, hours);
 
     setContent(container);
     const rangeSel = document.getElementById("m-range");
@@ -3467,6 +3528,126 @@ async function viewMetrics() {
             else { toast(r.error || "Error", "error"); }
         } catch (e) { toast(e.message, "error"); }
     };
+}
+
+
+// -- Disks (SMART) ---------------------------------------------------------
+// Temperature thresholds differ by media: HDDs run cooler and age faster when
+// hot (warn 45 / crit 55), SSD/NVMe tolerate more (warn 60 / crit 70).
+function _diskTempColor(temp, type) {
+    if (temp == null || isNaN(temp)) return "";
+    const hdd = type === "hdd";
+    const warn = hdd ? 45 : 60, crit = hdd ? 55 : 70;
+    if (temp >= crit) return "color:var(--danger)";
+    if (temp >= warn) return "color:var(--warning)";
+    return "color:var(--success)";
+}
+// Any reallocated/pending sector is a concern; pending sectors are the more
+// urgent (unreadable, awaiting reallocation) so they go red immediately.
+function _sectorColor(v, critical) {
+    if (v == null) return "";
+    if (v > 0) return critical ? "color:var(--danger)" : "color:var(--warning)";
+    return "color:var(--success)";
+}
+function _formatHours(hrs) {
+    if (hrs == null || isNaN(hrs)) return "—";
+    if (hrs < 48) return `${hrs} h`;
+    const days = hrs / 24;
+    return days < 365 ? `${days.toFixed(0)} d` : `${(days / 365).toFixed(1)} a`;
+}
+
+async function renderDisksCard(container, hours) {
+    let resp;
+    try {
+        resp = await API.get("/api/metrics/disks?host=" + encodeURIComponent(currentHost));
+    } catch (e) { return; }   // metrics are best-effort — never break the page
+    const disks = (resp && resp.disks) || [];
+
+    const card = h("div", { className: "card" });
+    card.appendChild(h("div", { className: "card-header" }, [
+        h("span", {}, t("disks_title")),
+        disks.length
+            ? h("span", { className: "badge badge-online", style: "font-weight:600" }, `${disks.length} ${t("disks_count")}`)
+            : h("span", {}),
+    ]));
+
+    if (!disks.length) {
+        // No stored samples yet — is smartmontools even installed?
+        const body = h("div", { style: "padding:16px" });
+        let installed = true;
+        try {
+            const st = await API.get("/api/smart/status?host=" + encodeURIComponent(currentHost));
+            installed = !!(st && st.installed);
+        } catch (e) { installed = true; }
+        if (!installed) {
+            body.appendChild(h("p", { style: "color:var(--text-secondary)" }, t("smart_not_installed")));
+            const btn = h("button", { className: "btn btn-primary btn-sm" }, t("smart_install_btn"));
+            const status = h("span", { style: "margin-left:10px;font-size:12px;color:var(--text-secondary)" });
+            btn.onclick = async () => {
+                if (!confirm(t("smart_install_confirm"))) return;
+                btn.disabled = true; status.textContent = t("smart_installing");
+                try {
+                    const r = await API.post("/api/smart/install?host=" + encodeURIComponent(currentHost), {});
+                    if (r.success) { toast(r.already ? t("smart_install_already") : t("smart_install_ok"), "success"); viewMetrics(); }
+                    else { btn.disabled = false; status.textContent = ""; toast(t("smart_install_failed") + " " + ((r.stderr || "").trim().slice(0, 200)), "error"); }
+                } catch (e) { btn.disabled = false; status.textContent = ""; toast(t("smart_install_failed") + " " + (e.message || ""), "error"); }
+            };
+            body.appendChild(h("div", { style: "margin-top:10px" }, [btn, status]));
+        } else {
+            body.appendChild(h("p", { className: "muted" }, t("disks_no_samples")));
+        }
+        card.appendChild(body);
+        container.appendChild(card);
+        return;
+    }
+
+    // Fetch every disk's series for this range in one call, group by device.
+    const seriesByDev = {};
+    try {
+        const s = await API.get(`/api/metrics/disk-series?host=${encodeURIComponent(currentHost)}&hours=${hours}`);
+        (s.data || []).forEach(row => { (seriesByDev[row.device] = seriesByDev[row.device] || []).push(row); });
+    } catch (e) { /* charts are optional */ }
+
+    const grid = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;padding:16px" });
+    disks.forEach(d => {
+        const box = h("div", { style: "min-width:0;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-card)" });
+
+        const typeLabel = { hdd: "HDD", ssd: "SSD", nvme: "NVMe" }[d.type] || "Disk";
+        const hp = d.health_passed;
+        const healthBadge = hp == null
+            ? h("span", { className: "badge badge-stopped" }, "SMART ?")
+            : h("span", { className: hp ? "badge badge-online" : "badge badge-danger" }, hp ? t("disk_health_passed") : t("disk_health_failed"));
+        box.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap" }, [
+            h("span", { style: "font-weight:700" }, d.device),
+            h("span", { className: "badge badge-stopped", style: "font-weight:600" }, typeLabel),
+            healthBadge,
+        ]));
+        if (d.model) box.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, d.model));
+
+        box.appendChild(h("div", { className: "stat-label" }, t("disk_temp")));
+        box.appendChild(h("div", { style: "font-size:22px;font-weight:700;margin-bottom:6px;" + _diskTempColor(d.temp_c, d.type) },
+            d.temp_c != null ? `${d.temp_c.toFixed(0)} °C` : "—"));
+
+        const pts = (seriesByDev[d.device] || []).map(r => ({ x: r.timestamp, y: r.temp_c }));
+        const chartWrap = document.createElement("div");
+        chartWrap.innerHTML = _svgLineChart(pts, { yZero: false, color: "#58a6ff", height: 120, yFmt: v => v.toFixed(0) + "°" });
+        box.appendChild(chartWrap);
+
+        const stat = (label, value, style) => h("div", {}, [
+            h("div", { className: "stat-label", style: "font-size:10px" }, label),
+            h("div", { style: "font-weight:600;font-size:13px;" + (style || "") }, value),
+        ]);
+        box.appendChild(h("div", { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px" }, [
+            stat(t("disk_wear"), d.wear_pct != null ? d.wear_pct + "%" : "—", ampelColor(d.wear_pct, 80, 50, false)),
+            stat(t("disk_realloc"), d.realloc_sectors != null ? String(d.realloc_sectors) : "—", _sectorColor(d.realloc_sectors, false)),
+            stat(t("disk_pending"), d.pending_sectors != null ? String(d.pending_sectors) : "—", _sectorColor(d.pending_sectors, true)),
+            stat(t("disk_power_on"), _formatHours(d.power_on_hours), ""),
+        ]));
+
+        grid.appendChild(box);
+    });
+    card.appendChild(grid);
+    container.appendChild(card);
 }
 
 
