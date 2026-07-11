@@ -273,10 +273,15 @@ fi
 [ -f "$LEGACY_LIST" ] && rm -f "$LEGACY_LIST" || true
 [ -f "$LEGACY_KEY"  ] && rm -f "$LEGACY_KEY"  || true
 
-# Fetch the release key into the modern location
+# Fetch the release signing key into the modern location. Download to a temp
+# file first so a moved/404 key URL fails loudly on curl (with set -e) instead
+# of feeding empty input to gpg ("no valid OpenPGP data found"). The key lives
+# at /gpg/bashclub.pub (the old /gpg.key path no longer exists).
 mkdir -p /usr/share/keyrings
 if [ ! -s "$KEY" ]; then
-  curl -fsSL https://apt.bashclub.org/gpg.key | gpg --dearmor -o "$KEY"
+  curl -fsSL https://apt.bashclub.org/gpg/bashclub.pub -o /tmp/bashclub.pub
+  gpg --dearmor -o "$KEY" < /tmp/bashclub.pub
+  rm -f /tmp/bashclub.pub
   chmod 0644 "$KEY"
 fi
 

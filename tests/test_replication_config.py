@@ -116,6 +116,14 @@ def test_install_script_still_installs_zsync_from_bashclub_repo():
     assert "bashclub-archive-keyring.gpg" in s
 
 
+def test_install_script_uses_current_gpg_key_url():
+    # Regression: the signing key moved from /gpg.key (now 404 -> "gpg: no valid
+    # OpenPGP data found") to /gpg/bashclub.pub.
+    s = r._build_install_script()
+    assert "https://apt.bashclub.org/gpg/bashclub.pub" in s
+    assert "apt.bashclub.org/gpg.key" not in s
+
+
 def test_install_script_apt_update_is_non_fatal():
     # a broken foreign repo must not abort before zsync is installed
     s = r._build_install_script()
