@@ -192,12 +192,21 @@
 - **Wake-on-LAN** -- Offline-Host aus der Hosts-Ansicht wecken: Die MAC des Management-NICs wird automatisch erfasst, solange der Host online ist; Magic Packets gehen aus dem Container **und** als Relay über jeden anderen erreichbaren Host raus (eine gebridgte Docker-Umgebung broadcastet meist nicht ins LAN — ein Nachbar-PVE schon)
 
 ### Host-Config-Backup
-- **Config-Snapshot** -- Ein-Klick-Backup der Proxmox-Host-Konfiguration (NICHT der VM-Disks): das `/etc/pve`-Cluster-Dateisystem, Netzwerk-Config (`interfaces`, `hosts`, `resolv.conf`) plus Befehlsausgaben (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs`-Status)
+- **Config-Snapshot** -- Ein-Klick-Backup der Proxmox-Host-Konfiguration (NICHT der VM-Disks): das `/etc/pve`-Cluster-Dateisystem, Netzwerk-Config (`interfaces`, `hosts`, `resolv.conf`), **APT-Repos + Signing-Keys** (`/etc/apt`, ohne `auth.conf`), **`/root/.ssh/authorized_keys`** (öffentliche Keys), die **zfs-auto-snapshot-Retention-Cron**, **bashclub-zsync-Replikations-Config** (`/etc/bashclub`) und das **ARC-Limit** (`/etc/modprobe.d/zfs.conf`) plus Befehlsausgaben (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs`-Status) -- alles, um einen neu aufgesetzten Host wieder voll funktionsfähig zu machen
 - **NIC-Naming-Artefakte** -- Persistente Namensregeln (`udev *net*.rules`, systemd-`.link`-Dateien) und eine Identitäts-Erfassung pro NIC (MAC, Treiber via `ethtool -i`, `udevadm`-Pfad) — ein PVE-Major-Upgrade kann Interfaces umbenennen, und genau damit rekonstruiert man das Mapping
 - **Ins Tool geholt** -- Das Archiv wird per SFTP ins Daten-Volume geladen und kann jederzeit für den Worst-Case heruntergeladen werden
 - **Geplant** -- Pro-Host-Zeitplan täglich/wöchentlich/monatlich mit „behalte N"-Retention; ein fehlgeschlagenes geplantes Backup löst eine `host_backup_failed`-Benachrichtigung aus
 - **Geheimnisse opt-in** -- `/etc/pve/priv` (Cluster-CA-Private-Key etc.) ist **standardmäßig ausgeschlossen**; ein expliziter Schalter schließt es ein, mit Warnung im UI, dass solche Archive hochsensibel sind. Alle Downloads sind login-geschützt
 - **Unter Hosts** -- Eine „Backup"-Aktion pro Host öffnet Jetzt-erstellen, Zeitplan und die Liste gespeicherter Backups (Download / Löschen)
+
+### PVE Config Restore
+Ein **frisch installiertes PVE** aus einem Host-Config-Backup auf den Konfig-Stand eines früheren Hosts bringen — ohne Bare-Metal-/OS-Restore (unter **Proxmox → PVE Config Restore**).
+- **Backup-Browser + selektiver Restore** -- Dateien eines Backups kategorisiert durchsuchen (Gäste, Netzwerk, Storage, Paketquellen (APT), User, SSH-Zugang, Firewall, Jobs & Cron, sonstiges `/etc/pve`, System-Infos nur lesend); jede Datei vorschauen und einzeln zurückspielen. `/etc/pve/nodes/<alter-Node>/…` wird auf den lokalen Node umgemappt, und das Executable-Bit bleibt erhalten (cron-run-parts-Skripte bleiben ausführbar)
+- **Alle Gast-Configs** -- Jede VM/CT-`<vmid>.conf` auf einmal zurückspielen (überspringt vorhandene, außer „Überschreiben")
+- **Pakete nachinstallieren** -- Die gesicherte `dpkg --get-selections` anwenden (nur install/hold — additiv, entfernt nie) via `dpkg --set-selections` + `apt-get dselect-upgrade`, als Hintergrund-Task mit Live-Fortschritt (erst die APT-Repos zurückspielen)
+- **Ad-hoc-Ziel** -- Einen **noch nicht registrierten** Host per IP + Benutzer + Passwort ansprechen (transient, nie gespeichert, nie geloggt); der neue SSH-Host-Key eines neu installierten Hosts wird automatisch akzeptiert. Kein Vorab-Registrieren nötig
+- **Host wieder online** -- `authorized_keys` zurückspielen (oder Ein-Klick „Tool-Key einrichten"), damit der ursprünglich registrierte Host (gleiche Adresse) danach wieder per Key erreichbar ist
+- **Sicherheitsnetze** -- Vorschau + Einzel-Bestätigung, kein Blind-Overwrite über pmxcfs, vorhandene Dateien bleiben ohne „Überschreiben", Warnung bei Netzwerk-Config
 
 ## Quick Start
 
@@ -222,6 +231,7 @@ services:
       - ADMIN_PASSWORD=your-strong-password    # UNBEDINGT ÄNDERN!
       - FORCE_HTTPS=true                      # false, wenn nicht hinter HTTPS-Proxy
       - TZ=UTC                                # Zeitzone (z. B. Europe/Berlin)
+      - DEFAULT_LANG=de                       # Standard-UI-Sprache: de oder en
 
 volumes:
   ssh-keys:
@@ -363,6 +373,7 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 | `ADMIN_PASSWORD` | `password` | Login-Passwort -- **muss geändert werden!** |
 | `FORCE_HTTPS` | `true` | Sichere Session-Cookies -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
 | `TZ` | `UTC` | Zeitzone für Reports und Scheduler (z. B. `Europe/Berlin`, `America/New_York`) |
+| `DEFAULT_LANG` | `en` | Standard-UI-Sprache für neue Besucher (`de` oder `en`); Nutzer können weiterhin umschalten |
 | `METRICS_RETENTION_DAYS` | `90` | Wie lange Pool- + Disk-(SMART-)Messwerte aufbewahrt werden, bevor aufgeräumt wird; `<=0` behält für immer |
 | `AUDIT_RETENTION_DAYS` | `365` | Wie lange Audit-Log-Einträge aufbewahrt werden; `<=0` behält für immer |
 | `PROMETHEUS_TOKEN` | _(nicht gesetzt)_ | Opt-in Bearer-Token für `/metrics`. Wenn nicht gesetzt, ist der Prometheus-Exporter deaktiviert |
@@ -408,7 +419,7 @@ pve-zfs-tool/
     ├── notifications.py     # Telegram, Gotify, Matrix & Email Notifications
     ├── replication.py       # bashclub-zsync-Integration (Install, Config, Cron, checkzfs)
     ├── replication_monitor.py # Replikations-Lag-Erkennung + Status (Sampler-Hook)
-    ├── dr.py                # Disaster Recovery (Replikat-Erkennung, Reverse-Sync)
+    ├── dr.py                # Disaster Recovery (Replikat-Erkennung, Reverse-Sync, Config-Restore + Paket-Reinstall)
     ├── tasks.py             # In-Memory-Async-Task-Registry (lang laufende Ops)
     ├── templates/
     │   ├── index.html       # Single-Page-Application
