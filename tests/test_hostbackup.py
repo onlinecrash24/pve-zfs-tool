@@ -151,6 +151,14 @@ def test_script_captures_expected_commands():
         assert cmd in s
 
 
+def test_script_captures_authorized_keys_not_private():
+    # authorized_keys (public) is captured so a restore re-establishes SSH
+    # access; private keys must never be swept in.
+    s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
+    assert "/root/.ssh/authorized_keys" in s
+    assert "id_rsa" not in s and "id_ed25519" not in s
+
+
 def test_script_captures_nic_naming_artifacts():
     # a PVE major upgrade can rename NICs; the backup must carry everything
     # needed to reconstruct the mapping (rules/.link files + MAC/driver/path)

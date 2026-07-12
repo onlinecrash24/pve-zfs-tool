@@ -5340,7 +5340,7 @@ async function viewDR() {
 
 
 // -- Config Restore (from a host-config backup onto a fresh PVE) -----------
-const _CR_CATS = ["guests", "network", "storage", "access", "firewall", "jobs", "other", "info"];
+const _CR_CATS = ["guests", "network", "storage", "access", "ssh", "firewall", "jobs", "other", "info"];
 
 async function viewConfigRestore() {
     setContent(loading());

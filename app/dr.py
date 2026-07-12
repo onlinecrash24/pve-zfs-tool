@@ -407,6 +407,8 @@ def _rel(member: str) -> str:
 
 
 def _categorize(rel: str) -> str:
+    if rel == "root/.ssh/authorized_keys":
+        return "ssh"
     if re.search(r"/(qemu-server|lxc)/\d+\.conf$", rel):
         return "guests"
     if (rel.startswith("etc/network/") or rel in ("etc/hosts", "etc/hostname", "etc/resolv.conf")
@@ -436,6 +438,8 @@ def _backup_target_path(rel: str, local_node: str = "") -> Optional[str]:
     m = re.match(r"etc/pve/nodes/[^/]+/(.+)", rel)
     if m and local_node:
         return f"/etc/pve/nodes/{local_node}/{m.group(1)}"
+    if rel == "root/.ssh/authorized_keys":
+        return "/root/.ssh/authorized_keys"
     if rel.startswith("etc/") or rel.startswith("lib/systemd/network/"):
         return "/" + rel
     return None

@@ -111,6 +111,15 @@ for f in /etc/network/interfaces /etc/hosts /etc/resolv.conf /etc/hostname; do
 done
 [ -d /etc/network/interfaces.d ] && cp -a --parents /etc/network/interfaces.d "$STAGE" 2>/dev/null || true
 
+# Root's authorized_keys (PUBLIC keys only) -- lets a restore bring back all
+# trusted SSH access at once (incl. this tool's key) so a rebuilt host is
+# reachable again. `cat` dereferences the cluster symlink to priv/authorized_keys
+# so the content lands as a plain file. Private keys are deliberately NOT captured.
+if [ -e /root/.ssh/authorized_keys ]; then
+  mkdir -p "$STAGE/root/.ssh"
+  cat /root/.ssh/authorized_keys > "$STAGE/root/.ssh/authorized_keys" 2>/dev/null || true
+fi
+
 # NIC naming artifacts -- a major upgrade can rename interfaces (the classic
 # "host offline after PVE upgrade" pitfall); persistent-name rules plus the
 # MAC/driver/path identity captured below let you reconstruct the mapping.

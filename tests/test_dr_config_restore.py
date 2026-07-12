@@ -27,6 +27,7 @@ BACKUP = {
     "./etc/pve/jobs.cfg": "vzdump: x\n",
     "./etc/pve/nodes/pve251/qemu-server/100.conf": "cores: 2\n",
     "./etc/pve/nodes/pve251/lxc/253.conf": "arch: amd64\n",
+    "./root/.ssh/authorized_keys": "ssh-ed25519 AAAAC3Nz tool@host\n",
     "./cmd/dpkg-selections.txt": "pve-manager\tinstall\n",
     "./cmd/pveversion.txt": "pve 9\n",
 }
@@ -45,9 +46,11 @@ def test_list_categorizes_and_flags_restorable(tmp_path):
     assert files["etc/pve/nodes/pve251/qemu-server/100.conf"]["category"] == "guests"
     assert files["etc/pve/nodes/pve251/lxc/253.conf"]["category"] == "guests"
     assert files["cmd/dpkg-selections.txt"]["category"] == "info"
-    # command captures are info-only; config files are restorable
+    assert files["root/.ssh/authorized_keys"]["category"] == "ssh"
+    # command captures are info-only; config files + authorized_keys restorable
     assert files["cmd/dpkg-selections.txt"]["restorable"] is False
     assert files["etc/pve/storage.cfg"]["restorable"] is True
+    assert files["root/.ssh/authorized_keys"]["restorable"] is True
 
 
 # --- target path mapping --------------------------------------------------
@@ -58,9 +61,12 @@ def test_target_path_and_node_remap():
     # /etc/pve/nodes/<oldnode>/... -> local node
     assert dr._backup_target_path("etc/pve/nodes/OLD/qemu-server/100.conf", "newnode") \
         == "/etc/pve/nodes/newnode/qemu-server/100.conf"
+    # authorized_keys maps back to /root/.ssh
+    assert dr._backup_target_path("root/.ssh/authorized_keys", "x") == "/root/.ssh/authorized_keys"
     # not restorable
     assert dr._backup_target_path("cmd/pveversion.txt", "x") is None
     assert dr._backup_target_path("var/lib/x", "x") is None
+    assert dr._backup_target_path("root/.ssh/id_ed25519", "x") is None  # private key stays out
     assert dr._backup_target_path("", "x") is None
 
 
