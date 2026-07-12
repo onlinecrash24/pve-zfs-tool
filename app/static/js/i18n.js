@@ -2032,7 +2032,11 @@ const TRANSLATIONS = {
     },
 };
 
-let _currentLang = localStorage.getItem("zfs-tool-lang") || "en";
+// Default language: user's saved choice, else the server default from
+// DEFAULT_LANG (injected as window.ZFS_DEFAULT_LANG), else English.
+const _serverLang = (typeof window !== "undefined" && window.ZFS_DEFAULT_LANG) || "";
+let _currentLang = localStorage.getItem("zfs-tool-lang")
+    || (_serverLang === "de" || _serverLang === "en" ? _serverLang : "en");
 
 function t(key, ...args) {
     let str = TRANSLATIONS[_currentLang]?.[key] || TRANSLATIONS.en[key] || key;

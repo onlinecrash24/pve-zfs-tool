@@ -249,7 +249,10 @@ def _require_host():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    lang = (os.environ.get("DEFAULT_LANG", "en") or "en").strip().lower()
+    if lang not in ("en", "de"):
+        lang = "en"
+    return render_template("index.html", default_lang=lang)
 
 
 # ---------------------------------------------------------------------------

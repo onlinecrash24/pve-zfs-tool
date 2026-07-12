@@ -14,6 +14,7 @@ services:
       - ADMIN_PASSWORD=password
       - FORCE_HTTPS=true  # HTTPS behind reverse proxy
       - TZ=Europe/Berlin  # Timezone (e.g. Europe/Berlin, UTC, America/New_York)
+      - DEFAULT_LANG=de   # Default UI language for new visitors: de or en (user can still switch)
       # Data retention (days) — auto-cleaned; lower these if the zfs-data
       # volume grows too large. <=0 keeps forever.
       - METRICS_RETENTION_DAYS=90    # pool + disk (SMART) history
