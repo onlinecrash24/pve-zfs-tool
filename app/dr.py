@@ -421,7 +421,8 @@ def _categorize(rel: str) -> str:
         return "apt"
     if rel.startswith("etc/pve/firewall/") or rel.endswith("host.fw"):
         return "firewall"
-    if rel in ("etc/pve/jobs.cfg", "etc/pve/vzdump.cron", "etc/pve/replication.cfg"):
+    if rel in ("etc/pve/jobs.cfg", "etc/pve/vzdump.cron", "etc/pve/replication.cfg") \
+            or rel.startswith("etc/cron.") or rel.startswith("etc/bashclub/"):
         return "jobs"
     if rel in ("etc/pve/user.cfg", "etc/pve/datacenter.cfg", "etc/pve/domains.cfg") \
             or rel.startswith("etc/pve/priv/"):
@@ -507,13 +508,20 @@ def restore_backup_file(host: Dict[str, Any], backup_file: str, member: str,
     """Extract one file from the backup and write it to its target path on the
     host (byte-exact). Refuses to overwrite an existing file unless ``force``."""
     rel = _rel(member)
+    exec_bit = False
     try:
         with tarfile.open(backup_file, "r:*") as tf:
-            data = _read_member_bytes(tf, member)
+            try:
+                info = tf.getmember(member)
+            except KeyError:
+                info = None
+            if info is None or not info.isfile():
+                return {"success": False, "error": "file not found in backup"}
+            f = tf.extractfile(info)
+            data = f.read() if f else b""
+            exec_bit = bool(info.mode & 0o111)   # preserve +x (cron run-parts scripts)
     except (tarfile.TarError, OSError) as e:
         return {"success": False, "error": str(e)[:200]}
-    if data is None:
-        return {"success": False, "error": "file not found in backup"}
     dest = _backup_target_path(rel, _local_node_name(host))
     if not dest:
         return {"success": False, "error": "file is not restorable"}
@@ -526,8 +534,9 @@ def restore_backup_file(host: Dict[str, Any], backup_file: str, member: str,
 
     b64 = base64.b64encode(data).decode("ascii")
     parent = dest.rsplit("/", 1)[0]
+    chmod = f" && chmod +x {shlex.quote(dest)}" if exec_bit else ""
     script = (f"mkdir -p {shlex.quote(parent)} 2>/dev/null; "
-              f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(dest)} && echo __OK__")
+              f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(dest)}{chmod} && echo __OK__")
     w = run_command(host, script, timeout=20)
     ok = "__OK__" in (w.get("stdout") or "")
     return {"success": ok, "exists": exists, "dest": dest,

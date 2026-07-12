@@ -28,6 +28,8 @@ BACKUP = {
     "./etc/pve/nodes/pve251/qemu-server/100.conf": "cores: 2\n",
     "./etc/pve/nodes/pve251/lxc/253.conf": "arch: amd64\n",
     "./etc/apt/sources.list.d/pve.list": "deb http://download.proxmox.com/debian/pve trixie pve-no-subscription\n",
+    "./etc/cron.d/zfs-auto-snapshot": "*/15 * * * * root zfs-auto-snapshot ...\n",
+    "./etc/bashclub/192.168.66.70.conf": "SOURCE=root@192.168.66.70\n",
     "./root/.ssh/authorized_keys": "ssh-ed25519 AAAAC3Nz tool@host\n",
     "./cmd/dpkg-selections.txt": "pve-manager\tinstall\nvim\tinstall\nsl\tdeinstall\nzfsutils-linux\thold\n",
     "./cmd/pveversion.txt": "pve 9\n",
@@ -49,6 +51,8 @@ def test_list_categorizes_and_flags_restorable(tmp_path):
     assert files["cmd/dpkg-selections.txt"]["category"] == "info"
     assert files["root/.ssh/authorized_keys"]["category"] == "ssh"
     assert files["etc/apt/sources.list.d/pve.list"]["category"] == "apt"
+    assert files["etc/cron.d/zfs-auto-snapshot"]["category"] == "jobs"
+    assert files["etc/bashclub/192.168.66.70.conf"]["category"] == "jobs"
     # command captures are info-only; config files + authorized_keys restorable
     assert files["cmd/dpkg-selections.txt"]["restorable"] is False
     assert files["etc/pve/storage.cfg"]["restorable"] is True
@@ -151,3 +155,40 @@ def test_filter_selections_keeps_install_hold_only():
     # deinstall/purge and malformed lines dropped -> never removes packages
     assert not any("deinstall" in ln for ln in lines)
     assert not any(ln.startswith("garbage") for ln in lines)
+
+
+# --- executable-bit preservation ------------------------------------------
+
+def _run_capturing(captured, exists=False):
+    def run(host, cmd, timeout=10):
+        if cmd.strip() == "hostname":
+            return {"stdout": "n", "success": True}
+        if "base64 -d" in cmd:
+            captured["cmd"] = cmd
+            return {"stdout": "__OK__", "success": True}
+        return {"stdout": "__EXISTS__" if exists else "__NO__", "success": True}
+    return run
+
+
+def test_restore_preserves_exec_bit(tmp_path, monkeypatch):
+    # cron run-parts scripts must stay executable after restore
+    p = tmp_path / "b.tar.gz"
+    with tarfile.open(p, "w:gz") as tf:
+        data = b"#!/bin/sh\nexec zfs-auto-snapshot --label=hourly --keep=24 //\n"
+        info = tarfile.TarInfo("./etc/cron.hourly/zfs-auto-snapshot")
+        info.size = len(data)
+        info.mode = 0o755
+        tf.addfile(info, io.BytesIO(data))
+    captured = {}
+    monkeypatch.setattr(dr, "run_command", _run_capturing(captured))
+    r = dr.restore_backup_file({"address": "h"}, str(p), "./etc/cron.hourly/zfs-auto-snapshot")
+    assert r["success"] is True and r["dest"] == "/etc/cron.hourly/zfs-auto-snapshot"
+    assert "chmod +x" in captured["cmd"]
+
+
+def test_restore_non_exec_file_no_chmod(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, {"./etc/pve/storage.cfg": "zfspool: x\n"})
+    captured = {}
+    monkeypatch.setattr(dr, "run_command", _run_capturing(captured))
+    dr.restore_backup_file({"address": "h"}, path, "./etc/pve/storage.cfg")
+    assert "chmod +x" not in captured["cmd"]

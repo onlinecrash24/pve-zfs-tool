@@ -114,6 +114,17 @@ if [ -d /etc/apt ]; then
       -cf - . 2>/dev/null | tar -C "$STAGE/etc/apt" -xf - 2>/dev/null || true
 fi
 
+# ZFS-tool-relevant ancillary configs so all tool features survive a restore:
+# zfs-auto-snapshot retention (its cron files ARE the policy), the bashclub-zsync
+# replication config + cron, and the ARC limit.
+[ -d /etc/cron.d ] && cp -a --parents /etc/cron.d "$STAGE" 2>/dev/null || true
+for f in /etc/cron.hourly/zfs-auto-snapshot /etc/cron.daily/zfs-auto-snapshot \
+         /etc/cron.weekly/zfs-auto-snapshot /etc/cron.monthly/zfs-auto-snapshot \
+         /etc/modprobe.d/zfs.conf; do
+  [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
+done
+[ -d /etc/bashclub ] && cp -a --parents /etc/bashclub "$STAGE" 2>/dev/null || true
+
 # Network + base config files
 for f in /etc/network/interfaces /etc/hosts /etc/resolv.conf /etc/hostname; do
   [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
