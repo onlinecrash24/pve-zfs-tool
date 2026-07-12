@@ -288,6 +288,33 @@ def reverse_sync_task(task_id: str) -> Optional[Dict[str, Any]]:
     return get_task(task_id)
 
 
+def check_reverse_target(source_host: Dict[str, Any], source_dataset: str) -> Dict[str, Any]:
+    """Pre-flight for a reverse sync: does the destination dataset still exist
+    on the source, and does it hold snapshots?
+
+    A full ``zfs send -R`` receiving onto an existing dataset that has its own
+    snapshots is refused by ZFS ("destination has snapshots ... must destroy
+    them"), even with ``recv -F`` -- that only prunes diverging snapshots on an
+    *incremental* stream. So an existing dataset-with-snapshots means the
+    source is intact (steady state), not a disaster: reverse sync isn't the
+    right tool and forcing it would require destroying live data (which we
+    never do). Returns ``{exists, snapshot_count, examples}``.
+    """
+    if not source_dataset or not _DS_RE.match(source_dataset) or "/" not in source_dataset:
+        return {"error": "invalid dataset"}
+    r = run_command(source_host,
+                    f"zfs list -H -o name {shlex.quote(source_dataset)} 2>/dev/null",
+                    timeout=10)
+    exists = bool(r.get("success")) and (r.get("stdout") or "").strip() == source_dataset
+    if not exists:
+        return {"exists": False, "snapshot_count": 0, "examples": []}
+    rs = run_command(source_host,
+                     f"zfs list -H -t snapshot -o name -r -d 1 {shlex.quote(source_dataset)} 2>/dev/null",
+                     timeout=15)
+    snaps = [ln.strip() for ln in (rs.get("stdout") or "").splitlines() if ln.strip()]
+    return {"exists": True, "snapshot_count": len(snaps), "examples": snaps[:5]}
+
+
 # ---------------------------------------------------------------------------
 # Guest config restore (from a host-config backup onto the rebuilt source)
 # ---------------------------------------------------------------------------
@@ -367,3 +394,236 @@ def restore_guest_config(source_host: Dict[str, Any], gtype: str, vmid: str,
     ok = "__OK__" in (rw.get("stdout") or "")
     return {"success": ok, "exists": exists, "dest": dest,
             "stderr": (rw.get("stderr") or "").strip()[:200]}
+
+
+# ---------------------------------------------------------------------------
+# Config restore: browse a host-config backup and put individual files back
+# onto a freshly-installed PVE (network, storage, guests, users, firewall …).
+# ---------------------------------------------------------------------------
+
+def _rel(member: str) -> str:
+    """tar member name -> repo-relative path (strip the './' the archive uses)."""
+    return (member or "").lstrip("./")
+
+
+def _categorize(rel: str) -> str:
+    if rel == "root/.ssh/authorized_keys":
+        return "ssh"
+    if re.search(r"/(qemu-server|lxc)/\d+\.conf$", rel):
+        return "guests"
+    if (rel.startswith("etc/network/") or rel in ("etc/hosts", "etc/hostname", "etc/resolv.conf")
+            or rel.startswith("etc/udev/") or rel.startswith("etc/systemd/network/")
+            or rel.startswith("lib/systemd/network/")):
+        return "network"
+    if rel == "etc/pve/storage.cfg":
+        return "storage"
+    if rel.startswith("etc/apt/"):
+        return "apt"
+    if rel.startswith("etc/pve/firewall/") or rel.endswith("host.fw"):
+        return "firewall"
+    if rel in ("etc/pve/jobs.cfg", "etc/pve/vzdump.cron", "etc/pve/replication.cfg") \
+            or rel.startswith("etc/cron.") or rel.startswith("etc/bashclub/"):
+        return "jobs"
+    if rel in ("etc/pve/user.cfg", "etc/pve/datacenter.cfg", "etc/pve/domains.cfg") \
+            or rel.startswith("etc/pve/priv/"):
+        return "access"
+    if rel.startswith("cmd/"):
+        return "info"
+    return "other"
+
+
+def _backup_target_path(rel: str, local_node: str = "") -> Optional[str]:
+    """Map a backup-relative path to the absolute target on the live host, or
+    None if it isn't safely restorable. ``/etc/pve/nodes/<oldnode>/...`` is
+    remapped to the *local* node so a rename doesn't misfile it."""
+    if not rel or rel.startswith("cmd/"):
+        return None
+    m = re.match(r"etc/pve/nodes/[^/]+/(.+)", rel)
+    if m and local_node:
+        return f"/etc/pve/nodes/{local_node}/{m.group(1)}"
+    if rel == "root/.ssh/authorized_keys":
+        return "/root/.ssh/authorized_keys"
+    if rel.startswith("etc/") or rel.startswith("lib/systemd/network/"):
+        return "/" + rel
+    return None
+
+
+def _read_member_bytes(tf: "tarfile.TarFile", member: str) -> Optional[bytes]:
+    try:
+        info = tf.getmember(member)
+    except KeyError:
+        return None
+    if not info.isfile():
+        return None
+    f = tf.extractfile(info)
+    return f.read() if f else None
+
+
+def list_backup_contents(backup_file: str) -> Dict[str, Any]:
+    """List the config files in a host-config backup, categorized + flagged
+    ``restorable`` (the ``cmd/`` command captures are info-only)."""
+    out: List[Dict[str, Any]] = []
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                if not m.isfile():
+                    continue
+                rel = _rel(m.name)
+                if not rel:
+                    continue
+                cat = _categorize(rel)
+                out.append({
+                    "member": m.name,
+                    "path": rel,
+                    "size": m.size,
+                    "category": cat,
+                    "restorable": _backup_target_path(rel, "x") is not None,
+                })
+    except (tarfile.TarError, OSError) as e:
+        return {"files": [], "error": str(e)[:200]}
+    out.sort(key=lambda x: (x["category"], x["path"]))
+    return {"files": out}
+
+
+def read_backup_member(backup_file: str, member: str) -> Dict[str, Any]:
+    """Return the text content of a member for preview (capped)."""
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            data = _read_member_bytes(tf, member)
+    except (tarfile.TarError, OSError) as e:
+        return {"found": False, "error": str(e)[:200]}
+    if data is None:
+        return {"found": False}
+    return {"found": True, "content": data[:200000].decode("utf-8", "replace"),
+            "size": len(data), "path": _rel(member)}
+
+
+def _local_node_name(host: Dict[str, Any]) -> str:
+    r = run_command(host, "hostname", timeout=10)
+    return (r.get("stdout") or "").strip().split(".")[0] if r.get("success") else ""
+
+
+def restore_backup_file(host: Dict[str, Any], backup_file: str, member: str,
+                        force: bool = False) -> Dict[str, Any]:
+    """Extract one file from the backup and write it to its target path on the
+    host (byte-exact). Refuses to overwrite an existing file unless ``force``."""
+    rel = _rel(member)
+    exec_bit = False
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            try:
+                info = tf.getmember(member)
+            except KeyError:
+                info = None
+            if info is None or not info.isfile():
+                return {"success": False, "error": "file not found in backup"}
+            f = tf.extractfile(info)
+            data = f.read() if f else b""
+            exec_bit = bool(info.mode & 0o111)   # preserve +x (cron run-parts scripts)
+    except (tarfile.TarError, OSError) as e:
+        return {"success": False, "error": str(e)[:200]}
+    dest = _backup_target_path(rel, _local_node_name(host))
+    if not dest:
+        return {"success": False, "error": "file is not restorable"}
+
+    ex = run_command(host, f"[ -e {shlex.quote(dest)} ] && echo __EXISTS__ || echo __NO__",
+                     timeout=10)
+    exists = "__EXISTS__" in (ex.get("stdout") or "")
+    if exists and not force:
+        return {"success": False, "exists": True, "dest": dest, "error": "target exists"}
+
+    b64 = base64.b64encode(data).decode("ascii")
+    parent = dest.rsplit("/", 1)[0]
+    chmod = f" && chmod +x {shlex.quote(dest)}" if exec_bit else ""
+    script = (f"mkdir -p {shlex.quote(parent)} 2>/dev/null; "
+              f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(dest)}{chmod} && echo __OK__")
+    w = run_command(host, script, timeout=20)
+    ok = "__OK__" in (w.get("stdout") or "")
+    return {"success": ok, "exists": exists, "dest": dest,
+            "stderr": (w.get("stderr") or "").strip()[:200]}
+
+
+def restore_all_guest_configs(host: Dict[str, Any], backup_file: str,
+                              force: bool = False) -> Dict[str, Any]:
+    """Restore every guest config in the backup (skips ones already present
+    unless ``force``). One tar open; writes each via restore_guest_config."""
+    guests: List = []
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                mm = re.search(r"/(qemu-server|lxc)/(\d+)\.conf$", m.name)
+                if not (m.isfile() and mm):
+                    continue
+                f = tf.extractfile(m)
+                if not f:
+                    continue
+                gtype = "lxc" if mm.group(1) == "lxc" else "qemu"
+                guests.append((gtype, mm.group(2), f.read().decode("utf-8", "replace")))
+    except (tarfile.TarError, OSError) as e:
+        return {"success": False, "error": str(e)[:200], "results": []}
+
+    results = []
+    for gtype, vmid, content in guests:
+        res = restore_guest_config(host, gtype, vmid, content, force=force)
+        results.append({"vmid": vmid, "type": gtype, **res})
+    restored = sum(1 for r in results if r.get("success"))
+    skipped = sum(1 for r in results if r.get("exists") and not r.get("success"))
+    return {"success": all(r.get("success") for r in results) if results else True,
+            "results": results, "restored": restored, "skipped": skipped,
+            "total": len(results)}
+
+
+def read_dpkg_selections(backup_file: str) -> str:
+    """Return the captured ``dpkg --get-selections`` text from the backup, or ''."""
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                if m.isfile() and _rel(m.name) == "cmd/dpkg-selections.txt":
+                    f = tf.extractfile(m)
+                    return f.read().decode("utf-8", "replace") if f else ""
+    except (tarfile.TarError, OSError):
+        return ""
+    return ""
+
+
+def _filter_selections(text: str) -> str:
+    """Keep only install/hold selection lines -- additive, never deinstall/purge,
+    so a reinstall can't *remove* packages from the fresh host."""
+    out = []
+    for ln in (text or "").splitlines():
+        parts = ln.split()
+        if len(parts) >= 2 and parts[-1] in ("install", "hold"):
+            out.append(f"{parts[0]}\t{parts[-1]}")
+    return "\n".join(out)
+
+
+def reinstall_packages_async(target_host: Dict[str, Any], selections_text: str) -> str:
+    """Apply the captured package selection (install/hold only) and run
+    ``apt-get dselect-upgrade`` as a background task. Repos must already be in
+    place (restore /etc/apt first)."""
+    selections = _filter_selections(selections_text)
+
+    def _job(progress, host, sel):
+        count = len(sel.splitlines())
+        if not sel.strip():
+            return {"success": False, "error": "no installable package selections"}
+        progress(f"Applying {count} package selections …")
+        b64 = base64.b64encode(sel.encode("utf-8")).decode("ascii")
+        script = (
+            f"echo {shlex.quote(b64)} | base64 -d | dpkg --set-selections\n"
+            "DEBIAN_FRONTEND=noninteractive apt-get update -qq || true\n"
+            "DEBIAN_FRONTEND=noninteractive apt-get -y dselect-upgrade 2>&1\n"
+            "echo __exit=$?"
+        )
+        progress("Running apt-get dselect-upgrade (this can take a while) …")
+        r = run_command(host, script, timeout=3 * 3600)
+        out = r.get("stdout") or ""
+        m = re.search(r"__exit=(\d+)\s*$", out.strip())
+        exit_code = int(m.group(1)) if m else None
+        ok = bool(r.get("success")) and exit_code == 0
+        progress(f"Finished (exit={exit_code})", ok=ok, exit_code=exit_code)
+        cleaned = re.sub(r"__exit=\d+\s*$", "", out).strip()
+        return {"success": ok, "exit_code": exit_code, "count": count,
+                "log_tail": cleaned[-4000:]}
+
+    return start_task("reinstall_packages", _job, target_host, selections, prefix="dr")

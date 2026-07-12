@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PVE ZFS Tool</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=0.9.145">
+    <link rel="stylesheet" href="/static/css/style.css?v=0.9.154">
 </head>
 <body>
     <div class="app-layout">
@@ -48,6 +48,9 @@
                 <div class="nav-section" data-i18n="nav_proxmox">Proxmox</div>
                 <div class="nav-item" data-view="guests">
                     <span class="icon">&#x1F5A5;</span> <span data-i18n="nav_vms_cts">VMs & CTs</span>
+                </div>
+                <div class="nav-item" data-view="config-restore">
+                    <span class="icon">&#x1F9F0;</span> <span data-i18n="nav_config_restore">PVE Config Restore</span>
                 </div>
 
                 <div class="nav-section" data-i18n="nav_system">System</div>
@@ -124,7 +127,8 @@
     <!-- Toast -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/js/i18n.js?v=0.9.145"></script>
-    <script src="/static/js/app.js?v=0.9.145"></script>
+    <script>window.ZFS_DEFAULT_LANG = "{{ default_lang }}";</script>
+    <script src="/static/js/i18n.js?v=0.9.154"></script>
+    <script src="/static/js/app.js?v=0.9.154"></script>
 </body>
 </html>

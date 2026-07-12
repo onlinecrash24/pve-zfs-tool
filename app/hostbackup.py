@@ -105,11 +105,40 @@ if [ -d /etc/pve ]; then
   fi
 fi
 
+# APT repositories + signing keys (public) so a restore brings the package
+# sources back. auth.conf* may hold repo passwords -> deliberately excluded.
+if [ -d /etc/apt ]; then
+  mkdir -p "$STAGE/etc/apt"
+  tar -C /etc/apt --exclude=auth.conf --exclude=./auth.conf \
+      --exclude=auth.conf.d --exclude=./auth.conf.d \
+      -cf - . 2>/dev/null | tar -C "$STAGE/etc/apt" -xf - 2>/dev/null || true
+fi
+
+# ZFS-tool-relevant ancillary configs so all tool features survive a restore:
+# zfs-auto-snapshot retention (its cron files ARE the policy), the bashclub-zsync
+# replication config + cron, and the ARC limit.
+[ -d /etc/cron.d ] && cp -a --parents /etc/cron.d "$STAGE" 2>/dev/null || true
+for f in /etc/cron.hourly/zfs-auto-snapshot /etc/cron.daily/zfs-auto-snapshot \
+         /etc/cron.weekly/zfs-auto-snapshot /etc/cron.monthly/zfs-auto-snapshot \
+         /etc/modprobe.d/zfs.conf; do
+  [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
+done
+[ -d /etc/bashclub ] && cp -a --parents /etc/bashclub "$STAGE" 2>/dev/null || true
+
 # Network + base config files
 for f in /etc/network/interfaces /etc/hosts /etc/resolv.conf /etc/hostname; do
   [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
 done
 [ -d /etc/network/interfaces.d ] && cp -a --parents /etc/network/interfaces.d "$STAGE" 2>/dev/null || true
+
+# Root's authorized_keys (PUBLIC keys only) -- lets a restore bring back all
+# trusted SSH access at once (incl. this tool's key) so a rebuilt host is
+# reachable again. `cat` dereferences the cluster symlink to priv/authorized_keys
+# so the content lands as a plain file. Private keys are deliberately NOT captured.
+if [ -e /root/.ssh/authorized_keys ]; then
+  mkdir -p "$STAGE/root/.ssh"
+  cat /root/.ssh/authorized_keys > "$STAGE/root/.ssh/authorized_keys" 2>/dev/null || true
+fi
 
 # NIC naming artifacts -- a major upgrade can rename interfaces (the classic
 # "host offline after PVE upgrade" pitfall); persistent-name rules plus the

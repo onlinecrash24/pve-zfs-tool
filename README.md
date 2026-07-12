@@ -192,12 +192,21 @@
 - **Wake-on-LAN** -- Wake an offline host from the Hosts view: the management NIC's MAC is captured automatically while the host is online; magic packets are sent from the container **and** relayed via every other reachable host (a bridged Docker network usually can't broadcast into the LAN, a sibling PVE node can)
 
 ### Host Config Backup
-- **Config-Level Snapshot** -- One-click backup of a Proxmox host's configuration (NOT VM disks): the `/etc/pve` cluster filesystem, network config (`interfaces`, `hosts`, `resolv.conf`), plus command captures (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs` state)
+- **Config-Level Snapshot** -- One-click backup of a Proxmox host's configuration (NOT VM disks): the `/etc/pve` cluster filesystem, network config (`interfaces`, `hosts`, `resolv.conf`), **APT repos + signing keys** (`/etc/apt`, minus `auth.conf`), **`/root/.ssh/authorized_keys`** (public keys), the **zfs-auto-snapshot retention cron**, **bashclub-zsync replication config** (`/etc/bashclub`) and the **ARC limit** (`/etc/modprobe.d/zfs.conf`), plus command captures (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs` state) -- everything needed to bring a rebuilt host back to full working order
 - **NIC Naming Artifacts** -- Persistent-name rules (`udev *net*.rules`, systemd `.link` files) and a per-NIC identity capture (MAC, driver via `ethtool -i`, `udevadm` path) — a PVE major upgrade can rename interfaces, and this is exactly what you need to reconstruct the mapping
 - **Pulled Into the Tool** -- The archive is fetched into the data volume via SFTP and can be downloaded any time for a worst-case recovery
 - **Scheduled** -- Per-host daily/weekly/monthly schedule with a keep-N retention; a failed scheduled backup raises a `host_backup_failed` notification
 - **Secrets Opt-In** -- `/etc/pve/priv` (cluster CA private key etc.) is **excluded by default**; an explicit toggle includes it, with an in-UI warning that those archives are highly sensitive. All downloads are login-gated
 - **Under Hosts** -- A per-host "Backup" action opens create-now, schedule, and the stored-backup list (download / delete)
+
+### PVE Config Restore
+Rebuild a **freshly-installed PVE** to a previous host's configuration from a host-config backup — no bare-metal/OS restore needed (found under **Proxmox → PVE Config Restore**).
+- **Backup Browser + Selective Restore** -- Browse a backup's files, categorized (Guests, Network, Storage, Package sources (APT), Users, SSH access, Firewall, Jobs & cron, other `/etc/pve`, read-only system info); preview any file and restore individual ones. `/etc/pve/nodes/<oldnode>/…` is remapped to the local node, and the executable bit is preserved (cron run-parts scripts stay runnable)
+- **Bulk Guest Configs** -- Restore every VM/CT `<vmid>.conf` at once (skips existing unless overwrite)
+- **Reinstall Packages** -- Apply the captured `dpkg --get-selections` (install/hold only — additive, never removes) via `dpkg --set-selections` + `apt-get dselect-upgrade`, as a background task with live progress (restore the APT repos first)
+- **Ad-Hoc Target** -- Point at a **not-yet-registered** host by IP + user + password (transient, never stored, never logged); a reinstalled host's new SSH host key is accepted automatically. Avoids the register-first chicken-and-egg
+- **Bring the Host Back Online** -- Restore `authorized_keys` (or one-click "install tool key") so the original registered host (same address) becomes key-reachable again after the restore
+- **Safety Rails** -- Preview + per-item confirm, no blind pmxcfs overwrite, existing files kept unless "Overwrite", a connectivity warning on network config
 
 ## Quick Start
 
@@ -222,6 +231,7 @@ services:
       - ADMIN_PASSWORD=your-strong-password    # CHANGE THIS!
       - FORCE_HTTPS=true                      # Set to false if not behind HTTPS proxy
       - TZ=UTC                                # Timezone (e.g. Europe/Berlin)
+      - DEFAULT_LANG=en                       # Default UI language: de or en
 
 volumes:
   ssh-keys:
@@ -363,6 +373,7 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
+| `DEFAULT_LANG` | `en` | Default UI language for new visitors (`de` or `en`); users can still switch |
 | `METRICS_RETENTION_DAYS` | `90` | How long pool + disk (SMART) samples are kept before auto-cleanup; `<=0` keeps forever |
 | `AUDIT_RETENTION_DAYS` | `365` | How long audit-log entries are kept; `<=0` keeps forever |
 | `PROMETHEUS_TOKEN` | _(unset)_ | Opt-in bearer token for `/metrics` endpoint. If unset, the Prometheus exporter is disabled |
@@ -408,7 +419,7 @@ pve-zfs-tool/
     ├── notifications.py     # Telegram, Gotify, Matrix & Email notifications
     ├── replication.py       # bashclub-zsync integration (install, config, cron, checkzfs)
     ├── replication_monitor.py # Replication lag detection + status (sampler hook)
-    ├── dr.py                # Disaster recovery (replica discovery, reverse sync)
+    ├── dr.py                # Disaster recovery (replica discovery, reverse sync, config restore + package reinstall)
     ├── tasks.py             # In-memory async task registry (long-running ops)
     ├── templates/
     │   ├── index.html       # Single-page application

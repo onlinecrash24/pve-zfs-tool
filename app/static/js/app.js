@@ -145,6 +145,7 @@ async function renderView() {
         "snapshot-check": viewSnapshotCheck,
         replication: viewReplication,
         dr: viewDR,
+        "config-restore": viewConfigRestore,
         guests: viewGuests,
         health: viewHealth,
         metrics: viewMetrics,
@@ -307,6 +308,15 @@ async function viewHome() {
                     <li>${escapeHtml(t("feat_backup_2"))}</li>
                     <li>${escapeHtml(t("feat_backup_3"))}</li>
                     <li>${escapeHtml(t("feat_backup_4"))}</li>
+                </ul>
+            </div>
+            <div>
+                <h4 style="margin-bottom:8px;color:var(--accent)">${escapeHtml(t("feat_cr_title"))}</h4>
+                <ul style="font-size:13px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+                    <li>${escapeHtml(t("feat_cr_1"))}</li>
+                    <li>${escapeHtml(t("feat_cr_2"))}</li>
+                    <li>${escapeHtml(t("feat_cr_3"))}</li>
+                    <li>${escapeHtml(t("feat_cr_4"))}</li>
                 </ul>
             </div>
             <div>
@@ -5095,6 +5105,42 @@ async function viewDR() {
             ]));
             body.appendChild(grid);
 
+            // Pre-flight: does the destination still exist on the source with
+            // snapshots? Then a reverse sync would fail / destroy live data.
+            const preflight = h("div", { style: "margin-top:8px;font-size:12px" });
+            body.appendChild(preflight);
+            let preflightState = null;
+            const runPreflight = async () => {
+                preflightState = null;
+                preflight.innerHTML = "";
+                if (srcHostSel.value === "__custom__") {
+                    preflight.appendChild(h("span", { className: "muted" }, t("dr_pf_custom")));
+                    return;
+                }
+                const sds = dsInput.value.trim();
+                if (!sds) return;
+                preflight.appendChild(h("span", { className: "muted" }, t("dr_pf_checking")));
+                let r;
+                try {
+                    r = await API.get("/api/dr/reverse-precheck?host=" + encodeURIComponent(srcHostSel.value) +
+                                      "&dataset=" + encodeURIComponent(sds));
+                } catch (e) { preflight.innerHTML = ""; return; }
+                preflight.innerHTML = "";
+                if (!r || r.unavailable || r.error) return;
+                preflightState = r;
+                if (!r.exists) {
+                    preflight.appendChild(h("span", { style: "color:var(--success)" }, "✓ " + t("dr_pf_empty")));
+                } else if (r.snapshot_count > 0) {
+                    preflight.appendChild(h("div", { style: "color:var(--danger);background:rgba(248,81,73,0.08);border:1px solid var(--danger);border-radius:6px;padding:8px" },
+                        "✗ " + t("dr_pf_exists_snaps").replace("{n}", r.snapshot_count)));
+                } else {
+                    preflight.appendChild(h("div", { style: "color:var(--warning)" }, "⚠ " + t("dr_pf_exists_nosnap")));
+                }
+            };
+            dsInput.addEventListener("change", runPreflight);
+            srcHostSel.addEventListener("change", runPreflight);
+            runPreflight();
+
             // Snapshot picker (default: newest)
             const snapRow = h("div", { style: "margin-top:12px" });
             snapRow.appendChild(h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, t("dr_reverse_snapshot")));
@@ -5145,6 +5191,12 @@ async function viewDR() {
                               : (hosts.find(h2 => h2.address === srcHostSel.value) || {}).user || "root";
                 const srcDs = dsInput.value.trim();
                 if (!srcAddr || !srcDs) { toast(t("dr_reverse_missing"), "error"); return; }
+
+                // Live-data guard: the destination still exists with snapshots,
+                // so a reverse sync would fail (and is only for a lost source).
+                if (preflightState && preflightState.exists && preflightState.snapshot_count > 0) {
+                    if (!confirm(t("dr_pf_confirm").replace("{n}", preflightState.snapshot_count))) return;
+                }
 
                 const force = forceCb.checked;
                 const phrase = t("dr_reverse_confirm")
@@ -5199,7 +5251,10 @@ async function viewDR() {
                             statusBlock.appendChild(h("p", {}, "✅ " + t("dr_reverse_ok")));
                         } else {
                             const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
-                            openModal(t("dr_reverse_failed"), `<p>${escapeHtml(t("dr_reverse_failed_intro"))} (exit=${escapeHtml(String(res.exit_code))})</p>${tail}`);
+                            const hint = /destination has snapshots|must destroy them/i.test(res.log_tail || "")
+                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("dr_reverse_failed_snapshots"))}</div>`
+                                : "";
+                            openModal(t("dr_reverse_failed"), `${hint}<p>${escapeHtml(t("dr_reverse_failed_intro"))} (exit=${escapeHtml(String(res.exit_code))})</p>${tail}`);
                         }
                         runBtn.disabled = false;
                     },
@@ -5290,6 +5345,231 @@ async function viewDR() {
             }
         }
     }
+}
+
+
+// -- Config Restore (from a host-config backup onto a fresh PVE) -----------
+const _CR_CATS = ["guests", "network", "storage", "apt", "access", "ssh", "firewall", "jobs", "other", "info"];
+
+async function viewConfigRestore() {
+    setContent(loading());
+    let hosts;
+    try { hosts = await API.get("/api/hosts"); }
+    catch (e) { setContent(h("p", { className: "muted" }, e.message || "")); return; }
+
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("cr_title")),
+        h("p", {}, t("cr_subtitle")),
+    ]));
+    if (!hosts.length) {
+        container.appendChild(h("div", { className: "card" }, h("div", { className: "card-body" }, t("cr_no_hosts"))));
+        setContent(container); return;
+    }
+
+    const _hostOpts = () => hosts.map(hh => h("option", { value: hh.address }, (hh.name || hh.address) + " (" + hh.address + ")"));
+    const lbl = txt => h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, txt);
+    const modeSel = h("select", { className: "form-input" }, [
+        h("option", { value: "registered" }, t("cr_mode_registered")),
+        h("option", { value: "adhoc" }, t("cr_mode_adhoc")),
+    ]);
+    const targetSel = h("select", { className: "form-input" }, _hostOpts());
+    const adhocAddr = h("input", { type: "text", className: "form-input", placeholder: "192.168.1.251" });
+    const adhocUser = h("input", { type: "text", className: "form-input", value: "root", style: "max-width:120px" });
+    const adhocPass = h("input", { type: "password", className: "form-input", placeholder: "••••••••", autocomplete: "off" });
+    const backupHostSel = h("select", { className: "form-input" }, _hostOpts());
+    const backupSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+    const overwriteCb = h("input", { type: "checkbox" });
+
+    const _crTarget = () => modeSel.value === "adhoc"
+        ? { adhoc: { address: adhocAddr.value.trim(), user: adhocUser.value.trim() || "root", password: adhocPass.value, port: 22 } }
+        : { target: targetSel.value };
+    const _crAddr = () => modeSel.value === "adhoc" ? (adhocAddr.value.trim() || "?") : targetSel.value;
+
+    const regWrap = h("div", {}, targetSel);
+    const adhocStatus = h("div", { style: "font-size:12px;margin-top:6px" });
+    const testBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px" }, t("cr_test"));
+    testBtn.onclick = async () => {
+        adhocStatus.innerHTML = ""; adhocStatus.appendChild(h("span", { className: "muted" }, t("cr_testing")));
+        try {
+            const r = await API.post("/api/dr/adhoc-test", _crTarget());
+            adhocStatus.innerHTML = "";
+            adhocStatus.appendChild(r.success
+                ? h("span", { style: "color:var(--success)" }, "✓ " + (r.output || "").split("\n")[0])
+                : h("span", { style: "color:var(--danger)" }, "✗ " + (r.error || t("failed"))));
+        } catch (e) { adhocStatus.innerHTML = ""; adhocStatus.appendChild(h("span", { style: "color:var(--danger)" }, e.message || "")); }
+    };
+    const keyBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px;margin-left:6px" }, t("cr_install_key"));
+    keyBtn.onclick = async () => {
+        if (!confirm(t("cr_install_key_confirm").replace("{h}", _crAddr()))) return;
+        try {
+            const r = await API.post("/api/dr/install-key", _crTarget());
+            toast(r.success ? t("cr_install_key_ok") : (r.stderr || r.error || t("failed")), r.success ? "success" : "error");
+        } catch (e) { toast(e.message || t("failed"), "error"); }
+    };
+    const adhocWrap = h("div", { style: "display:none" }, [
+        h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+            h("div", { style: "flex:1;min-width:130px" }, [lbl(t("cr_adhoc_addr")), adhocAddr]),
+            h("div", {}, [lbl(t("cr_adhoc_user")), adhocUser]),
+        ]),
+        h("div", { style: "margin-top:6px" }, [lbl(t("cr_adhoc_pass")), adhocPass]),
+        h("div", { className: "muted", style: "font-size:11px;margin-top:4px" }, t("cr_adhoc_hint")),
+        h("div", {}, [testBtn, keyBtn]),
+        adhocStatus,
+    ]);
+    modeSel.onchange = () => {
+        const ad = modeSel.value === "adhoc";
+        regWrap.style.display = ad ? "none" : "block";
+        adhocWrap.style.display = ad ? "block" : "none";
+    };
+
+    const pick = h("div", { className: "card" });
+    pick.appendChild(h("div", { className: "card-header" }, "1. " + t("cr_pick")));
+    const pickBody = h("div", { className: "card-body" });
+    pickBody.appendChild(h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" }, [
+        h("div", {}, [lbl(t("cr_target")), modeSel, h("div", { style: "margin-top:8px" }, [regWrap, adhocWrap]),
+            h("div", { className: "muted", style: "font-size:11px;margin-top:3px" }, t("cr_target_hint"))]),
+        h("div", {}, [lbl(t("cr_backup_host")), backupHostSel, h("div", { style: "margin-top:8px" }, [lbl(t("cr_backup")), backupSel])]),
+    ]));
+    pick.appendChild(pickBody);
+    container.appendChild(pick);
+    const contentMount = h("div");
+    container.appendChild(contentMount);
+    setContent(container);
+
+    const previewFile = async (f) => {
+        try {
+            const r = await API.get("/api/dr/backup-file?backup_host=" + encodeURIComponent(backupHostSel.value) +
+                "&file=" + encodeURIComponent(backupSel.value) + "&member=" + encodeURIComponent(f.member));
+            openModal(f.path, `<pre class="output" style="max-height:400px;font-size:11px;white-space:pre-wrap">${escapeHtml(r.content || "")}</pre>`);
+        } catch (e) { toast(e.message || t("failed"), "error"); }
+    };
+    const restoreFile = async (f) => {
+        let msg = t("cr_restore_confirm").replace("{f}", f.path).replace("{h}", _crAddr());
+        if (f.category === "network") msg += "\n\n" + t("cr_network_warn");
+        if (!confirm(msg)) return;
+        try {
+            const r = await API.post("/api/dr/restore-file", Object.assign(_crTarget(), {
+                backup_host: backupHostSel.value,
+                file: backupSel.value, member: f.member, force: overwriteCb.checked,
+            }));
+            if (r.success) toast(t("cr_restored").replace("{dest}", r.dest || ""), "success");
+            else if (r.exists) toast(t("cr_exists"), "error");
+            else toast(r.error || t("failed"), "error");
+        } catch (e) { toast(e.message || t("failed"), "error"); }
+    };
+
+    async function renderContents() {
+        contentMount.innerHTML = "";
+        if (!backupSel.value) return;
+        contentMount.appendChild(h("div", { className: "muted", style: "margin-top:16px" }, t("loading")));
+        let data;
+        try {
+            data = await API.get("/api/dr/backup-contents?backup_host=" + encodeURIComponent(backupHostSel.value) +
+                "&file=" + encodeURIComponent(backupSel.value));
+        } catch (e) { contentMount.innerHTML = ""; contentMount.appendChild(h("p", { className: "muted" }, e.message || "")); return; }
+        contentMount.innerHTML = "";
+        const files = data.files || [];
+
+        const card = h("div", { className: "card", style: "margin-top:16px" });
+        card.appendChild(h("div", { className: "card-header" }, "2. " + t("cr_restore")));
+        const body = h("div", { className: "card-body" });
+        card.appendChild(body);
+        contentMount.appendChild(card);
+
+        body.appendChild(h("label", { style: "display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer" },
+            [overwriteCb, h("span", { style: "font-size:13px" }, t("cr_overwrite"))]));
+
+        const guestCount = files.filter(f => f.category === "guests").length;
+        if (guestCount) {
+            const bulkBtn = h("button", { className: "btn btn-primary btn-sm" }, t("cr_restore_all_guests").replace("{n}", guestCount));
+            bulkBtn.onclick = async () => {
+                if (!confirm(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
+                bulkBtn.disabled = true;
+                try {
+                    const r = await API.post("/api/dr/restore-all-guests", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value, force: overwriteCb.checked,
+                    }));
+                    toast(t("cr_bulk_done").replace("{r}", r.restored || 0).replace("{s}", r.skipped || 0), r.success ? "success" : "error");
+                } catch (e) { toast(e.message || t("failed"), "error"); }
+                finally { bulkBtn.disabled = false; }
+            };
+            body.appendChild(bulkBtn);
+        }
+
+        // Package reinstall (needs repos restored first + network)
+        if (files.some(f => f.path === "cmd/dpkg-selections.txt")) {
+            const pkgBtn = h("button", { className: "btn btn-warning btn-sm", style: "margin-left:8px" }, t("cr_pkg_install"));
+            const pkgStatus = h("div", { style: "margin-top:8px" });
+            pkgBtn.onclick = async () => {
+                if (!confirm(t("cr_pkg_confirm").replace("{h}", _crAddr()))) return;
+                pkgBtn.disabled = true; pkgStatus.innerHTML = "";
+                const prog = h("p", { className: "muted", style: "font-family:monospace;font-size:12px" }, "…");
+                pkgStatus.appendChild(prog);
+                let kick;
+                try {
+                    kick = await API.post("/api/dr/reinstall-packages", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value,
+                    }));
+                } catch (e) { toast(e.message || t("failed"), "error"); pkgBtn.disabled = false; return; }
+                if (!kick || !kick.task_id) { pkgStatus.innerHTML = ""; toast(kick.error || t("failed"), "error"); pkgBtn.disabled = false; return; }
+                toast(t("cr_pkg_running"), "info");
+                pollReplicationTask(kick.task_id, {
+                    onTick: (rec) => { prog.textContent = rec.progress || "…"; },
+                    onDone: (rec) => {
+                        const res = rec.result || {};
+                        prog.textContent = "";
+                        if (res.success) { toast(t("cr_pkg_ok"), "success"); pkgStatus.appendChild(h("p", {}, "✅ " + t("cr_pkg_ok"))); }
+                        else {
+                            const tail = res.log_tail ? `<pre class="output" style="max-height:260px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
+                            openModal(t("cr_pkg_failed"), `<p>exit=${escapeHtml(String(res.exit_code))}</p>${tail}`);
+                        }
+                        pkgBtn.disabled = false;
+                    },
+                    onError: (msg) => { toast(msg || t("failed"), "error"); pkgBtn.disabled = false; },
+                });
+            };
+            body.appendChild(pkgBtn);
+            body.appendChild(pkgStatus);
+        }
+
+        _CR_CATS.forEach(cat => {
+            const items = files.filter(f => f.category === cat);
+            if (!items.length) return;
+            body.appendChild(h("div", { className: "stat-label", style: "margin-top:14px;margin-bottom:6px" }, t("cr_cat_" + cat) + " (" + items.length + ")"));
+            const tb = h("tbody");
+            items.forEach(f => {
+                tb.appendChild(h("tr", {}, [
+                    h("td", { style: "font-family:monospace;font-size:12px;word-break:break-all" }, f.path),
+                    h("td", { style: "text-align:right;color:var(--text-secondary);font-size:12px;white-space:nowrap" }, formatBytes(f.size)),
+                    h("td", { style: "text-align:right;white-space:nowrap" }, [
+                        h("button", { className: "btn btn-sm", onClick: () => previewFile(f) }, t("cr_view")),
+                        f.restorable
+                            ? h("button", { className: "btn btn-sm btn-primary", style: "margin-left:6px", onClick: () => restoreFile(f) }, t("cr_restore_one"))
+                            : h("span", { className: "muted", style: "font-size:11px;margin-left:8px" }, t("cr_info_only")),
+                    ]),
+                ]));
+            });
+            const tbl = h("table", { className: "data-table", style: "width:100%" });
+            tbl.appendChild(tb);
+            body.appendChild(tbl);
+        });
+    }
+
+    async function loadBackups() {
+        backupSel.innerHTML = ""; backupSel.appendChild(h("option", { value: "" }, t("loading")));
+        try {
+            const r = await API.get("/api/host-backup/list?host=" + encodeURIComponent(backupHostSel.value));
+            const bs = r.backups || [];
+            backupSel.innerHTML = "";
+            if (!bs.length) { backupSel.appendChild(h("option", { value: "" }, t("cr_no_backups"))); contentMount.innerHTML = ""; return; }
+            bs.forEach(b => backupSel.appendChild(h("option", { value: b.filename }, b.filename)));
+        } catch (e) { backupSel.innerHTML = ""; backupSel.appendChild(h("option", { value: "" }, e.message || "")); return; }
+        renderContents();
+    }
+    backupHostSel.onchange = loadBackups;
+    backupSel.onchange = renderContents;
+    loadBackups();
 }
 
 

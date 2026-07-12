@@ -249,7 +249,10 @@ def _require_host():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    lang = (os.environ.get("DEFAULT_LANG", "en") or "en").strip().lower()
+    if lang not in ("en", "de"):
+        lang = "en"
+    return render_template("index.html", default_lang=lang)
 
 
 # ---------------------------------------------------------------------------
@@ -2000,6 +2003,19 @@ def api_dr_reverse_sync():
     return jsonify({"success": True, "task_id": task_id})
 
 
+@app.route("/api/dr/reverse-precheck")
+@login_required
+def api_dr_reverse_precheck():
+    """Does the reverse-sync destination still exist on the source (with
+    snapshots)? Lets the UI warn before an overwrite that would fail / destroy
+    live data. Only works for a registered source host."""
+    from app.dr import check_reverse_target
+    host = _find_host(request.args.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found", "unavailable": True}), 200
+    return jsonify(check_reverse_target(host, (request.args.get("dataset") or "").strip()))
+
+
 @app.route("/api/dr/guest-config")
 @login_required
 def api_dr_guest_config():
@@ -2046,6 +2062,154 @@ def api_dr_restore_guest_config():
               host=host["address"], success=res.get("success", False),
               details={"file": data.get("file"), "force": force})
     return jsonify(res)
+
+
+# --- Config restore: browse a host-config backup + put files back ----------
+
+@app.route("/api/dr/backup-contents")
+@login_required
+def api_dr_backup_contents():
+    """List the categorized config files in a host-config backup."""
+    from app.dr import list_backup_contents
+    from app.hostbackup import backup_path
+    host = _find_host(request.args.get("backup_host", ""))
+    if not host:
+        return jsonify({"files": [], "error": "host not found"}), 404
+    path = backup_path(host, (request.args.get("file") or "").strip())
+    if not path:
+        return jsonify({"files": [], "error": "backup not found"}), 404
+    return jsonify(list_backup_contents(path))
+
+
+@app.route("/api/dr/backup-file")
+@login_required
+def api_dr_backup_file():
+    """Preview one file out of a host-config backup."""
+    from app.dr import read_backup_member
+    from app.hostbackup import backup_path
+    host = _find_host(request.args.get("backup_host", ""))
+    if not host:
+        return jsonify({"found": False, "error": "host not found"}), 404
+    path = backup_path(host, (request.args.get("file") or "").strip())
+    if not path:
+        return jsonify({"found": False, "error": "backup not found"}), 404
+    return jsonify(read_backup_member(path, request.args.get("member", "")))
+
+
+def _resolve_target(data):
+    """Restore target host: a registered host, or an ad-hoc
+    {address,user,password,port} used transiently and never stored."""
+    ad = data.get("adhoc") or {}
+    addr = (ad.get("address") or "").strip()
+    if addr:
+        try:
+            port = int(ad.get("port") or 22)
+        except (TypeError, ValueError):
+            port = 22
+        return {"address": addr, "user": (ad.get("user") or "root").strip(),
+                "port": port, "password": ad.get("password") or ""}
+    return _find_host(data.get("target", ""))
+
+
+@app.route("/api/dr/restore-file", methods=["POST"])
+@login_required
+def api_dr_restore_file():
+    """Write one file from a host-config backup onto the target host."""
+    from app.dr import restore_backup_file
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    res = restore_backup_file(target, path, (data.get("member") or ""),
+                              force=bool(data.get("force")))
+    audit_log("dr.restore_file", target=res.get("dest") or data.get("member"),
+              host=target["address"], success=res.get("success", False),
+              details={"file": data.get("file"), "force": bool(data.get("force"))})
+    return jsonify(res)
+
+
+@app.route("/api/dr/restore-all-guests", methods=["POST"])
+@login_required
+def api_dr_restore_all_guests():
+    """Bulk-restore every guest config in a backup onto the target host."""
+    from app.dr import restore_all_guest_configs
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    res = restore_all_guest_configs(target, path, force=bool(data.get("force")))
+    audit_log("dr.restore_all_guests", target=f"{res.get('restored', 0)} guests",
+              host=target["address"], success=res.get("success", False),
+              details={"file": data.get("file"), "restored": res.get("restored"),
+                       "skipped": res.get("skipped")})
+    return jsonify(res)
+
+
+@app.route("/api/dr/adhoc-test", methods=["POST"])
+@login_required
+def api_dr_adhoc_test():
+    """Test an ad-hoc target connection (IP + password, not stored)."""
+    from app.ssh_manager import run_command
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    if not target or not target.get("password"):
+        return jsonify({"success": False, "error": "ad-hoc address + password required"})
+    r = run_command(target, "hostname; pveversion 2>/dev/null | head -1", timeout=15)
+    return jsonify({"success": r.get("success", False),
+                    "output": (r.get("stdout") or "").strip()[:300],
+                    "error": (r.get("stderr") or "").strip()[:200]})
+
+
+@app.route("/api/dr/install-key", methods=["POST"])
+@login_required
+def api_dr_install_key():
+    """Append the tool's public SSH key to the target's authorized_keys so the
+    registered host (same address) becomes reachable by key again. Accepts an
+    ad-hoc target (password used transiently, never stored)."""
+    from app.ssh_manager import install_pubkey
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    if not target:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    res = install_pubkey(target)
+    audit_log("dr.install_key", target=target.get("address"),
+              host=target.get("address"), success=res.get("success", False))
+    return jsonify(res)
+
+
+@app.route("/api/dr/reinstall-packages", methods=["POST"])
+@login_required
+def api_dr_reinstall_packages():
+    """Reinstall the backed-up package set (install/hold only) via
+    dpkg --set-selections + apt-get dselect-upgrade, as a background task."""
+    from app.dr import read_dpkg_selections, reinstall_packages_async
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    selections = read_dpkg_selections(path)
+    if not selections.strip():
+        return jsonify({"success": False, "error": "no package list in backup"}), 404
+    task_id = reinstall_packages_async(target, selections)
+    audit_log("dr.reinstall_packages", target=target.get("address"),
+              host=target.get("address"), success=True,
+              details={"file": data.get("file"), "task_id": task_id})
+    return jsonify({"success": True, "task_id": task_id})
 
 
 @app.route("/api/replication/configs")
