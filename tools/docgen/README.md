@@ -10,8 +10,10 @@ ohne externe Systemabhängigkeiten (kein wkhtmltopdf/weasyprint/pandoc nötig).
   anleitung, ohne technische Details
 
 Beide Ausgabedateien landen im `docs/`-Ordner im Repo-Root, der bereits in
-`.gitignore` steht — die PDFs selbst werden also nicht versioniert, nur die
-Erzeugungsskripte hier.
+`.gitignore` steht — die PDFs selbst werden also nicht ins Git-Repo committet
+(kein Bloat durch Binärdateien in der Historie), nur die Erzeugungsskripte
+hier. Stattdessen hängen die PDFs als **Assets an jedem GitHub Release** —
+siehe „Release-Prozess" unten.
 
 ## Verwendung
 
@@ -63,6 +65,48 @@ Checkouts (`repo_version()` in `pdf_common.py`) — bei einem Release-Tag also
 z. B. `v0.9.891`, sonst den nächstgelegenen Tag mit Commit-Suffix. Es muss
 dafür **nichts manuell gepflegt werden**; ein Neubau nach jedem Release-Tag
 liefert automatisch die korrekte Versionszeile.
+
+Steht der Checkout einen oder mehrere Commits NACH dem Release-Tag (z. B. weil
+docgen-Änderungen selbst erst nach dem Tag committet wurden), zeigt
+`git describe` stattdessen `vX.Y.Z-N-gabc1234`. Für ein sauberes „vX.Y.Z" in
+diesem Fall die Version explizit anpinnen:
+
+```bash
+DOCGEN_VERSION=v0.9.891 python tools/docgen/build.py
+```
+
+## Release-Prozess: PDFs als GitHub-Release-Assets
+
+Die PDFs werden **nicht** ins Repo committet (siehe oben), sondern bei jedem
+main-Release als Anhang am GitHub-Release hochgeladen. Ablauf direkt nach dem
+Taggen eines Releases (main gemerged, Tag gesetzt, gepusht):
+
+```bash
+# 1. PDFs mit exakt dieser Release-Version bauen
+DOCGEN_VERSION=v0.9.891 python tools/docgen/build.py
+
+# 2. GitHub-Release anlegen (falls noch nicht vorhanden) und PDFs anhängen
+gh release create v0.9.891 \
+  --title "v0.9.891" \
+  --notes-file <datei-mit-release-notes>.md \
+  "docs/PVE-ZFS-Tool_Administratorhandbuch.pdf" \
+  "docs/PVE-ZFS-Tool_Benutzerhandbuch.pdf"
+
+# Existiert der Release bereits (z. B. weil Notes schon gesetzt sind) und nur
+# neue PDF-Versionen sollen ran:
+gh release upload v0.9.891 \
+  "docs/PVE-ZFS-Tool_Administratorhandbuch.pdf" \
+  "docs/PVE-ZFS-Tool_Benutzerhandbuch.pdf" \
+  --clobber
+```
+
+Als Release-Notes eignet sich die kuratierte Merge-Commit-Message des
+Release-Merges (`git show -s --format='%B' <merge-commit>`) — sie beschreibt
+bereits die Änderungen in Prosa.
+
+`gh` (GitHub CLI) muss installiert und angemeldet sein (`gh auth login`,
+Browser-Device-Flow — der Token bleibt bei `gh`, wird nie im Klartext
+sichtbar).
 
 ## Wann neu bauen?
 

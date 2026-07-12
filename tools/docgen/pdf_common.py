@@ -61,7 +61,15 @@ DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "docs")
 def repo_version():
     """Best-effort 'vX.Y.Z (branch)' string from the current git checkout, so
     the guides don't need a manually-maintained version constant. Falls back
-    to a generic label if git isn't available (e.g. a plain source checkout)."""
+    to a generic label if git isn't available (e.g. a plain source checkout).
+
+    Set DOCGEN_VERSION to pin an exact label instead -- useful right after
+    tagging a release, when the working tree is one commit ahead of the tag
+    (e.g. docgen-only follow-up commits) and 'git describe' would otherwise
+    print 'vX.Y.Z-1-gabc1234' instead of the clean release tag."""
+    override = os.environ.get("DOCGEN_VERSION")
+    if override:
+        return override
     try:
         tag = subprocess.run(
             ["git", "-C", REPO_ROOT, "describe", "--tags", "--always"],
