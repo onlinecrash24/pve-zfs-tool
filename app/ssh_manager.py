@@ -102,34 +102,76 @@ def remove_host(address):
     return True, "Host removed"
 
 
-def get_ssh_client(host):
-    client = paramiko.SSHClient()
-    # Load known hosts for host key verification
-    if os.path.exists(KNOWN_HOSTS):
+def _forget_host_key(address):
+    """Drop any known_hosts entry for ``address`` (e.g. a reinstalled host whose
+    SSH host key changed), so a fresh TOFU can accept the new one."""
+    if not os.path.exists(KNOWN_HOSTS):
+        return
+    try:
+        hk = paramiko.HostKeys()
+        hk.load(KNOWN_HOSTS)
+    except Exception:
+        return
+    changed = False
+    for name in list(hk.keys()):
+        bare = name.strip("[]").split("]:")[0].split(":")[0]
+        if bare == address:
+            del hk[name]
+            changed = True
+    if changed:
         try:
-            client.load_host_keys(KNOWN_HOSTS)
+            hk.save(KNOWN_HOSTS)
         except Exception:
             pass
-    # Warn if unknown key, but still allow (TOFU: key stored at add_host time)
-    client.set_missing_host_key_policy(paramiko.WarningPolicy())
+
+
+def get_ssh_client(host):
+    client = paramiko.SSHClient()
+    password = host.get("password")
+    if password:
+        # Ad-hoc / DR: authenticate with a (transient, never-stored) password.
+        # A reinstalled host has a NEW host key, so forget any stale entry and
+        # accept the current one -- the user vouching for it via the password
+        # is the trust anchor here.
+        _forget_host_key(host["address"])
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    else:
+        # Load known hosts for host key verification
+        if os.path.exists(KNOWN_HOSTS):
+            try:
+                client.load_host_keys(KNOWN_HOSTS)
+            except Exception:
+                pass
+        # Warn if unknown key, but still allow (TOFU: key stored at add_host time)
+        client.set_missing_host_key_policy(paramiko.WarningPolicy())
+
+    connect_kwargs = dict(
+        hostname=host["address"],
+        port=host.get("port", 22),
+        username=host.get("user", "root"),
+        timeout=10,
+    )
+    if password:
+        connect_kwargs.update(password=password, look_for_keys=False, allow_agent=False)
+    else:
+        connect_kwargs["key_filename"] = SSH_KEY
+
     try:
-        client.connect(
-            hostname=host["address"],
-            port=host.get("port", 22),
-            username=host.get("user", "root"),
-            key_filename=SSH_KEY,
-            timeout=10,
-        )
+        client.connect(**connect_kwargs)
     except paramiko.ssh_exception.SSHException as e:
-        # If host key changed, this is a potential MITM — reject
-        if "not found in known_hosts" in str(e).lower() or "does not match" in str(e).lower():
+        # A changed host key is a potential MITM for key-auth -- reject. (The
+        # password path already re-TOFU'd above, so this only guards key-auth.)
+        if not password and ("not found in known_hosts" in str(e).lower()
+                             or "does not match" in str(e).lower()):
             raise ConnectionError(f"SSH host key verification failed for {host['address']}: {e}")
         raise
-    # Save any new host keys
-    try:
-        client.get_host_keys().save(KNOWN_HOSTS)
-    except Exception:
-        pass
+    # Persist newly-seen host keys for the key-auth path (the password path is
+    # one-shot and intentionally doesn't write the shared known_hosts).
+    if not password:
+        try:
+            client.get_host_keys().save(KNOWN_HOSTS)
+        except Exception:
+            pass
     return client
 
 
@@ -299,6 +341,11 @@ def run_command(host, command, timeout=30, cache_ttl=0):
         Writes should not pass a TTL and should invalidate the host cache
         via ``app.cache.invalidate_host`` after a successful write.
     """
+    # Ad-hoc/password hosts are never pooled or cached (transient credentials,
+    # and they may share an address with a registered host).
+    if host.get("password"):
+        return _exec_direct(host, command, timeout)
+
     # Cache lookup (read-only fast path)
     if cache_ttl > 0:
         from app.cache import get as _cache_get
@@ -313,6 +360,31 @@ def run_command(host, command, timeout=30, cache_ttl=0):
         from app.cache import set as _cache_set
         _cache_set(host["address"], command, result, cache_ttl)
     return result
+
+
+def _exec_direct(host, command, timeout):
+    """One-shot (non-pooled) exec for ad-hoc/password hosts."""
+    client = None
+    try:
+        client = get_ssh_client(host)
+        return _run_once(client, command, timeout)
+    except _StaleConnection as e:
+        return {"success": False, "stdout": "", "stderr": str(e.args[0] if e.args else e)}
+    except Exception as e:
+        return {"success": False, "stdout": "", "stderr": str(e)}
+    finally:
+        if client is not None:
+            _close_quiet(client)
+
+
+def install_pubkey(host):
+    """Append the tool's PUBLIC key to the host's authorized_keys (idempotent).
+    Used to (re-)grant this tool key-based access, e.g. after an ad-hoc DR
+    restore so the registered host entry (same address) is reachable again."""
+    pub = get_public_key()
+    if not pub:
+        return {"success": False, "error": "tool public key not found"}
+    return _append_authorized_key(host, pub)
 
 
 def _sftp_get_once(client, remote_path, local_path, timeout):

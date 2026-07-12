@@ -5359,17 +5359,67 @@ async function viewConfigRestore() {
     }
 
     const _hostOpts = () => hosts.map(hh => h("option", { value: hh.address }, (hh.name || hh.address) + " (" + hh.address + ")"));
+    const lbl = txt => h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, txt);
+    const modeSel = h("select", { className: "form-input" }, [
+        h("option", { value: "registered" }, t("cr_mode_registered")),
+        h("option", { value: "adhoc" }, t("cr_mode_adhoc")),
+    ]);
     const targetSel = h("select", { className: "form-input" }, _hostOpts());
+    const adhocAddr = h("input", { type: "text", className: "form-input", placeholder: "192.168.1.251" });
+    const adhocUser = h("input", { type: "text", className: "form-input", value: "root", style: "max-width:120px" });
+    const adhocPass = h("input", { type: "password", className: "form-input", placeholder: "••••••••", autocomplete: "off" });
     const backupHostSel = h("select", { className: "form-input" }, _hostOpts());
     const backupSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
     const overwriteCb = h("input", { type: "checkbox" });
-    const lbl = txt => h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, txt);
+
+    const _crTarget = () => modeSel.value === "adhoc"
+        ? { adhoc: { address: adhocAddr.value.trim(), user: adhocUser.value.trim() || "root", password: adhocPass.value, port: 22 } }
+        : { target: targetSel.value };
+    const _crAddr = () => modeSel.value === "adhoc" ? (adhocAddr.value.trim() || "?") : targetSel.value;
+
+    const regWrap = h("div", {}, targetSel);
+    const adhocStatus = h("div", { style: "font-size:12px;margin-top:6px" });
+    const testBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px" }, t("cr_test"));
+    testBtn.onclick = async () => {
+        adhocStatus.innerHTML = ""; adhocStatus.appendChild(h("span", { className: "muted" }, t("cr_testing")));
+        try {
+            const r = await API.post("/api/dr/adhoc-test", _crTarget());
+            adhocStatus.innerHTML = "";
+            adhocStatus.appendChild(r.success
+                ? h("span", { style: "color:var(--success)" }, "✓ " + (r.output || "").split("\n")[0])
+                : h("span", { style: "color:var(--danger)" }, "✗ " + (r.error || t("failed"))));
+        } catch (e) { adhocStatus.innerHTML = ""; adhocStatus.appendChild(h("span", { style: "color:var(--danger)" }, e.message || "")); }
+    };
+    const keyBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px;margin-left:6px" }, t("cr_install_key"));
+    keyBtn.onclick = async () => {
+        if (!confirm(t("cr_install_key_confirm").replace("{h}", _crAddr()))) return;
+        try {
+            const r = await API.post("/api/dr/install-key", _crTarget());
+            toast(r.success ? t("cr_install_key_ok") : (r.stderr || r.error || t("failed")), r.success ? "success" : "error");
+        } catch (e) { toast(e.message || t("failed"), "error"); }
+    };
+    const adhocWrap = h("div", { style: "display:none" }, [
+        h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, [
+            h("div", { style: "flex:1;min-width:130px" }, [lbl(t("cr_adhoc_addr")), adhocAddr]),
+            h("div", {}, [lbl(t("cr_adhoc_user")), adhocUser]),
+        ]),
+        h("div", { style: "margin-top:6px" }, [lbl(t("cr_adhoc_pass")), adhocPass]),
+        h("div", { className: "muted", style: "font-size:11px;margin-top:4px" }, t("cr_adhoc_hint")),
+        h("div", {}, [testBtn, keyBtn]),
+        adhocStatus,
+    ]);
+    modeSel.onchange = () => {
+        const ad = modeSel.value === "adhoc";
+        regWrap.style.display = ad ? "none" : "block";
+        adhocWrap.style.display = ad ? "block" : "none";
+    };
 
     const pick = h("div", { className: "card" });
     pick.appendChild(h("div", { className: "card-header" }, "1. " + t("cr_pick")));
     const pickBody = h("div", { className: "card-body" });
     pickBody.appendChild(h("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px" }, [
-        h("div", {}, [lbl(t("cr_target")), targetSel, h("div", { className: "muted", style: "font-size:11px;margin-top:3px" }, t("cr_target_hint"))]),
+        h("div", {}, [lbl(t("cr_target")), modeSel, h("div", { style: "margin-top:8px" }, [regWrap, adhocWrap]),
+            h("div", { className: "muted", style: "font-size:11px;margin-top:3px" }, t("cr_target_hint"))]),
         h("div", {}, [lbl(t("cr_backup_host")), backupHostSel, h("div", { style: "margin-top:8px" }, [lbl(t("cr_backup")), backupSel])]),
     ]));
     pick.appendChild(pickBody);
@@ -5386,14 +5436,14 @@ async function viewConfigRestore() {
         } catch (e) { toast(e.message || t("failed"), "error"); }
     };
     const restoreFile = async (f) => {
-        let msg = t("cr_restore_confirm").replace("{f}", f.path).replace("{h}", targetSel.value);
+        let msg = t("cr_restore_confirm").replace("{f}", f.path).replace("{h}", _crAddr());
         if (f.category === "network") msg += "\n\n" + t("cr_network_warn");
         if (!confirm(msg)) return;
         try {
-            const r = await API.post("/api/dr/restore-file", {
-                target: targetSel.value, backup_host: backupHostSel.value,
+            const r = await API.post("/api/dr/restore-file", Object.assign(_crTarget(), {
+                backup_host: backupHostSel.value,
                 file: backupSel.value, member: f.member, force: overwriteCb.checked,
-            });
+            }));
             if (r.success) toast(t("cr_restored").replace("{dest}", r.dest || ""), "success");
             else if (r.exists) toast(t("cr_exists"), "error");
             else toast(r.error || t("failed"), "error");
@@ -5425,13 +5475,12 @@ async function viewConfigRestore() {
         if (guestCount) {
             const bulkBtn = h("button", { className: "btn btn-primary btn-sm" }, t("cr_restore_all_guests").replace("{n}", guestCount));
             bulkBtn.onclick = async () => {
-                if (!confirm(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", targetSel.value))) return;
+                if (!confirm(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
                 bulkBtn.disabled = true;
                 try {
-                    const r = await API.post("/api/dr/restore-all-guests", {
-                        target: targetSel.value, backup_host: backupHostSel.value,
-                        file: backupSel.value, force: overwriteCb.checked,
-                    });
+                    const r = await API.post("/api/dr/restore-all-guests", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value, force: overwriteCb.checked,
+                    }));
                     toast(t("cr_bulk_done").replace("{r}", r.restored || 0).replace("{s}", r.skipped || 0), r.success ? "success" : "error");
                 } catch (e) { toast(e.message || t("failed"), "error"); }
                 finally { bulkBtn.disabled = false; }
