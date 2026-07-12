@@ -105,6 +105,15 @@ if [ -d /etc/pve ]; then
   fi
 fi
 
+# APT repositories + signing keys (public) so a restore brings the package
+# sources back. auth.conf* may hold repo passwords -> deliberately excluded.
+if [ -d /etc/apt ]; then
+  mkdir -p "$STAGE/etc/apt"
+  tar -C /etc/apt --exclude=auth.conf --exclude=./auth.conf \
+      --exclude=auth.conf.d --exclude=./auth.conf.d \
+      -cf - . 2>/dev/null | tar -C "$STAGE/etc/apt" -xf - 2>/dev/null || true
+fi
+
 # Network + base config files
 for f in /etc/network/interfaces /etc/hosts /etc/resolv.conf /etc/hostname; do
   [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true

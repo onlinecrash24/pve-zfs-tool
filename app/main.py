@@ -2184,6 +2184,31 @@ def api_dr_install_key():
     return jsonify(res)
 
 
+@app.route("/api/dr/reinstall-packages", methods=["POST"])
+@login_required
+def api_dr_reinstall_packages():
+    """Reinstall the backed-up package set (install/hold only) via
+    dpkg --set-selections + apt-get dselect-upgrade, as a background task."""
+    from app.dr import read_dpkg_selections, reinstall_packages_async
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    selections = read_dpkg_selections(path)
+    if not selections.strip():
+        return jsonify({"success": False, "error": "no package list in backup"}), 404
+    task_id = reinstall_packages_async(target, selections)
+    audit_log("dr.reinstall_packages", target=target.get("address"),
+              host=target.get("address"), success=True,
+              details={"file": data.get("file"), "task_id": task_id})
+    return jsonify({"success": True, "task_id": task_id})
+
+
 @app.route("/api/replication/configs")
 @login_required
 def api_replication_configs():

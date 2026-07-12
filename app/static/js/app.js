@@ -5340,7 +5340,7 @@ async function viewDR() {
 
 
 // -- Config Restore (from a host-config backup onto a fresh PVE) -----------
-const _CR_CATS = ["guests", "network", "storage", "access", "ssh", "firewall", "jobs", "other", "info"];
+const _CR_CATS = ["guests", "network", "storage", "apt", "access", "ssh", "firewall", "jobs", "other", "info"];
 
 async function viewConfigRestore() {
     setContent(loading());
@@ -5486,6 +5486,42 @@ async function viewConfigRestore() {
                 finally { bulkBtn.disabled = false; }
             };
             body.appendChild(bulkBtn);
+        }
+
+        // Package reinstall (needs repos restored first + network)
+        if (files.some(f => f.path === "cmd/dpkg-selections.txt")) {
+            const pkgBtn = h("button", { className: "btn btn-warning btn-sm", style: "margin-left:8px" }, t("cr_pkg_install"));
+            const pkgStatus = h("div", { style: "margin-top:8px" });
+            pkgBtn.onclick = async () => {
+                if (!confirm(t("cr_pkg_confirm").replace("{h}", _crAddr()))) return;
+                pkgBtn.disabled = true; pkgStatus.innerHTML = "";
+                const prog = h("p", { className: "muted", style: "font-family:monospace;font-size:12px" }, "…");
+                pkgStatus.appendChild(prog);
+                let kick;
+                try {
+                    kick = await API.post("/api/dr/reinstall-packages", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value,
+                    }));
+                } catch (e) { toast(e.message || t("failed"), "error"); pkgBtn.disabled = false; return; }
+                if (!kick || !kick.task_id) { pkgStatus.innerHTML = ""; toast(kick.error || t("failed"), "error"); pkgBtn.disabled = false; return; }
+                toast(t("cr_pkg_running"), "info");
+                pollReplicationTask(kick.task_id, {
+                    onTick: (rec) => { prog.textContent = rec.progress || "…"; },
+                    onDone: (rec) => {
+                        const res = rec.result || {};
+                        prog.textContent = "";
+                        if (res.success) { toast(t("cr_pkg_ok"), "success"); pkgStatus.appendChild(h("p", {}, "✅ " + t("cr_pkg_ok"))); }
+                        else {
+                            const tail = res.log_tail ? `<pre class="output" style="max-height:260px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
+                            openModal(t("cr_pkg_failed"), `<p>exit=${escapeHtml(String(res.exit_code))}</p>${tail}`);
+                        }
+                        pkgBtn.disabled = false;
+                    },
+                    onError: (msg) => { toast(msg || t("failed"), "error"); pkgBtn.disabled = false; },
+                });
+            };
+            body.appendChild(pkgBtn);
+            body.appendChild(pkgStatus);
         }
 
         _CR_CATS.forEach(cat => {

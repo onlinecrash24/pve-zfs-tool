@@ -27,8 +27,9 @@ BACKUP = {
     "./etc/pve/jobs.cfg": "vzdump: x\n",
     "./etc/pve/nodes/pve251/qemu-server/100.conf": "cores: 2\n",
     "./etc/pve/nodes/pve251/lxc/253.conf": "arch: amd64\n",
+    "./etc/apt/sources.list.d/pve.list": "deb http://download.proxmox.com/debian/pve trixie pve-no-subscription\n",
     "./root/.ssh/authorized_keys": "ssh-ed25519 AAAAC3Nz tool@host\n",
-    "./cmd/dpkg-selections.txt": "pve-manager\tinstall\n",
+    "./cmd/dpkg-selections.txt": "pve-manager\tinstall\nvim\tinstall\nsl\tdeinstall\nzfsutils-linux\thold\n",
     "./cmd/pveversion.txt": "pve 9\n",
 }
 
@@ -47,10 +48,12 @@ def test_list_categorizes_and_flags_restorable(tmp_path):
     assert files["etc/pve/nodes/pve251/lxc/253.conf"]["category"] == "guests"
     assert files["cmd/dpkg-selections.txt"]["category"] == "info"
     assert files["root/.ssh/authorized_keys"]["category"] == "ssh"
+    assert files["etc/apt/sources.list.d/pve.list"]["category"] == "apt"
     # command captures are info-only; config files + authorized_keys restorable
     assert files["cmd/dpkg-selections.txt"]["restorable"] is False
     assert files["etc/pve/storage.cfg"]["restorable"] is True
     assert files["root/.ssh/authorized_keys"]["restorable"] is True
+    assert files["etc/apt/sources.list.d/pve.list"]["restorable"] is True
 
 
 # --- target path mapping --------------------------------------------------
@@ -128,3 +131,23 @@ def test_restore_all_guests_skips_existing(tmp_path, monkeypatch):
     monkeypatch.setattr(dr, "run_command", _fake_run(exists=True))
     r = dr.restore_all_guest_configs({"address": "h"}, path, force=False)
     assert r["restored"] == 0 and r["skipped"] == 2
+
+
+# --- package reinstall helpers --------------------------------------------
+
+def test_read_dpkg_selections(tmp_path):
+    path = _make_backup(tmp_path, BACKUP)
+    sel = dr.read_dpkg_selections(path)
+    assert "pve-manager" in sel and "zfsutils-linux" in sel
+
+
+def test_filter_selections_keeps_install_hold_only():
+    text = ("pve-manager\tinstall\nvim\tinstall\nsl\tdeinstall\n"
+            "zfsutils-linux\thold\ngarbage\n")
+    out = dr._filter_selections(text)
+    lines = out.splitlines()
+    assert "pve-manager\tinstall" in lines
+    assert "zfsutils-linux\thold" in lines
+    # deinstall/purge and malformed lines dropped -> never removes packages
+    assert not any("deinstall" in ln for ln in lines)
+    assert not any(ln.startswith("garbage") for ln in lines)

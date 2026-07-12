@@ -417,6 +417,8 @@ def _categorize(rel: str) -> str:
         return "network"
     if rel == "etc/pve/storage.cfg":
         return "storage"
+    if rel.startswith("etc/apt/"):
+        return "apt"
     if rel.startswith("etc/pve/firewall/") or rel.endswith("host.fw"):
         return "firewall"
     if rel in ("etc/pve/jobs.cfg", "etc/pve/vzdump.cron", "etc/pve/replication.cfg"):
@@ -560,3 +562,59 @@ def restore_all_guest_configs(host: Dict[str, Any], backup_file: str,
     return {"success": all(r.get("success") for r in results) if results else True,
             "results": results, "restored": restored, "skipped": skipped,
             "total": len(results)}
+
+
+def read_dpkg_selections(backup_file: str) -> str:
+    """Return the captured ``dpkg --get-selections`` text from the backup, or ''."""
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                if m.isfile() and _rel(m.name) == "cmd/dpkg-selections.txt":
+                    f = tf.extractfile(m)
+                    return f.read().decode("utf-8", "replace") if f else ""
+    except (tarfile.TarError, OSError):
+        return ""
+    return ""
+
+
+def _filter_selections(text: str) -> str:
+    """Keep only install/hold selection lines -- additive, never deinstall/purge,
+    so a reinstall can't *remove* packages from the fresh host."""
+    out = []
+    for ln in (text or "").splitlines():
+        parts = ln.split()
+        if len(parts) >= 2 and parts[-1] in ("install", "hold"):
+            out.append(f"{parts[0]}\t{parts[-1]}")
+    return "\n".join(out)
+
+
+def reinstall_packages_async(target_host: Dict[str, Any], selections_text: str) -> str:
+    """Apply the captured package selection (install/hold only) and run
+    ``apt-get dselect-upgrade`` as a background task. Repos must already be in
+    place (restore /etc/apt first)."""
+    selections = _filter_selections(selections_text)
+
+    def _job(progress, host, sel):
+        count = len(sel.splitlines())
+        if not sel.strip():
+            return {"success": False, "error": "no installable package selections"}
+        progress(f"Applying {count} package selections …")
+        b64 = base64.b64encode(sel.encode("utf-8")).decode("ascii")
+        script = (
+            f"echo {shlex.quote(b64)} | base64 -d | dpkg --set-selections\n"
+            "DEBIAN_FRONTEND=noninteractive apt-get update -qq || true\n"
+            "DEBIAN_FRONTEND=noninteractive apt-get -y dselect-upgrade 2>&1\n"
+            "echo __exit=$?"
+        )
+        progress("Running apt-get dselect-upgrade (this can take a while) …")
+        r = run_command(host, script, timeout=3 * 3600)
+        out = r.get("stdout") or ""
+        m = re.search(r"__exit=(\d+)\s*$", out.strip())
+        exit_code = int(m.group(1)) if m else None
+        ok = bool(r.get("success")) and exit_code == 0
+        progress(f"Finished (exit={exit_code})", ok=ok, exit_code=exit_code)
+        cleaned = re.sub(r"__exit=\d+\s*$", "", out).strip()
+        return {"success": ok, "exit_code": exit_code, "count": count,
+                "log_tail": cleaned[-4000:]}
+
+    return start_task("reinstall_packages", _job, target_host, selections, prefix="dr")

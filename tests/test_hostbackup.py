@@ -159,6 +159,14 @@ def test_script_captures_authorized_keys_not_private():
     assert "id_rsa" not in s and "id_ed25519" not in s
 
 
+def test_script_captures_apt_repos_excludes_auth():
+    # APT repo config (+ public signing keys) is captured so a restore brings
+    # the package sources back; auth.conf (repo passwords) is excluded.
+    s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
+    assert "/etc/apt" in s
+    assert "--exclude=auth.conf" in s
+
+
 def test_script_captures_nic_naming_artifacts():
     # a PVE major upgrade can rename NICs; the backup must carry everything
     # needed to reconstruct the mapping (rules/.link files + MAC/driver/path)
