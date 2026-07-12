@@ -2061,6 +2061,82 @@ def api_dr_restore_guest_config():
     return jsonify(res)
 
 
+# --- Config restore: browse a host-config backup + put files back ----------
+
+@app.route("/api/dr/backup-contents")
+@login_required
+def api_dr_backup_contents():
+    """List the categorized config files in a host-config backup."""
+    from app.dr import list_backup_contents
+    from app.hostbackup import backup_path
+    host = _find_host(request.args.get("backup_host", ""))
+    if not host:
+        return jsonify({"files": [], "error": "host not found"}), 404
+    path = backup_path(host, (request.args.get("file") or "").strip())
+    if not path:
+        return jsonify({"files": [], "error": "backup not found"}), 404
+    return jsonify(list_backup_contents(path))
+
+
+@app.route("/api/dr/backup-file")
+@login_required
+def api_dr_backup_file():
+    """Preview one file out of a host-config backup."""
+    from app.dr import read_backup_member
+    from app.hostbackup import backup_path
+    host = _find_host(request.args.get("backup_host", ""))
+    if not host:
+        return jsonify({"found": False, "error": "host not found"}), 404
+    path = backup_path(host, (request.args.get("file") or "").strip())
+    if not path:
+        return jsonify({"found": False, "error": "backup not found"}), 404
+    return jsonify(read_backup_member(path, request.args.get("member", "")))
+
+
+@app.route("/api/dr/restore-file", methods=["POST"])
+@login_required
+def api_dr_restore_file():
+    """Write one file from a host-config backup onto the target host."""
+    from app.dr import restore_backup_file
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _find_host(data.get("target", ""))
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    res = restore_backup_file(target, path, (data.get("member") or ""),
+                              force=bool(data.get("force")))
+    audit_log("dr.restore_file", target=res.get("dest") or data.get("member"),
+              host=target["address"], success=res.get("success", False),
+              details={"file": data.get("file"), "force": bool(data.get("force"))})
+    return jsonify(res)
+
+
+@app.route("/api/dr/restore-all-guests", methods=["POST"])
+@login_required
+def api_dr_restore_all_guests():
+    """Bulk-restore every guest config in a backup onto the target host."""
+    from app.dr import restore_all_guest_configs
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _find_host(data.get("target", ""))
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    res = restore_all_guest_configs(target, path, force=bool(data.get("force")))
+    audit_log("dr.restore_all_guests", target=f"{res.get('restored', 0)} guests",
+              host=target["address"], success=res.get("success", False),
+              details={"file": data.get("file"), "restored": res.get("restored"),
+                       "skipped": res.get("skipped")})
+    return jsonify(res)
+
+
 @app.route("/api/replication/configs")
 @login_required
 def api_replication_configs():

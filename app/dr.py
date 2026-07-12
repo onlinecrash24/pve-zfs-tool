@@ -394,3 +394,165 @@ def restore_guest_config(source_host: Dict[str, Any], gtype: str, vmid: str,
     ok = "__OK__" in (rw.get("stdout") or "")
     return {"success": ok, "exists": exists, "dest": dest,
             "stderr": (rw.get("stderr") or "").strip()[:200]}
+
+
+# ---------------------------------------------------------------------------
+# Config restore: browse a host-config backup and put individual files back
+# onto a freshly-installed PVE (network, storage, guests, users, firewall …).
+# ---------------------------------------------------------------------------
+
+def _rel(member: str) -> str:
+    """tar member name -> repo-relative path (strip the './' the archive uses)."""
+    return (member or "").lstrip("./")
+
+
+def _categorize(rel: str) -> str:
+    if re.search(r"/(qemu-server|lxc)/\d+\.conf$", rel):
+        return "guests"
+    if (rel.startswith("etc/network/") or rel in ("etc/hosts", "etc/hostname", "etc/resolv.conf")
+            or rel.startswith("etc/udev/") or rel.startswith("etc/systemd/network/")
+            or rel.startswith("lib/systemd/network/")):
+        return "network"
+    if rel == "etc/pve/storage.cfg":
+        return "storage"
+    if rel.startswith("etc/pve/firewall/") or rel.endswith("host.fw"):
+        return "firewall"
+    if rel in ("etc/pve/jobs.cfg", "etc/pve/vzdump.cron", "etc/pve/replication.cfg"):
+        return "jobs"
+    if rel in ("etc/pve/user.cfg", "etc/pve/datacenter.cfg", "etc/pve/domains.cfg") \
+            or rel.startswith("etc/pve/priv/"):
+        return "access"
+    if rel.startswith("cmd/"):
+        return "info"
+    return "other"
+
+
+def _backup_target_path(rel: str, local_node: str = "") -> Optional[str]:
+    """Map a backup-relative path to the absolute target on the live host, or
+    None if it isn't safely restorable. ``/etc/pve/nodes/<oldnode>/...`` is
+    remapped to the *local* node so a rename doesn't misfile it."""
+    if not rel or rel.startswith("cmd/"):
+        return None
+    m = re.match(r"etc/pve/nodes/[^/]+/(.+)", rel)
+    if m and local_node:
+        return f"/etc/pve/nodes/{local_node}/{m.group(1)}"
+    if rel.startswith("etc/") or rel.startswith("lib/systemd/network/"):
+        return "/" + rel
+    return None
+
+
+def _read_member_bytes(tf: "tarfile.TarFile", member: str) -> Optional[bytes]:
+    try:
+        info = tf.getmember(member)
+    except KeyError:
+        return None
+    if not info.isfile():
+        return None
+    f = tf.extractfile(info)
+    return f.read() if f else None
+
+
+def list_backup_contents(backup_file: str) -> Dict[str, Any]:
+    """List the config files in a host-config backup, categorized + flagged
+    ``restorable`` (the ``cmd/`` command captures are info-only)."""
+    out: List[Dict[str, Any]] = []
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                if not m.isfile():
+                    continue
+                rel = _rel(m.name)
+                if not rel:
+                    continue
+                cat = _categorize(rel)
+                out.append({
+                    "member": m.name,
+                    "path": rel,
+                    "size": m.size,
+                    "category": cat,
+                    "restorable": _backup_target_path(rel, "x") is not None,
+                })
+    except (tarfile.TarError, OSError) as e:
+        return {"files": [], "error": str(e)[:200]}
+    out.sort(key=lambda x: (x["category"], x["path"]))
+    return {"files": out}
+
+
+def read_backup_member(backup_file: str, member: str) -> Dict[str, Any]:
+    """Return the text content of a member for preview (capped)."""
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            data = _read_member_bytes(tf, member)
+    except (tarfile.TarError, OSError) as e:
+        return {"found": False, "error": str(e)[:200]}
+    if data is None:
+        return {"found": False}
+    return {"found": True, "content": data[:200000].decode("utf-8", "replace"),
+            "size": len(data), "path": _rel(member)}
+
+
+def _local_node_name(host: Dict[str, Any]) -> str:
+    r = run_command(host, "hostname", timeout=10)
+    return (r.get("stdout") or "").strip().split(".")[0] if r.get("success") else ""
+
+
+def restore_backup_file(host: Dict[str, Any], backup_file: str, member: str,
+                        force: bool = False) -> Dict[str, Any]:
+    """Extract one file from the backup and write it to its target path on the
+    host (byte-exact). Refuses to overwrite an existing file unless ``force``."""
+    rel = _rel(member)
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            data = _read_member_bytes(tf, member)
+    except (tarfile.TarError, OSError) as e:
+        return {"success": False, "error": str(e)[:200]}
+    if data is None:
+        return {"success": False, "error": "file not found in backup"}
+    dest = _backup_target_path(rel, _local_node_name(host))
+    if not dest:
+        return {"success": False, "error": "file is not restorable"}
+
+    ex = run_command(host, f"[ -e {shlex.quote(dest)} ] && echo __EXISTS__ || echo __NO__",
+                     timeout=10)
+    exists = "__EXISTS__" in (ex.get("stdout") or "")
+    if exists and not force:
+        return {"success": False, "exists": True, "dest": dest, "error": "target exists"}
+
+    b64 = base64.b64encode(data).decode("ascii")
+    parent = dest.rsplit("/", 1)[0]
+    script = (f"mkdir -p {shlex.quote(parent)} 2>/dev/null; "
+              f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(dest)} && echo __OK__")
+    w = run_command(host, script, timeout=20)
+    ok = "__OK__" in (w.get("stdout") or "")
+    return {"success": ok, "exists": exists, "dest": dest,
+            "stderr": (w.get("stderr") or "").strip()[:200]}
+
+
+def restore_all_guest_configs(host: Dict[str, Any], backup_file: str,
+                              force: bool = False) -> Dict[str, Any]:
+    """Restore every guest config in the backup (skips ones already present
+    unless ``force``). One tar open; writes each via restore_guest_config."""
+    guests: List = []
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                mm = re.search(r"/(qemu-server|lxc)/(\d+)\.conf$", m.name)
+                if not (m.isfile() and mm):
+                    continue
+                f = tf.extractfile(m)
+                if not f:
+                    continue
+                gtype = "lxc" if mm.group(1) == "lxc" else "qemu"
+                guests.append((gtype, mm.group(2), f.read().decode("utf-8", "replace")))
+    except (tarfile.TarError, OSError) as e:
+        return {"success": False, "error": str(e)[:200], "results": []}
+
+    results = []
+    for gtype, vmid, content in guests:
+        res = restore_guest_config(host, gtype, vmid, content, force=force)
+        results.append({"vmid": vmid, "type": gtype, **res})
+    restored = sum(1 for r in results if r.get("success"))
+    skipped = sum(1 for r in results if r.get("exists") and not r.get("success"))
+    return {"success": all(r.get("success") for r in results) if results else True,
+            "results": results, "restored": restored, "skipped": skipped,
+            "total": len(results)}
