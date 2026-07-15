@@ -190,6 +190,8 @@
 - **Multiple Hosts** -- Add and manage multiple Proxmox VE nodes
 - **Connection Test** -- Verify SSH connectivity per host
 - **Wake-on-LAN** -- Wake an offline host from the Hosts view: the management NIC's MAC is captured automatically while the host is online; magic packets are sent from the container **and** relayed via every other reachable host (a bridged Docker network usually can't broadcast into the LAN, a sibling PVE node can)
+- **Standby Mode** -- Mark a host as expected-offline (e.g. a backup server that is powered off most of the time and woken via WOL): no offline notifications for its up/down cycles, a neutral gray "Standby" badge instead of red, and the HOSTS dashboard tile stays green. While awake it is monitored normally
+- **Clean Removal** -- Deleting a host also clears all of its monitoring state (offline flag, pool health, stale-snapshot counts, replication-lag rows) so no ghost entries linger on the dashboard
 
 ### Host Config Backup
 - **Config-Level Snapshot** -- One-click backup of a Proxmox host's configuration (NOT VM disks): the `/etc/pve` cluster filesystem, network config (`interfaces`, `hosts`, `resolv.conf`), **APT repos + signing keys** (`/etc/apt`, minus `auth.conf`), **`/root/.ssh/authorized_keys`** (public keys), the **zfs-auto-snapshot retention cron**, **bashclub-zsync replication config** (`/etc/bashclub`) and the **ARC limit** (`/etc/modprobe.d/zfs.conf`), plus command captures (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs` state) -- everything needed to bring a rebuilt host back to full working order

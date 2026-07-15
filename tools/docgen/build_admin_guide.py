@@ -596,6 +596,11 @@ CONTENT = [
     "LAN hinein broadcasten, ein benachbarter PVE-Knoten schon.",
     ["# lokal: UDP-Broadcast des Magic-Packets an Port 9",
      "python3 -c \"...\"   # auf einem anderen Host per SSH: identisches Broadcast-Skript, als Relais"]),
+("note", "Standby-Modus: Ein Host lässt sich als \"erwartet offline\" markieren (Flag standby in "
+         "hosts.json, Umschalten via POST /api/hosts/standby). Der Erreichbarkeits-Monitor "
+         "erfasst seine Zustandswechsel dann weiterhin, sendet aber keine Offline-/Online-"
+         "Benachrichtigungen, und das Dashboard zählt ihn separat (neutral, nicht als offline). "
+         "Kein SSH-Befehl beteiligt — reine Konfigurations-/Anzeigelogik."),
 
 ("h2", "6.15 Benachrichtigungen (externe HTTP-Aufrufe, kein SSH)"),
 ("table",
@@ -716,7 +721,7 @@ CONTENT = [
     ["Bereich", "Beispiel-Endpunkte"],
     [
         ["Auth", "/api/login, /api/logout, /api/csrf-token, /api/ssh-key/rotate"],
-        ["Hosts", "/api/hosts, /api/hosts/test, /api/hosts/wol, /api/public-key"],
+        ["Hosts", "/api/hosts, /api/hosts/test, /api/hosts/wol, /api/hosts/standby, /api/public-key"],
         ["Pools", "/api/pools, /api/pools/status, /api/pools/scrub, /api/pools/upgrade, /api/pools/history"],
         ["Datasets", "/api/datasets, /api/datasets/create, /api/datasets/destroy, /api/datasets/property"],
         ["Snapshots", "/api/snapshots, /api/snapshots/rollback, /api/snapshots/clone, /api/snapshots/diff"],
