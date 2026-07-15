@@ -243,10 +243,12 @@ def dashboard():
     hosts_out = []
     agg = {"pools_total": 0, "pools_ok": 0, "pools_degraded": 0,
            "pools_capacity_warn": 0, "hosts_online": 0, "hosts_offline": 0,
-           "stale_snap_labels": 0, "forecast_pools_critical": 0}
+           "hosts_standby": 0, "stale_snap_labels": 0,
+           "forecast_pools_critical": 0}
 
     for h in hosts_cfg:
         addr = h["address"]
+        standby = bool(h.get("standby"))
         hstate = host_state.get(addr, {})
         reachable = hstate.get("value") == "up"
         if hstate.get("value") is None:
@@ -254,7 +256,12 @@ def dashboard():
         if reachable is True:
             agg["hosts_online"] += 1
         elif reachable is False:
-            agg["hosts_offline"] += 1
+            # A standby host being down is its normal state — count it
+            # separately so the HOSTS tile doesn't go red over it.
+            if standby:
+                agg["hosts_standby"] += 1
+            else:
+                agg["hosts_offline"] += 1
 
         pools_here = []
         for r in by_host.get(addr, []):
@@ -285,6 +292,7 @@ def dashboard():
             "address": addr,
             "name": h.get("name") or addr,
             "reachable": reachable,
+            "standby": standby,
             "last_seen": hstate.get("updated_ts"),
             "pools": pools_annotated,
         })
