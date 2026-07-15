@@ -596,8 +596,8 @@ CONTENT = [
     "LAN hinein broadcasten, ein benachbarter PVE-Knoten schon.",
     ["# lokal: UDP-Broadcast des Magic-Packets an Port 9",
      "python3 -c \"...\"   # auf einem anderen Host per SSH: identisches Broadcast-Skript, als Relais"]),
-("note", "Standby-Modus: Ein Host lässt sich als \"erwartet offline\" markieren (Flag standby in "
-         "hosts.json, Umschalten via POST /api/hosts/standby). Der Erreichbarkeits-Monitor "
+("note", "„Erwartet offline“ (UI-Label; intern weiterhin als Flag standby in hosts.json geführt, "
+         "Umschalten via POST /api/hosts/standby). Der Erreichbarkeits-Monitor "
          "erfasst seine Zustandswechsel dann weiterhin, sendet aber keine Offline-/Online-"
          "Benachrichtigungen, und das Dashboard zählt ihn separat (neutral, nicht als offline). "
          "Kein SSH-Befehl beteiligt — reine Konfigurations-/Anzeigelogik."),

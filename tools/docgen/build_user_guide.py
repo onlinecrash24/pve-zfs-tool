@@ -80,10 +80,11 @@ CONTENT = [
     "Backup — öffnet die Host-Config-Backup-Funktionen für genau diesen Host (siehe Kapitel 14)",
     "Wake-on-LAN — weckt einen offline erkannten Host per Magic Packet, sofern zuvor dessen "
     "MAC-Adresse automatisch erfasst wurde (während der Host online war)",
-    "Standby — markiert einen Host als „erwartet offline“ (z. B. ein Backup-Server, der meist "
-    "ausgeschaltet ist und per WOL geweckt wird): keine Offline-Benachrichtigungen mehr für "
-    "seine An-/Aus-Zyklen, neutrales graues Standby-Badge statt rot, und die Hosts-Kachel im "
-    "Dashboard bleibt grün. Solange der Host wach ist, wird er ganz normal überwacht.",
+    "Erwartet offline — markiert einen Host als „erwartet offline“ (z. B. ein Backup-Server, "
+    "der meist ausgeschaltet ist und per WOL geweckt wird): keine Offline-Benachrichtigungen "
+    "mehr für seine An-/Aus-Zyklen, neutrales graues „Erwartet offline“-Badge statt rot, und "
+    "die Hosts-Kachel im Dashboard bleibt grün. Solange der Host wach ist, wird er ganz normal "
+    "überwacht.",
 ]),
 ("note", "Beim Löschen eines Hosts wird sein kompletter Überwachungs-Zustand mit entfernt "
          "(Offline-Status, Pool-Zustände, Snapshot-Warnzähler, Replikations-Status), sodass "
