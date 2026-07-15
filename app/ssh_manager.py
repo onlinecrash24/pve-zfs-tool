@@ -102,6 +102,19 @@ def remove_host(address):
     return True, "Host removed"
 
 
+def set_host_standby(address, standby):
+    """Mark a host as expected-offline ("standby" — e.g. a backup server that
+    is powered off most of the time): the monitor suppresses its offline
+    notifications and the dashboard shows it neutrally instead of alarming."""
+    hosts = load_hosts()
+    for h in hosts:
+        if h["address"] == address:
+            h["standby"] = bool(standby)
+            save_hosts(hosts)
+            return True, "Host updated"
+    return False, "Host not found"
+
+
 def _forget_host_key(address):
     """Drop any known_hosts entry for ``address`` (e.g. a reinstalled host whose
     SSH host key changed), so a fresh TOFU can accept the new one."""

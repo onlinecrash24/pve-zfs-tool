@@ -415,8 +415,8 @@ function _renderDashboard(d) {
         return card;
     };
     tiles.appendChild(tile(t("dash_hosts"),
-        `${agg.hosts_online || 0} / ${(agg.hosts_online || 0) + (agg.hosts_offline || 0)}`,
-        t("dash_hosts_online"),
+        `${agg.hosts_online || 0} / ${(agg.hosts_online || 0) + (agg.hosts_offline || 0) + (agg.hosts_standby || 0)}`,
+        t("dash_hosts_online") + ((agg.hosts_standby || 0) > 0 ? ` · ${agg.hosts_standby} ${t("standby")}` : ""),
         (agg.hosts_offline || 0) === 0 ? true : false));
     tiles.appendChild(tile(t("dash_pools"),
         `${agg.pools_ok || 0} / ${agg.pools_total || 0}`,
@@ -478,6 +478,7 @@ function _renderDashboard(d) {
         if (pools.length === 0) {
             const tr = document.createElement("tr");
             const statusBadge = host.reachable === true ? `<span class="badge badge-online">${escapeHtml(t("online"))}</span>`
+                : (host.standby && host.reachable === false) ? `<span class="badge badge-stopped" title="${escapeHtml(t("standby_hint"))}">${escapeHtml(t("standby"))}</span>`
                 : host.reachable === false ? `<span class="badge badge-offline">${escapeHtml(t("offline"))}</span>`
                 : `<span class="badge badge-stopped">${escapeHtml(t("unknown"))}</span>`;
             tr.innerHTML = `<td>${escapeHtml(host.name)}</td>
@@ -491,6 +492,7 @@ function _renderDashboard(d) {
             let nameCell = "", statusCell = "";
             if (idx === 0) {
                 const statusBadge = host.reachable === true ? `<span class="badge badge-online">${escapeHtml(t("online"))}</span>`
+                    : (host.standby && host.reachable === false) ? `<span class="badge badge-stopped" title="${escapeHtml(t("standby_hint"))}">${escapeHtml(t("standby"))}</span>`
                     : host.reachable === false ? `<span class="badge badge-offline">${escapeHtml(t("offline"))}</span>`
                     : `<span class="badge badge-stopped">${escapeHtml(t("unknown"))}</span>`;
                 nameCell = `<td rowspan="${pools.length}">${escapeHtml(host.name)}</td>`;
@@ -701,7 +703,8 @@ async function viewHosts() {
             tr.appendChild(h("td", {}, String(host.port)));
             tr.appendChild(h("td", {}, host.user));
             const statusTd = h("td");
-            statusTd.appendChild(h("span", { className: "badge badge-stopped", id: `status-${host.address}` }, t("unknown")));
+            statusTd.appendChild(h("span", { className: "badge badge-stopped", id: `status-${host.address}`,
+                "data-standby": host.standby ? "1" : "" }, t("unknown")));
             tr.appendChild(statusTd);
             const actionsTd = h("td");
             const btnGroup = h("div", { className: "btn-group" });
@@ -719,6 +722,11 @@ async function viewHosts() {
                 onClick: () => wakeHost(host.address),
             }, t("wol_btn"));
             btnGroup.appendChild(wolBtn);
+            btnGroup.appendChild(h("button", {
+                className: "btn btn-sm" + (host.standby ? " btn-primary" : ""),
+                title: t("standby_hint"),
+                onClick: () => toggleStandby(host.address, !host.standby),
+            }, t("standby")));
             btnGroup.appendChild(h("button", {
                 className: "btn btn-sm",
                 onClick: () => openHostBackupModal(host),
@@ -819,11 +827,14 @@ async function _probeHostBadge(addr) {
     try {
         const r = await API.post("/api/hosts/test", { address: addr });
         online = !!r.success;
-        el.textContent = online ? t("online") : t("offline");
-        el.className = online ? "badge badge-online" : "badge badge-offline";
+        const standby = el.getAttribute("data-standby") === "1";
+        el.textContent = online ? t("online") : (standby ? t("standby") : t("offline"));
+        el.className = online ? "badge badge-online" : (standby ? "badge badge-stopped" : "badge badge-offline");
+        if (!online && standby) el.title = t("standby_hint");
     } catch (e) {
-        el.textContent = t("offline");
-        el.className = "badge badge-offline";
+        const standby = el.getAttribute("data-standby") === "1";
+        el.textContent = standby ? t("standby") : t("offline");
+        el.className = standby ? "badge badge-stopped" : "badge badge-offline";
     }
     // WOL only makes sense for an offline host
     const wolBtn = document.getElementById(`wol-${addr}`);
@@ -837,6 +848,16 @@ async function _probeHostBadge(addr) {
             wolBtn.style.opacity = "1";
             wolBtn.title = t("wol_hint");
         }
+    }
+}
+
+async function toggleStandby(addr, enable) {
+    const r = await API.post("/api/hosts/standby", { address: addr, standby: enable });
+    if (r && r.success) {
+        toast(enable ? t("standby_on") : t("standby_off"), "success");
+        viewHosts();
+    } else {
+        toast((r && r.message) || t("failed"), "error");
     }
 }
 

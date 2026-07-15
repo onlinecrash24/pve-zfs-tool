@@ -319,8 +319,33 @@ def api_remove_host():
     data = request.json
     addr = data.get("address", "")
     ok, msg = remove_host(addr)
-    audit_log("host.remove", target=addr, host=addr, success=ok)
+    cleared = 0
+    if ok:
+        # Drop the host's monitor state (offline flag, pool health, stale-snap
+        # counts, replication-lag rows) so no ghost entries linger on the
+        # dashboard or re-alert after the host is gone.
+        try:
+            from app.monitor import clear_host_state
+            cleared = clear_host_state(addr)
+        except Exception as e:
+            log.warning("host.remove: monitor-state cleanup failed for %s: %s", addr, e)
+    audit_log("host.remove", target=addr, host=addr, success=ok,
+              details={"monitor_state_cleared": cleared})
     ssh_cache.invalidate_host(addr)
+    return jsonify({"success": ok, "message": msg})
+
+
+@app.route("/api/hosts/standby", methods=["POST"])
+@login_required
+def api_host_standby():
+    """Toggle a host's standby flag (expected offline — no offline alerts)."""
+    from app.ssh_manager import set_host_standby
+    data = request.json or {}
+    addr = data.get("address", "")
+    standby = bool(data.get("standby"))
+    ok, msg = set_host_standby(addr, standby)
+    audit_log("host.standby", target=addr, host=addr, success=ok,
+              details={"standby": standby})
     return jsonify({"success": ok, "message": msg})
 
 

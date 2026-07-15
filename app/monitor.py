@@ -145,12 +145,46 @@ def _cooldown_ok(last_alert_ts, cooldown):
 # Checks — called per host per sample round
 # ---------------------------------------------------------------------------
 
+def clear_host_state(address):
+    """Drop ALL monitor state for a host — called when the host is removed
+    from the tool, so ghost entries (offline flag, pool health, stale-snapshot
+    counts, replication-lag state) can't linger on the dashboard or re-alert.
+
+    Covers scope 'host' (key = the bare address) plus every per-object scope
+    whose keys are prefixed 'address:' or 'address::' (pool_health, capacity,
+    pool_errors, stale_snap, repl). Returns the number of rows removed.
+    """
+    # '_' is a LIKE wildcard and legal in hostnames — escape so 'my_host'
+    # can't accidentally match 'myXhost:...'.
+    esc = address.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM monitor_state WHERE (scope='host' AND key=?) "
+            "OR key LIKE ? ESCAPE '\\'",
+            (address, esc + ":%"),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def check_host_reachability(host, reachable):
-    """Fire host_offline on transition up↔down."""
+    """Fire host_offline on transition up↔down.
+
+    Hosts flagged ``standby`` (expected offline — e.g. a wake-on-demand backup
+    server that is powered off most of the time) never notify: their up/down
+    flapping is normal operation. The state is still recorded so the dashboard
+    shows the real current status.
+    """
     scope = "host"
     key = host["address"]
-    prev, _ = _state_get(scope, key)
     new = "up" if reachable else "down"
+    if host.get("standby"):
+        _state_set(scope, key, new)
+        return
+    prev, _ = _state_get(scope, key)
     if prev is None:
         _state_set(scope, key, new)
         return

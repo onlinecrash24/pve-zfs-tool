@@ -190,6 +190,8 @@
 - **Mehrere Hosts** -- Mehrere Proxmox-VE-Nodes hinzufügen und verwalten
 - **Connection-Test** -- SSH-Konnektivität pro Host prüfen
 - **Wake-on-LAN** -- Offline-Host aus der Hosts-Ansicht wecken: Die MAC des Management-NICs wird automatisch erfasst, solange der Host online ist; Magic Packets gehen aus dem Container **und** als Relay über jeden anderen erreichbaren Host raus (eine gebridgte Docker-Umgebung broadcastet meist nicht ins LAN — ein Nachbar-PVE schon)
+- **Standby-Modus** -- Host als „erwartet offline" markieren (z. B. ein Backup-Server, der meist ausgeschaltet ist und per WOL geweckt wird): keine Offline-Benachrichtigungen bei seinen An-/Aus-Zyklen, neutrales graues „Standby"-Badge statt rot, und die HOSTS-Dashboard-Kachel bleibt grün. Solange er wach ist, wird er ganz normal überwacht
+- **Sauberes Entfernen** -- Beim Löschen eines Hosts wird auch sein kompletter Monitoring-Zustand bereinigt (Offline-Flag, Pool-Health, Stale-Snapshot-Zähler, Replikations-Lag), damit keine Geister-Einträge im Dashboard zurückbleiben
 
 ### Host-Config-Backup
 - **Config-Snapshot** -- Ein-Klick-Backup der Proxmox-Host-Konfiguration (NICHT der VM-Disks): das `/etc/pve`-Cluster-Dateisystem, Netzwerk-Config (`interfaces`, `hosts`, `resolv.conf`), **APT-Repos + Signing-Keys** (`/etc/apt`, ohne `auth.conf`), **`/root/.ssh/authorized_keys`** (öffentliche Keys), die **zfs-auto-snapshot-Retention-Cron**, **bashclub-zsync-Replikations-Config** (`/etc/bashclub`) und das **ARC-Limit** (`/etc/modprobe.d/zfs.conf`) plus Befehlsausgaben (`pveversion -v`, `dpkg --get-selections`, `ip`/`route`, `zpool`/`zfs`-Status) -- alles, um einen neu aufgesetzten Host wieder voll funktionsfähig zu machen
