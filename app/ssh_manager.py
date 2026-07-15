@@ -103,8 +103,9 @@ def remove_host(address):
 
 
 def set_host_standby(address, standby):
-    """Mark a host as expected-offline ("standby" — e.g. a backup server that
-    is powered off most of the time): the monitor suppresses its offline
+    """Mark a host as expected-offline (UI label "Expected Offline" — internal
+    field/param name kept as "standby" for brevity) -- e.g. a backup server
+    that is powered off most of the time: the monitor suppresses its offline
     notifications and the dashboard shows it neutrally instead of alarming."""
     hosts = load_hosts()
     for h in hosts:

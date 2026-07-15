@@ -190,7 +190,7 @@
 - **Mehrere Hosts** -- Mehrere Proxmox-VE-Nodes hinzufügen und verwalten
 - **Connection-Test** -- SSH-Konnektivität pro Host prüfen
 - **Wake-on-LAN** -- Offline-Host aus der Hosts-Ansicht wecken: Die MAC des Management-NICs wird automatisch erfasst, solange der Host online ist; Magic Packets gehen aus dem Container **und** als Relay über jeden anderen erreichbaren Host raus (eine gebridgte Docker-Umgebung broadcastet meist nicht ins LAN — ein Nachbar-PVE schon)
-- **Standby-Modus** -- Host als „erwartet offline" markieren (z. B. ein Backup-Server, der meist ausgeschaltet ist und per WOL geweckt wird): keine Offline-Benachrichtigungen bei seinen An-/Aus-Zyklen, neutrales graues „Standby"-Badge statt rot, und die HOSTS-Dashboard-Kachel bleibt grün. Solange er wach ist, wird er ganz normal überwacht
+- **Erwartet offline** -- Host als „erwartet offline“ markieren (z. B. ein Backup-Server, der meist ausgeschaltet ist und per WOL geweckt wird): keine Offline-Benachrichtigungen bei seinen An-/Aus-Zyklen, neutrales graues „Erwartet offline“-Badge statt rot, und die HOSTS-Dashboard-Kachel bleibt grün. Solange er wach ist, wird er ganz normal überwacht
 - **Sauberes Entfernen** -- Beim Löschen eines Hosts wird auch sein kompletter Monitoring-Zustand bereinigt (Offline-Flag, Pool-Health, Stale-Snapshot-Zähler, Replikations-Lag), damit keine Geister-Einträge im Dashboard zurückbleiben
 
 ### Host-Config-Backup
