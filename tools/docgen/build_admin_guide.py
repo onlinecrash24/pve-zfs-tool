@@ -547,18 +547,25 @@ CONTENT = [
      "mkdir -p <zielverzeichnis>",
      "echo <base64-inhalt> | base64 -d > <ziel>",
      "chmod +x <ziel>   # nur falls im Archiv als ausführbar markiert"]),
+("cmd", "Alle Configs wiederherstellen", "Ein-Klick-Wiederherstellung ALLER wiederherstellbaren "
+    "Konfigurationsdateien außer Gast-Configs (eigener Button) und Info-Ausgaben — Netzwerk, "
+    "Storage/fstab, APT, Firewall, Jobs/Cron, User, SSH, Sonstiges. Node-Name wird einmal für "
+    "den ganzen Stapel aufgelöst.",
+    ["# je Datei wie \"Einzelne Datei wiederherstellen\", Kategorie ∉ {guests, info}"]),
 ("cmd", "Alle Gast-Configs auf einmal wiederherstellen", "Bulk-Variante der Einzel-Wiederherstellung, überspringt vorhandene Configs ohne Überschreiben-Option.",
     ["# je gefundener .../<qemu-server|lxc>/<vmid>.conf: wie \"Einzelne Datei wiederherstellen\""]),
-("cmd", "Pakete nachinstallieren", "Nutzt die im Backup gesicherte dpkg --get-selections-Liste; "
-    "gefiltert auf install/hold (additiv — entfernt nie Pakete). Läuft als Hintergrund-Task, da "
-    "apt-get lange dauern kann. Eine Vorab-Prüfung stellt in einem SSH-Rundlauf fest, ob die "
-    "APT-Quellen und Signing-Keyrings aus dem Backup bereits auf dem Ziel liegen — fehlen "
-    "welche, warnt die Oberfläche vor dem Start (sonst scheitert der gesamte Lauf mit "
-    "NO_PUBKEY, da apt-Transaktionen atomar sind).",
-    ["[ -e <ziel1> ] || echo <ziel1>; [ -e <ziel2> ] || echo <ziel2>; ...   # Vorab-Prüfung",
+("cmd", "Pakete nachinstallieren", "In sich abgeschlossener Hintergrund-Task: (1) stellt "
+    "zuerst die APT-Quellen und Signing-Keyrings aus dem Backup wieder her (force), damit "
+    "Drittanbieter-Pakete überhaupt auflösbar sind; (2) wendet die gesicherte "
+    "dpkg --get-selections-Liste an (nur install/hold, additiv); (3) prüft ehrlich, welche "
+    "angeforderten Pakete danach noch NICHT installiert sind. Punkt 3 ist nötig, weil "
+    "dpkg --set-selections unbekannte Paketnamen still ignoriert — ein apt-Exit 0 bedeutet "
+    "also nicht, dass wirklich alles installiert wurde.",
+    ["# 1. restore_backup_category(host, backup, 'apt', force=True)",
      "echo <base64-selektionen> | base64 -d | dpkg --set-selections",
      "apt-get update -qq || true",
-     "apt-get -y dselect-upgrade"]),
+     "apt-get -y dselect-upgrade",
+     "# 3. dpkg-query -W -f='${Package}\\n' | sort -u  vs.  angeforderte Liste (grep -Fxv)"]),
 ("cmd", "Ad-hoc-Ziel: Verbindungstest / Tool-Key installieren", "Für einen noch nicht "
     "registrierten, frisch installierten Host per IP + Passwort (nie gespeichert).",
     ["hostname; pveversion   # Verbindungstest",
@@ -739,7 +746,8 @@ CONTENT = [
         ["Replikation", "/api/replication/install, /api/replication/config, /api/replication/cron, "
          "/api/replication/health, /api/replication/checkzfs"],
         ["Disaster Recovery", "/api/dr/replicas, /api/dr/reverse-sync, /api/dr/reverse-precheck"],
-        ["Config Restore", "/api/dr/backup-contents, /api/dr/restore-file, /api/dr/restore-all-guests, "
+        ["Config Restore", "/api/dr/backup-contents, /api/dr/restore-file, /api/dr/restore-category, "
+         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, /api/dr/target-files-check, "
          "/api/dr/adhoc-test, /api/dr/install-key, /api/dr/reinstall-packages"],
         ["Benachrichtigungen", "/api/notifications/config, /api/notifications/test/*"],
         ["KI-Berichte", "/api/ai/config, /api/ai/report, /api/ai/chat, /api/ai/report/pdf/<id>"],

@@ -244,6 +244,53 @@ def test_restore_backup_category_empty(tmp_path, monkeypatch):
     assert r["total"] == 0 and r["success"] is True
 
 
+# --- restore all configs (everything except guests + info) ------------------
+
+def test_restore_all_configs_covers_everything_but_guests(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    written = []
+    def run(host, cmd, timeout=10):
+        if cmd.strip() == "hostname":
+            return {"stdout": "n", "success": True}
+        if "base64 -d" in cmd:
+            written.append(cmd)
+            return {"stdout": "__OK__", "success": True}
+        return {"stdout": "__NO__", "success": True}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.restore_all_configs({"address": "h"}, path)
+    # every restorable non-guest, non-info file gets written; the 2 guest
+    # confs and the 2 cmd/ captures are left out.
+    assert r["failed"] == 0 and r["restored"] == r["total"] and r["total"] >= 10
+    # guest configs are NOT touched here (own button)
+    assert not any("/qemu-server/100.conf" in c for c in written)
+    assert not any("/lxc/253.conf" in c for c in written)
+    # but the important recovery bits ARE
+    assert any("/etc/network/interfaces" in c for c in written)
+    assert any("/usr/share/keyrings/bashclub-archive-keyring.gpg" in c for c in written)
+    assert any("/etc/fstab" in c for c in written)
+
+
+def test_restore_all_configs_excludes_guests_and_info(tmp_path, monkeypatch):
+    # a backup of ONLY guest configs + info captures -> nothing for all-configs
+    path = _make_backup(tmp_path, {
+        "./etc/pve/nodes/pve1/qemu-server/100.conf": "cores: 2\n",
+        "./cmd/pveversion.txt": "pve 9\n",
+    })
+    monkeypatch.setattr(dr, "run_command", _fake_run(exists=False))
+    r = dr.restore_all_configs({"address": "h"}, path)
+    assert r["total"] == 0 and r["success"] is True
+
+
+# --- install-package-name extraction (honest still-missing check) -----------
+
+def test_install_package_names_install_only_arch_stripped():
+    sel = "pve-manager\tinstall\nvim:amd64\tinstall\nzfsutils-linux\thold\n"
+    names = dr._install_package_names(sel)
+    # only 'install' lines (hold excluded from the must-be-installed check),
+    # arch suffix stripped, sorted+unique
+    assert names == ["pve-manager", "vim"]
+
+
 # --- pre-flight: missing files on target ------------------------------------
 
 def test_check_target_files_reports_missing(tmp_path, monkeypatch):

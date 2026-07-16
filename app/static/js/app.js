@@ -5502,9 +5502,87 @@ async function viewConfigRestore() {
         body.appendChild(h("label", { style: "display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer" },
             [overwriteCb, h("span", { style: "font-size:13px" }, t("cr_overwrite"))]));
 
+        // Primary recovery actions, in the recommended order:
+        //   1) Reinstall packages (restores repos+keys itself, then installs)
+        //   2) Restore all configs (everything except guests)
+        //   3) Restore all guest configs
+        const actionRow = h("div", { style: "display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px" });
+        const pkgStatus = h("div", { style: "margin-top:8px" });
+
+        // 1. Reinstall packages -- self-contained: the backend first restores
+        //    the APT sources + signing keys from the backup, then installs.
+        if (files.some(f => f.path === "cmd/dpkg-selections.txt")) {
+            const pkgBtn = h("button", { className: "btn btn-warning btn-sm" }, t("cr_pkg_install"));
+            pkgBtn.onclick = async () => {
+                if (!confirm(t("cr_pkg_confirm").replace("{h}", _crAddr()))) return;
+                pkgBtn.disabled = true; pkgStatus.innerHTML = "";
+                const prog = h("p", { className: "muted", style: "font-family:monospace;font-size:12px" }, "…");
+                pkgStatus.appendChild(prog);
+                let kick;
+                try {
+                    kick = await API.post("/api/dr/reinstall-packages", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value,
+                    }));
+                } catch (e) { toast(e.message || t("failed"), "error"); pkgBtn.disabled = false; return; }
+                if (!kick || !kick.task_id) { pkgStatus.innerHTML = ""; toast((kick && kick.error) || t("failed"), "error"); pkgBtn.disabled = false; return; }
+                toast(t("cr_pkg_running"), "info");
+                pollReplicationTask(kick.task_id, {
+                    onTick: (rec) => { prog.textContent = rec.progress || "…"; },
+                    onDone: (rec) => {
+                        const res = rec.result || {};
+                        prog.textContent = "";
+                        if (res.success) {
+                            toast(t("cr_pkg_ok"), "success");
+                            pkgStatus.appendChild(h("p", {}, "✅ " + t("cr_pkg_ok_detail")
+                                .replace("{n}", String(res.requested || 0))
+                                .replace("{a}", String(res.apt_restored || 0))));
+                        } else {
+                            const missCount = res.missing_count || 0;
+                            const missList = (res.missing || []).length
+                                ? `<p style="font-family:monospace;font-size:12px;word-break:break-all">${escapeHtml((res.missing || []).join(", "))}</p>` : "";
+                            const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
+                            const repoIssue = missCount > 0 || /NO_PUBKEY|Failed to fetch|is not signed|does not have a Release file/i.test(res.log_tail || "");
+                            const hint = repoIssue
+                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("cr_pkg_partial_hint"))}</div>`
+                                : "";
+                            const summary = `<p>exit=${escapeHtml(String(res.exit_code))} · ${escapeHtml(t("cr_pkg_missing_n").replace("{n}", String(missCount)))}</p>`;
+                            openModal(t("cr_pkg_failed"), `${hint}${summary}${missList}${tail}`);
+                        }
+                        pkgBtn.disabled = false;
+                    },
+                    onError: (msg) => { toast(msg || t("failed"), "error"); pkgBtn.disabled = false; },
+                });
+            };
+            actionRow.appendChild(pkgBtn);
+        }
+
+        // 2. Restore all configs (everything restorable except guests + info)
+        const cfgCount = files.filter(f => f.restorable && f.category !== "guests" && f.category !== "info").length;
+        if (cfgCount) {
+            const cfgBtn = h("button", { className: "btn btn-primary btn-sm" }, t("cr_restore_all_configs").replace("{n}", String(cfgCount)));
+            cfgBtn.onclick = async () => {
+                const msg = t("cr_allcfg_confirm").replace("{n}", String(cfgCount)).replace("{h}", _crAddr())
+                    + "\n\n" + t("cr_allcfg_warn");
+                if (!confirm(msg)) return;
+                cfgBtn.disabled = true;
+                try {
+                    const r = await API.post("/api/dr/restore-all-configs", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value, force: overwriteCb.checked,
+                    }));
+                    toast(t("cr_cat_bulk_done")
+                        .replace("{r}", String(r.restored || 0))
+                        .replace("{s}", String(r.skipped || 0))
+                        .replace("{f}", String(r.failed || 0)), r.success ? "success" : "error");
+                } catch (e) { toast(e.message || t("failed"), "error"); }
+                finally { cfgBtn.disabled = false; }
+            };
+            actionRow.appendChild(cfgBtn);
+        }
+
+        // 3. Restore all guest configs
         const guestCount = files.filter(f => f.category === "guests").length;
         if (guestCount) {
-            const bulkBtn = h("button", { className: "btn btn-primary btn-sm" }, t("cr_restore_all_guests").replace("{n}", guestCount));
+            const bulkBtn = h("button", { className: "btn btn-sm" }, t("cr_restore_all_guests").replace("{n}", guestCount));
             bulkBtn.onclick = async () => {
                 if (!confirm(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
                 bulkBtn.disabled = true;
@@ -5516,60 +5594,11 @@ async function viewConfigRestore() {
                 } catch (e) { toast(e.message || t("failed"), "error"); }
                 finally { bulkBtn.disabled = false; }
             };
-            body.appendChild(bulkBtn);
+            actionRow.appendChild(bulkBtn);
         }
 
-        // Package reinstall (needs repos restored first + network)
-        if (files.some(f => f.path === "cmd/dpkg-selections.txt")) {
-            const pkgBtn = h("button", { className: "btn btn-warning btn-sm", style: "margin-left:8px" }, t("cr_pkg_install"));
-            const pkgStatus = h("div", { style: "margin-top:8px" });
-            pkgBtn.onclick = async () => {
-                // Pre-flight: are the APT sources + signing keyrings from the
-                // backup already on the target? Without them apt fails
-                // (NO_PUBKEY / missing repo) and aborts the whole reinstall.
-                let confirmMsg = t("cr_pkg_confirm").replace("{h}", _crAddr());
-                try {
-                    const chk = await API.post("/api/dr/target-files-check", Object.assign(_crTarget(), {
-                        backup_host: backupHostSel.value, file: backupSel.value, category: "apt",
-                    }));
-                    if (chk && (chk.missing || []).length) {
-                        confirmMsg = t("cr_pkg_missing_repos").replace("{n}", String(chk.missing.length));
-                    }
-                } catch (e) { /* pre-check is best-effort */ }
-                if (!confirm(confirmMsg)) return;
-                pkgBtn.disabled = true; pkgStatus.innerHTML = "";
-                const prog = h("p", { className: "muted", style: "font-family:monospace;font-size:12px" }, "…");
-                pkgStatus.appendChild(prog);
-                let kick;
-                try {
-                    kick = await API.post("/api/dr/reinstall-packages", Object.assign(_crTarget(), {
-                        backup_host: backupHostSel.value, file: backupSel.value,
-                    }));
-                } catch (e) { toast(e.message || t("failed"), "error"); pkgBtn.disabled = false; return; }
-                if (!kick || !kick.task_id) { pkgStatus.innerHTML = ""; toast(kick.error || t("failed"), "error"); pkgBtn.disabled = false; return; }
-                toast(t("cr_pkg_running"), "info");
-                pollReplicationTask(kick.task_id, {
-                    onTick: (rec) => { prog.textContent = rec.progress || "…"; },
-                    onDone: (rec) => {
-                        const res = rec.result || {};
-                        prog.textContent = "";
-                        if (res.success) { toast(t("cr_pkg_ok"), "success"); pkgStatus.appendChild(h("p", {}, "✅ " + t("cr_pkg_ok"))); }
-                        else {
-                            const tail = res.log_tail ? `<pre class="output" style="max-height:260px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
-                            const repoIssue = /NO_PUBKEY|Failed to fetch|is not signed|does not have a Release file/i.test(res.log_tail || "");
-                            const hint = repoIssue
-                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("cr_pkg_repo_hint"))}</div>`
-                                : "";
-                            openModal(t("cr_pkg_failed"), `${hint}<p>exit=${escapeHtml(String(res.exit_code))}</p>${tail}`);
-                        }
-                        pkgBtn.disabled = false;
-                    },
-                    onError: (msg) => { toast(msg || t("failed"), "error"); pkgBtn.disabled = false; },
-                });
-            };
-            body.appendChild(pkgBtn);
-            body.appendChild(pkgStatus);
-        }
+        body.appendChild(actionRow);
+        body.appendChild(pkgStatus);
 
         _CR_CATS.forEach(cat => {
             const items = files.filter(f => f.category === cat);

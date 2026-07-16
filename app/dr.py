@@ -584,35 +584,39 @@ def restore_all_guest_configs(host: Dict[str, Any], backup_file: str,
             "total": len(results)}
 
 
-def _category_members(backup_file: str, category: str) -> List[Any]:
-    """(member_name, rel) pairs of all restorable files in one category."""
+# Categories that "Restore all configs" does NOT touch: guests have their own
+# dedicated button, and info-only captures aren't restorable anyway.
+_NON_CONFIG_CATEGORIES = {"guests", "info"}
+
+
+def _restorable_members(backup_file: str, predicate) -> List[Any]:
+    """(member_name, rel) pairs of all restorable files whose rel satisfies
+    ``predicate``. Skips directories, command captures and anything outside
+    the restore allowlist."""
     out = []
     with tarfile.open(backup_file, "r:*") as tf:
         for m in tf.getmembers():
             if not m.isfile():
                 continue
             rel = _rel(m.name)
-            if not rel or _categorize(rel) != category:
+            if not rel or _backup_target_path(rel, "x") is None:
                 continue
-            if _backup_target_path(rel, "x") is None:
-                continue
-            out.append((m.name, rel))
+            if predicate(rel):
+                out.append((m.name, rel))
     return out
 
 
-def restore_backup_category(host: Dict[str, Any], backup_file: str,
-                            category: str, force: bool = False) -> Dict[str, Any]:
-    """Restore every restorable file of one category (e.g. all APT sources +
-    signing keyrings in one click). Existing files are skipped unless
-    ``force``; the node name is resolved once for the whole batch."""
-    try:
-        members = _category_members(backup_file, category)
-    except (tarfile.TarError, OSError) as e:
-        return {"success": False, "error": str(e)[:200], "results": []}
+def _category_members(backup_file: str, category: str) -> List[Any]:
+    """(member_name, rel) pairs of all restorable files in one category."""
+    return _restorable_members(backup_file, lambda rel: _categorize(rel) == category)
+
+
+def _restore_member_list(host: Dict[str, Any], backup_file: str,
+                         members: List[Any], force: bool) -> Dict[str, Any]:
+    """Restore a pre-selected list of (member, rel); node resolved once."""
     if not members:
         return {"success": True, "results": [], "restored": 0, "skipped": 0,
                 "failed": 0, "total": 0}
-
     node = _local_node_name(host)
     results = []
     for member, rel in members:
@@ -624,6 +628,34 @@ def restore_backup_category(host: Dict[str, Any], backup_file: str,
     failed = len(results) - restored - skipped
     return {"success": failed == 0, "results": results, "restored": restored,
             "skipped": skipped, "failed": failed, "total": len(results)}
+
+
+def restore_backup_category(host: Dict[str, Any], backup_file: str,
+                            category: str, force: bool = False) -> Dict[str, Any]:
+    """Restore every restorable file of one category (e.g. all APT sources +
+    signing keyrings in one click). Existing files are skipped unless
+    ``force``; the node name is resolved once for the whole batch."""
+    try:
+        members = _category_members(backup_file, category)
+    except (tarfile.TarError, OSError) as e:
+        return {"success": False, "error": str(e)[:200], "results": []}
+    return _restore_member_list(host, backup_file, members, force)
+
+
+def restore_all_configs(host: Dict[str, Any], backup_file: str,
+                        force: bool = False) -> Dict[str, Any]:
+    """Restore every restorable config file at once -- everything a rebuilt
+    host needs EXCEPT guest configs (their own button) and info-only captures.
+    Covers network, storage/fstab, APT repos+keys, firewall, jobs/cron,
+    users/access, SSH access and misc /etc/pve. Existing files are skipped
+    unless ``force``."""
+    try:
+        members = _restorable_members(
+            backup_file,
+            lambda rel: _categorize(rel) not in _NON_CONFIG_CATEGORIES)
+    except (tarfile.TarError, OSError) as e:
+        return {"success": False, "error": str(e)[:200], "results": []}
+    return _restore_member_list(host, backup_file, members, force)
 
 
 def check_target_files(host: Dict[str, Any], backup_file: str,
@@ -682,33 +714,86 @@ def _filter_selections(text: str) -> str:
     return "\n".join(out)
 
 
-def reinstall_packages_async(target_host: Dict[str, Any], selections_text: str) -> str:
-    """Apply the captured package selection (install/hold only) and run
-    ``apt-get dselect-upgrade`` as a background task. Repos must already be in
-    place (restore /etc/apt first)."""
-    selections = _filter_selections(selections_text)
+def _install_package_names(selections: str) -> List[str]:
+    """Package names marked 'install' in a filtered selections blob, arch
+    stripped so they line up with dpkg-query's ${Package} for the
+    still-missing check."""
+    names = []
+    for ln in (selections or "").splitlines():
+        parts = ln.split()
+        if len(parts) >= 2 and parts[-1] == "install":
+            names.append(parts[0].split(":")[0])
+    return sorted(set(names))
 
-    def _job(progress, host, sel):
-        count = len(sel.splitlines())
-        if not sel.strip():
-            return {"success": False, "error": "no installable package selections"}
-        progress(f"Applying {count} package selections …")
-        b64 = base64.b64encode(sel.encode("utf-8")).decode("ascii")
+
+def reinstall_packages_async(target_host: Dict[str, Any], backup_file: str) -> str:
+    """Self-contained package reinstall as a background task:
+
+    1. Restore the APT sources + signing keyrings from the backup (force) so
+       third-party packages (bashclub, etc.) are actually resolvable.
+    2. apt-get update, then dpkg --set-selections + apt-get dselect-upgrade
+       (install/hold only -- additive, never removes).
+    3. Honestly report which requested packages are STILL not installed
+       afterwards. This matters because dpkg --set-selections silently ignores
+       package names it doesn't know, so apt exiting 0 does NOT by itself mean
+       every backed-up package got installed (the old code reported such runs
+       as a plain success)."""
+
+    def _job(progress, host, bf):
+        # 1. Repos + keys first -- force so the fresh host's sources are
+        #    replaced by the backup's (and bashclub etc. get added).
+        progress("Restoring APT sources + signing keys from backup …")
+        apt_res = restore_backup_category(host, bf, "apt", force=True)
+        apt_restored = apt_res.get("restored", 0)
+
+        selections = _filter_selections(read_dpkg_selections(bf))
+        want = _install_package_names(selections)
+        if not want:
+            progress("No installable package list in backup", ok=False)
+            return {"success": False, "error": "no installable package selections",
+                    "apt_restored": apt_restored}
+        count = len(want)
+
+        progress(f"Repos restored ({apt_restored}). Applying {count} package selections …")
+        sel_b64 = base64.b64encode(selections.encode("utf-8")).decode("ascii")
+        req_b64 = base64.b64encode(("\n".join(want) + "\n").encode("utf-8")).decode("ascii")
+        # POSIX sh only (no process substitution): grep -Fxv of the installed
+        # set against the requested set yields the still-missing packages.
         script = (
-            f"echo {shlex.quote(b64)} | base64 -d | dpkg --set-selections\n"
+            f"echo {shlex.quote(req_b64)} | base64 -d > /tmp/.pvezfs_req\n"
+            f"echo {shlex.quote(sel_b64)} | base64 -d | dpkg --set-selections\n"
             "DEBIAN_FRONTEND=noninteractive apt-get update -qq || true\n"
             "DEBIAN_FRONTEND=noninteractive apt-get -y dselect-upgrade 2>&1\n"
-            "echo __exit=$?"
+            "EC=$?\n"
+            "dpkg-query -W -f='${Package}\\n' 2>/dev/null | sort -u > /tmp/.pvezfs_inst\n"
+            "grep -Fxv -f /tmp/.pvezfs_inst /tmp/.pvezfs_req > /tmp/.pvezfs_miss 2>/dev/null || true\n"
+            "echo \"__missing_count=$(grep -c . /tmp/.pvezfs_miss 2>/dev/null || echo 0)\"\n"
+            "echo __missing_begin\n"
+            "head -40 /tmp/.pvezfs_miss 2>/dev/null || true\n"
+            "echo __missing_end\n"
+            "rm -f /tmp/.pvezfs_req /tmp/.pvezfs_inst /tmp/.pvezfs_miss\n"
+            "echo __exit=$EC\n"
         )
         progress("Running apt-get dselect-upgrade (this can take a while) …")
         r = run_command(host, script, timeout=3 * 3600)
         out = r.get("stdout") or ""
-        m = re.search(r"__exit=(\d+)\s*$", out.strip())
-        exit_code = int(m.group(1)) if m else None
-        ok = bool(r.get("success")) and exit_code == 0
-        progress(f"Finished (exit={exit_code})", ok=ok, exit_code=exit_code)
-        cleaned = re.sub(r"__exit=\d+\s*$", "", out).strip()
-        return {"success": ok, "exit_code": exit_code, "count": count,
-                "log_tail": cleaned[-4000:]}
+        em = re.search(r"__exit=(\d+)\s*$", out.strip())
+        exit_code = int(em.group(1)) if em else None
+        mc = re.search(r"__missing_count=(\d+)", out)
+        missing_count = int(mc.group(1)) if mc else None
+        mb = re.search(r"__missing_begin\n(.*?)\n?__missing_end", out, re.S)
+        missing = [ln.strip() for ln in (mb.group(1).splitlines() if mb else [])
+                   if ln.strip()]
+        # apt succeeded AND every requested package is now installed
+        apt_ok = bool(r.get("success")) and exit_code == 0
+        ok = apt_ok and (missing_count == 0)
+        # strip our marker block out of the shown log
+        log = re.sub(r"\n?__missing_count=.*?__exit=\d+\s*$", "", out, flags=re.S).strip()
+        progress(f"Finished (exit={exit_code}, {missing_count if missing_count is not None else '?'} still missing)",
+                 ok=ok, exit_code=exit_code)
+        return {"success": ok, "exit_code": exit_code, "requested": count,
+                "apt_restored": apt_restored,
+                "missing_count": missing_count, "missing": missing,
+                "log_tail": log[-4000:]}
 
-    return start_task("reinstall_packages", _job, target_host, selections, prefix="dr")
+    return start_task("reinstall_packages", _job, target_host, backup_file, prefix="dr")

@@ -2258,8 +2258,10 @@ def api_dr_install_key():
 @app.route("/api/dr/reinstall-packages", methods=["POST"])
 @login_required
 def api_dr_reinstall_packages():
-    """Reinstall the backed-up package set (install/hold only) via
-    dpkg --set-selections + apt-get dselect-upgrade, as a background task."""
+    """Reinstall the backed-up package set as a background task. Self-contained:
+    restores the APT repos + signing keys from the backup first, then applies
+    the package selection (install/hold only) via dpkg --set-selections +
+    apt-get dselect-upgrade."""
     from app.dr import read_dpkg_selections, reinstall_packages_async
     from app.hostbackup import backup_path
     data = request.get_json(silent=True) or {}
@@ -2270,14 +2272,36 @@ def api_dr_reinstall_packages():
     path = backup_path(backup_host, (data.get("file") or "").strip())
     if not path:
         return jsonify({"success": False, "error": "backup not found"}), 404
-    selections = read_dpkg_selections(path)
-    if not selections.strip():
+    if not read_dpkg_selections(path).strip():
         return jsonify({"success": False, "error": "no package list in backup"}), 404
-    task_id = reinstall_packages_async(target, selections)
+    task_id = reinstall_packages_async(target, path)
     audit_log("dr.reinstall_packages", target=target.get("address"),
               host=target.get("address"), success=True,
               details={"file": data.get("file"), "task_id": task_id})
     return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/dr/restore-all-configs", methods=["POST"])
+@login_required
+def api_dr_restore_all_configs():
+    """Restore every config file from the backup in one action (all categories
+    except guests, which have their own button, and info-only captures)."""
+    from app.dr import restore_all_configs
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    res = restore_all_configs(target, path, force=bool(data.get("force")))
+    audit_log("dr.restore_all_configs", target=target.get("address"),
+              host=target.get("address"), success=res.get("success", False),
+              details={"file": data.get("file"), "restored": res.get("restored"),
+                       "skipped": res.get("skipped"), "failed": res.get("failed")})
+    return jsonify(res)
 
 
 @app.route("/api/replication/configs")

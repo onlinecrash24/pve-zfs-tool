@@ -270,29 +270,47 @@ CONTENT = [
 ("p", "Jede Datei lässt sich vor dem Zurückspielen ansehen. Eine bereits vorhandene Datei wird "
       "nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist. Neben jeder "
       "Kategorie-Überschrift gibt es zudem einen Button „Alle wiederherstellen“, der sämtliche "
-      "Dateien der Kategorie mit einem Klick zurückspielt — bei den Paketquellen (APT) landen "
-      "so Repositories und Signing-Keyrings gemeinsam auf dem Ziel."),
-("h2", "12.3 Alle Gast-Konfigurationen auf einmal"),
-("p", "Über einen einzelnen Button lassen sich alle im Backup enthaltenen VM-/CT-"
-      "Konfigurationen gebündelt wiederherstellen — bereits vorhandene werden dabei "
-      "übersprungen, sofern nicht ausdrücklich das Überschreiben aktiviert wurde."),
+      "Dateien der Kategorie einzeln mit einem Klick zurückspielt."),
+("h2", "12.3 Die drei Haupt-Aktionen (in dieser Reihenfolge)"),
+("p", "Ganz oben stehen drei Buttons, die den empfohlenen Ablauf abbilden. Von links nach "
+      "rechts:"),
+("numbered", [
+    "Pakete nachinstallieren — der erste und wichtigste Schritt (siehe 12.4).",
+    "Alle Configs wiederherstellen — spielt alle Konfigurationen außer den Gast-Configs in "
+    "einem Rutsch zurück (siehe 12.5).",
+    "Alle Gast-Configs wiederherstellen — legt die VM-/CT-Definitionen an (siehe 12.6).",
+]),
 ("h2", "12.4 Pakete nachinstallieren"),
-("p", "Wendet die im Backup gesicherte Paketliste an (nur Pakete, die installiert bzw. "
-      "festgehalten waren — es werden nie Pakete entfernt) und installiert die fehlenden nach. "
-      "Läuft als Hintergrund-Vorgang, da dies je nach Anzahl der Pakete etwas dauern kann."),
-("warn", "Vor dem Nachinstallieren der Pakete müssen zuerst die Paketquellen (APT) "
-         "wiederhergestellt werden — sonst kennt der frische Host die benötigten Repositories "
-         "und deren Signing-Keys noch nicht. Das Tool prüft das vor dem Start automatisch und "
-         "warnt, falls Dateien aus der APT-Kategorie auf dem Ziel noch fehlen."),
-("h2", "12.5 Empfohlener Ablauf nach einer Neuinstallation"),
+("p", "Dieser Schritt ist in sich abgeschlossen: Er stellt ZUERST die Paketquellen und "
+      "Signing-Keys aus dem Backup wieder her (Repositories inkl. der Keyrings unter "
+      "/usr/share/keyrings) und wendet dann die gesicherte Paketliste an (nur install/hold — "
+      "es werden nie Pakete entfernt). Läuft als Hintergrund-Vorgang mit Live-Fortschritt."),
+("note", "Da die Repos und Keys hier automatisch mitkommen, muss dafür vorher nichts separat "
+         "wiederhergestellt werden. Nach dem Lauf meldet das Tool ehrlich, wie viele der "
+         "angeforderten Pakete am Ende tatsächlich installiert sind — bleiben welche übrig "
+         "(z. B. weil ein Paket in keinem der Repos verfügbar ist), werden sie mitsamt "
+         "apt-Log aufgelistet, statt den Lauf fälschlich als voll erfolgreich zu melden."),
+("h2", "12.5 Alle Configs wiederherstellen"),
+("p", "Spielt mit einem Klick alle wiederherstellbaren Konfigurationsdateien zurück — Netzwerk, "
+      "Storage, APT-Quellen, Firewall, Jobs/Cron, User, SSH-Zugang und Sonstiges. Ausgenommen "
+      "sind nur die Gast-Configs (eigener Button) und die reinen Info-Ausgaben. Vorhandene "
+      "Dateien werden übersprungen, sofern „Überschreiben“ nicht aktiviert ist."),
+("warn", "Hierin sind auch die Netzwerk-Konfiguration und /etc/fstab enthalten, die auf "
+         "Netzwerkkarten und Datenträger des ALTEN Hosts verweisen. Nach dem Zurückspielen "
+         "prüfen und bei Bedarf neu starten — Erreichbarkeit oder Boot-Verhalten können sich "
+         "ändern."),
+("h2", "12.6 Alle Gast-Konfigurationen auf einmal"),
+("p", "Stellt alle im Backup enthaltenen VM-/CT-Konfigurationen gebündelt wieder her — bereits "
+      "vorhandene werden übersprungen, sofern nicht das Überschreiben aktiviert wurde."),
+("h2", "12.7 Empfohlener Ablauf nach einer Neuinstallation"),
 ("numbered", [
     "Proxmox VE frisch installieren (möglichst gleiche Version)",
     "PVE Config Restore öffnen, Ad-hoc-Ziel mit IP + Passwort des frischen Hosts wählen",
-    "Netzwerk-Konfiguration wiederherstellen (danach ggf. Neustart/Reload nötig)",
-    "Paketquellen (APT) wiederherstellen, dann Pakete nachinstallieren",
-    "Storage-Konfiguration, alle Gast-Konfigurationen und SSH-Zugang wiederherstellen",
+    "„Pakete nachinstallieren“ — bringt Repos, Keys und Pakete in einem Schritt",
+    "„Alle Configs wiederherstellen“ — Netzwerk, Storage, Firewall, User, SSH usw.",
+    "„Alle Gast-Configs wiederherstellen“",
     "In Disaster Recovery die VM-/CT-Festplatten per Reverse-Sync zurückholen",
-    "Gäste starten",
+    "Netzwerk/fstab prüfen, Host neu starten, Gäste starten",
 ]),
 
 # =====================================================================
