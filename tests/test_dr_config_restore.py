@@ -28,6 +28,10 @@ BACKUP = {
     "./etc/pve/nodes/pve251/qemu-server/100.conf": "cores: 2\n",
     "./etc/pve/nodes/pve251/lxc/253.conf": "arch: amd64\n",
     "./etc/apt/sources.list.d/pve.list": "deb http://download.proxmox.com/debian/pve trixie pve-no-subscription\n",
+    "./etc/apt/sources.list.d/bashclub.sources": "Types: deb\nSigned-By: /usr/share/keyrings/bashclub-archive-keyring.gpg\n",
+    "./usr/share/keyrings/bashclub-archive-keyring.gpg": "FAKEGPGBINARY",
+    "./etc/fstab": "UUID=abc / zfs defaults 0 0\n",
+    "./etc/vzdump.conf": "compress: zstd\n",
     "./etc/cron.d/zfs-auto-snapshot": "*/15 * * * * root zfs-auto-snapshot ...\n",
     "./etc/bashclub/192.168.66.70.conf": "SOURCE=root@192.168.66.70\n",
     "./root/.ssh/authorized_keys": "ssh-ed25519 AAAAC3Nz tool@host\n",
@@ -51,6 +55,12 @@ def test_list_categorizes_and_flags_restorable(tmp_path):
     assert files["cmd/dpkg-selections.txt"]["category"] == "info"
     assert files["root/.ssh/authorized_keys"]["category"] == "ssh"
     assert files["etc/apt/sources.list.d/pve.list"]["category"] == "apt"
+    # signing keyrings OUTSIDE /etc/apt (deb822 convention) belong to apt too
+    assert files["usr/share/keyrings/bashclub-archive-keyring.gpg"]["category"] == "apt"
+    assert files["usr/share/keyrings/bashclub-archive-keyring.gpg"]["restorable"] is True
+    assert files["etc/fstab"]["category"] == "storage"
+    assert files["etc/fstab"]["restorable"] is True
+    assert files["etc/vzdump.conf"]["category"] == "jobs"
     assert files["etc/cron.d/zfs-auto-snapshot"]["category"] == "jobs"
     assert files["etc/bashclub/192.168.66.70.conf"]["category"] == "jobs"
     # command captures are info-only; config files + authorized_keys restorable
@@ -70,6 +80,13 @@ def test_target_path_and_node_remap():
         == "/etc/pve/nodes/newnode/qemu-server/100.conf"
     # authorized_keys maps back to /root/.ssh
     assert dr._backup_target_path("root/.ssh/authorized_keys", "x") == "/root/.ssh/authorized_keys"
+    # APT signing keyrings under /usr/share/keyrings (outside /etc) restore too
+    assert dr._backup_target_path("usr/share/keyrings/bashclub-archive-keyring.gpg", "x") \
+        == "/usr/share/keyrings/bashclub-archive-keyring.gpg"
+    assert dr._backup_target_path("usr/share/keyrings/key.asc", "x") == "/usr/share/keyrings/key.asc"
+    # ... but only key files, and nothing else under /usr
+    assert dr._backup_target_path("usr/share/keyrings/evil.sh", "x") is None
+    assert dr._backup_target_path("usr/bin/evil", "x") is None
     # not restorable
     assert dr._backup_target_path("cmd/pveversion.txt", "x") is None
     assert dr._backup_target_path("var/lib/x", "x") is None
@@ -192,3 +209,63 @@ def test_restore_non_exec_file_no_chmod(tmp_path, monkeypatch):
     monkeypatch.setattr(dr, "run_command", _run_capturing(captured))
     dr.restore_backup_file({"address": "h"}, path, "./etc/pve/storage.cfg")
     assert "chmod +x" not in captured["cmd"]
+
+
+# --- category bulk restore --------------------------------------------------
+
+def test_restore_backup_category_apt_includes_keyrings(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    written = []
+    def run(host, cmd, timeout=10):
+        if cmd.strip() == "hostname":
+            return {"stdout": "n", "success": True}
+        if "base64 -d" in cmd:
+            written.append(cmd)
+            return {"stdout": "__OK__", "success": True}
+        return {"stdout": "__NO__", "success": True}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.restore_backup_category({"address": "h"}, path, "apt")
+    # both sources files AND the keyring outside /etc/apt got restored
+    assert r["total"] == 3 and r["restored"] == 3 and r["failed"] == 0
+    assert any("/usr/share/keyrings/bashclub-archive-keyring.gpg" in c for c in written)
+
+
+def test_restore_backup_category_skips_existing(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    monkeypatch.setattr(dr, "run_command", _fake_run(exists=True))
+    r = dr.restore_backup_category({"address": "h"}, path, "apt", force=False)
+    assert r["restored"] == 0 and r["skipped"] == 3 and r["success"] is True
+
+
+def test_restore_backup_category_empty(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, {"./cmd/pveversion.txt": "pve 9\n"})
+    monkeypatch.setattr(dr, "run_command", _fake_run(exists=False))
+    r = dr.restore_backup_category({"address": "h"}, path, "apt")
+    assert r["total"] == 0 and r["success"] is True
+
+
+# --- pre-flight: missing files on target ------------------------------------
+
+def test_check_target_files_reports_missing(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    def run(host, cmd, timeout=10):
+        if cmd.strip() == "hostname":
+            return {"stdout": "n", "success": True}
+        # the batch existence-check: pretend the keyring is missing
+        return {"stdout": "/usr/share/keyrings/bashclub-archive-keyring.gpg\n",
+                "success": True}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.check_target_files({"address": "h"}, path, "apt")
+    assert r["total"] == 3
+    assert r["missing"] == ["/usr/share/keyrings/bashclub-archive-keyring.gpg"]
+
+
+def test_check_target_files_all_present(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    def run(host, cmd, timeout=10):
+        if cmd.strip() == "hostname":
+            return {"stdout": "n", "success": True}
+        return {"stdout": "", "success": True}   # nothing missing
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.check_target_files({"address": "h"}, path, "apt")
+    assert r["total"] == 3 and r["missing"] == []

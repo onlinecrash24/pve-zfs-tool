@@ -551,9 +551,12 @@ CONTENT = [
     ["# je gefundener .../<qemu-server|lxc>/<vmid>.conf: wie \"Einzelne Datei wiederherstellen\""]),
 ("cmd", "Pakete nachinstallieren", "Nutzt die im Backup gesicherte dpkg --get-selections-Liste; "
     "gefiltert auf install/hold (additiv — entfernt nie Pakete). Läuft als Hintergrund-Task, da "
-    "apt-get lange dauern kann. Voraussetzung: Die Paketquellen (APT) wurden zuvor "
-    "wiederhergestellt.",
-    ["echo <base64-selektionen> | base64 -d | dpkg --set-selections",
+    "apt-get lange dauern kann. Eine Vorab-Prüfung stellt in einem SSH-Rundlauf fest, ob die "
+    "APT-Quellen und Signing-Keyrings aus dem Backup bereits auf dem Ziel liegen — fehlen "
+    "welche, warnt die Oberfläche vor dem Start (sonst scheitert der gesamte Lauf mit "
+    "NO_PUBKEY, da apt-Transaktionen atomar sind).",
+    ["[ -e <ziel1> ] || echo <ziel1>; [ -e <ziel2> ] || echo <ziel2>; ...   # Vorab-Prüfung",
+     "echo <base64-selektionen> | base64 -d | dpkg --set-selections",
      "apt-get update -qq || true",
      "apt-get -y dselect-upgrade"]),
 ("cmd", "Ad-hoc-Ziel: Verbindungstest / Tool-Key installieren", "Für einen noch nicht "
@@ -573,6 +576,8 @@ CONTENT = [
      "cp -a /etc/udev/rules.d/*net*.rules /etc/systemd/network/*.link $STAGE/  # NIC-Namens-Artefakte",
      "ethtool -i <nic>; udevadm info -q property <nic>   # NIC-Identität (MAC/Treiber/Pfad)",
      "tar -C /etc/apt --exclude=auth.conf* -cf - . | tar -C $STAGE/etc/apt -xf -   # APT-Repos + Keys",
+     "cp -a --parents /usr/share/keyrings/*.gpg $STAGE/   # Signing-Keyrings AUSSERHALB /etc/apt (deb822)",
+     "cp -a --parents /etc/fstab /etc/vzdump.conf $STAGE/   # manuelle Mounts + vzdump-Defaults",
      "cat /root/.ssh/authorized_keys > $STAGE/root/.ssh/authorized_keys   # nur Public Keys",
      "cp -a /etc/cron.d /etc/cron.{hourly,daily,weekly,monthly}/zfs-auto-snapshot $STAGE/  # Retention",
      "cp -a /etc/bashclub $STAGE/   # Replikations-Config",

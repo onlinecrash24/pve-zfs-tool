@@ -165,6 +165,15 @@ def test_script_captures_apt_repos_excludes_auth():
     s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
     assert "/etc/apt" in s
     assert "--exclude=auth.conf" in s
+    # keyrings OUTSIDE /etc/apt (deb822 convention, e.g. bashclub) -- without
+    # them the restored .sources fail signature verification (NO_PUBKEY)
+    assert "/usr/share/keyrings/" in s
+
+
+def test_script_captures_fstab_and_vzdump_conf():
+    s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
+    assert "/etc/fstab" in s
+    assert "/etc/vzdump.conf" in s
 
 
 def test_script_captures_zfs_tool_ancillary_configs():

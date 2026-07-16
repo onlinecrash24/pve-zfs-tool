@@ -415,13 +415,14 @@ def _categorize(rel: str) -> str:
             or rel.startswith("etc/udev/") or rel.startswith("etc/systemd/network/")
             or rel.startswith("lib/systemd/network/")):
         return "network"
-    if rel == "etc/pve/storage.cfg":
+    if rel in ("etc/pve/storage.cfg", "etc/fstab"):
         return "storage"
-    if rel.startswith("etc/apt/"):
+    if rel.startswith("etc/apt/") or rel.startswith("usr/share/keyrings/"):
         return "apt"
     if rel.startswith("etc/pve/firewall/") or rel.endswith("host.fw"):
         return "firewall"
-    if rel in ("etc/pve/jobs.cfg", "etc/pve/vzdump.cron", "etc/pve/replication.cfg") \
+    if rel in ("etc/pve/jobs.cfg", "etc/pve/vzdump.cron", "etc/pve/replication.cfg",
+               "etc/vzdump.conf") \
             or rel.startswith("etc/cron.") or rel.startswith("etc/bashclub/"):
         return "jobs"
     if rel in ("etc/pve/user.cfg", "etc/pve/datacenter.cfg", "etc/pve/domains.cfg") \
@@ -443,6 +444,11 @@ def _backup_target_path(rel: str, local_node: str = "") -> Optional[str]:
         return f"/etc/pve/nodes/{local_node}/{m.group(1)}"
     if rel == "root/.ssh/authorized_keys":
         return "/root/.ssh/authorized_keys"
+    # APT signing keyrings (public keys) -- the modern deb822 convention keeps
+    # them under /usr/share/keyrings, outside /etc. Without restoring them the
+    # restored .sources entries fail signature verification (NO_PUBKEY).
+    if rel.startswith("usr/share/keyrings/") and (rel.endswith(".gpg") or rel.endswith(".asc")):
+        return "/" + rel
     if rel.startswith("etc/") or rel.startswith("lib/systemd/network/"):
         return "/" + rel
     return None
@@ -504,9 +510,12 @@ def _local_node_name(host: Dict[str, Any]) -> str:
 
 
 def restore_backup_file(host: Dict[str, Any], backup_file: str, member: str,
-                        force: bool = False) -> Dict[str, Any]:
+                        force: bool = False,
+                        local_node: Optional[str] = None) -> Dict[str, Any]:
     """Extract one file from the backup and write it to its target path on the
-    host (byte-exact). Refuses to overwrite an existing file unless ``force``."""
+    host (byte-exact). Refuses to overwrite an existing file unless ``force``.
+    ``local_node`` lets bulk callers pass the target's node name once instead
+    of re-resolving it per file."""
     rel = _rel(member)
     exec_bit = False
     try:
@@ -522,7 +531,9 @@ def restore_backup_file(host: Dict[str, Any], backup_file: str, member: str,
             exec_bit = bool(info.mode & 0o111)   # preserve +x (cron run-parts scripts)
     except (tarfile.TarError, OSError) as e:
         return {"success": False, "error": str(e)[:200]}
-    dest = _backup_target_path(rel, _local_node_name(host))
+    if local_node is None:
+        local_node = _local_node_name(host)
+    dest = _backup_target_path(rel, local_node)
     if not dest:
         return {"success": False, "error": "file is not restorable"}
 
@@ -571,6 +582,80 @@ def restore_all_guest_configs(host: Dict[str, Any], backup_file: str,
     return {"success": all(r.get("success") for r in results) if results else True,
             "results": results, "restored": restored, "skipped": skipped,
             "total": len(results)}
+
+
+def _category_members(backup_file: str, category: str) -> List[Any]:
+    """(member_name, rel) pairs of all restorable files in one category."""
+    out = []
+    with tarfile.open(backup_file, "r:*") as tf:
+        for m in tf.getmembers():
+            if not m.isfile():
+                continue
+            rel = _rel(m.name)
+            if not rel or _categorize(rel) != category:
+                continue
+            if _backup_target_path(rel, "x") is None:
+                continue
+            out.append((m.name, rel))
+    return out
+
+
+def restore_backup_category(host: Dict[str, Any], backup_file: str,
+                            category: str, force: bool = False) -> Dict[str, Any]:
+    """Restore every restorable file of one category (e.g. all APT sources +
+    signing keyrings in one click). Existing files are skipped unless
+    ``force``; the node name is resolved once for the whole batch."""
+    try:
+        members = _category_members(backup_file, category)
+    except (tarfile.TarError, OSError) as e:
+        return {"success": False, "error": str(e)[:200], "results": []}
+    if not members:
+        return {"success": True, "results": [], "restored": 0, "skipped": 0,
+                "failed": 0, "total": 0}
+
+    node = _local_node_name(host)
+    results = []
+    for member, rel in members:
+        res = restore_backup_file(host, backup_file, member, force=force,
+                                  local_node=node)
+        results.append({"path": rel, **res})
+    restored = sum(1 for r in results if r.get("success"))
+    skipped = sum(1 for r in results if r.get("exists") and not r.get("success"))
+    failed = len(results) - restored - skipped
+    return {"success": failed == 0, "results": results, "restored": restored,
+            "skipped": skipped, "failed": failed, "total": len(results)}
+
+
+def check_target_files(host: Dict[str, Any], backup_file: str,
+                       category: str) -> Dict[str, Any]:
+    """Which restorable files of a category are still MISSING on the target?
+
+    Used as a pre-flight before the package reinstall: if APT sources /
+    signing keyrings from the backup aren't on the host yet, apt will fail
+    (NO_PUBKEY / missing repo) and take the whole dselect-upgrade down with
+    it. One SSH round-trip for the whole list."""
+    try:
+        members = _category_members(backup_file, category)
+    except (tarfile.TarError, OSError) as e:
+        return {"total": 0, "missing": [], "error": str(e)[:200]}
+    if not members:
+        return {"total": 0, "missing": []}
+
+    node = _local_node_name(host)
+    dests = []
+    for _member, rel in members:
+        dest = _backup_target_path(rel, node)
+        if dest:
+            dests.append(dest)
+    script = "".join(f"[ -e {shlex.quote(d)} ] || echo {shlex.quote(d)}\n"
+                     for d in dests)
+    r = run_command(host, script, timeout=30)
+    if not r.get("success"):
+        return {"total": len(dests), "missing": [],
+                "error": (r.get("stderr") or "").strip()[:200]}
+    missing = [ln.strip() for ln in (r.get("stdout") or "").splitlines()
+               if ln.strip()]
+    return {"total": len(dests), "missing": missing}
 
 
 def read_dpkg_selections(backup_file: str) -> str:

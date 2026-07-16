@@ -2180,6 +2180,49 @@ def api_dr_restore_all_guests():
     return jsonify(res)
 
 
+@app.route("/api/dr/restore-category", methods=["POST"])
+@login_required
+def api_dr_restore_category():
+    """Bulk-restore every restorable file of one backup category (e.g. all
+    APT sources + signing keyrings) onto the target host."""
+    from app.dr import restore_backup_category
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    category = (data.get("category") or "").strip()
+    res = restore_backup_category(target, path, category,
+                                  force=bool(data.get("force")))
+    audit_log("dr.restore_category", target=category,
+              host=target.get("address"), success=res.get("success", False),
+              details={"file": data.get("file"), "restored": res.get("restored"),
+                       "skipped": res.get("skipped"), "failed": res.get("failed")})
+    return jsonify(res)
+
+
+@app.route("/api/dr/target-files-check", methods=["POST"])
+@login_required
+def api_dr_target_files_check():
+    """Pre-flight: which restorable files of a backup category are still
+    missing on the target host (POST so ad-hoc credentials stay in the body)."""
+    from app.dr import check_target_files
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"total": 0, "missing": [], "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"total": 0, "missing": [], "error": "backup not found"}), 404
+    return jsonify(check_target_files(target, path, (data.get("category") or "").strip()))
+
+
 @app.route("/api/dr/adhoc-test", methods=["POST"])
 @login_required
 def api_dr_adhoc_test():

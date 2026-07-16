@@ -114,13 +114,23 @@ if [ -d /etc/apt ]; then
       -cf - . 2>/dev/null | tar -C "$STAGE/etc/apt" -xf - 2>/dev/null || true
 fi
 
+# Third-party APT signing keys living OUTSIDE /etc/apt: the modern deb822
+# convention puts keyrings under /usr/share/keyrings (bashclub does, and any
+# future tool following the Debian pattern will too). Without them the
+# restored .sources entries fail signature verification (NO_PUBKEY) and apt
+# ignores the repo -- which then aborts the whole package reinstall.
+# Public keys only, so capturing them all is safe.
+for f in /usr/share/keyrings/*.gpg /usr/share/keyrings/*.asc; do
+  [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
+done
+
 # ZFS-tool-relevant ancillary configs so all tool features survive a restore:
 # zfs-auto-snapshot retention (its cron files ARE the policy), the bashclub-zsync
 # replication config + cron, and the ARC limit.
 [ -d /etc/cron.d ] && cp -a --parents /etc/cron.d "$STAGE" 2>/dev/null || true
 for f in /etc/cron.hourly/zfs-auto-snapshot /etc/cron.daily/zfs-auto-snapshot \
          /etc/cron.weekly/zfs-auto-snapshot /etc/cron.monthly/zfs-auto-snapshot \
-         /etc/modprobe.d/zfs.conf; do
+         /etc/modprobe.d/zfs.conf /etc/fstab /etc/vzdump.conf; do
   [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
 done
 [ -d /etc/bashclub ] && cp -a --parents /etc/bashclub "$STAGE" 2>/dev/null || true

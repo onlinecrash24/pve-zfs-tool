@@ -5468,6 +5468,7 @@ async function viewConfigRestore() {
     const restoreFile = async (f) => {
         let msg = t("cr_restore_confirm").replace("{f}", f.path).replace("{h}", _crAddr());
         if (f.category === "network") msg += "\n\n" + t("cr_network_warn");
+        if (f.path === "etc/fstab") msg += "\n\n" + t("cr_fstab_warn");
         if (!confirm(msg)) return;
         try {
             const r = await API.post("/api/dr/restore-file", Object.assign(_crTarget(), {
@@ -5523,7 +5524,19 @@ async function viewConfigRestore() {
             const pkgBtn = h("button", { className: "btn btn-warning btn-sm", style: "margin-left:8px" }, t("cr_pkg_install"));
             const pkgStatus = h("div", { style: "margin-top:8px" });
             pkgBtn.onclick = async () => {
-                if (!confirm(t("cr_pkg_confirm").replace("{h}", _crAddr()))) return;
+                // Pre-flight: are the APT sources + signing keyrings from the
+                // backup already on the target? Without them apt fails
+                // (NO_PUBKEY / missing repo) and aborts the whole reinstall.
+                let confirmMsg = t("cr_pkg_confirm").replace("{h}", _crAddr());
+                try {
+                    const chk = await API.post("/api/dr/target-files-check", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value, category: "apt",
+                    }));
+                    if (chk && (chk.missing || []).length) {
+                        confirmMsg = t("cr_pkg_missing_repos").replace("{n}", String(chk.missing.length));
+                    }
+                } catch (e) { /* pre-check is best-effort */ }
+                if (!confirm(confirmMsg)) return;
                 pkgBtn.disabled = true; pkgStatus.innerHTML = "";
                 const prog = h("p", { className: "muted", style: "font-family:monospace;font-size:12px" }, "…");
                 pkgStatus.appendChild(prog);
@@ -5543,7 +5556,11 @@ async function viewConfigRestore() {
                         if (res.success) { toast(t("cr_pkg_ok"), "success"); pkgStatus.appendChild(h("p", {}, "✅ " + t("cr_pkg_ok"))); }
                         else {
                             const tail = res.log_tail ? `<pre class="output" style="max-height:260px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
-                            openModal(t("cr_pkg_failed"), `<p>exit=${escapeHtml(String(res.exit_code))}</p>${tail}`);
+                            const repoIssue = /NO_PUBKEY|Failed to fetch|is not signed|does not have a Release file/i.test(res.log_tail || "");
+                            const hint = repoIssue
+                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("cr_pkg_repo_hint"))}</div>`
+                                : "";
+                            openModal(t("cr_pkg_failed"), `${hint}<p>exit=${escapeHtml(String(res.exit_code))}</p>${tail}`);
                         }
                         pkgBtn.disabled = false;
                     },
@@ -5557,7 +5574,39 @@ async function viewConfigRestore() {
         _CR_CATS.forEach(cat => {
             const items = files.filter(f => f.category === cat);
             if (!items.length) return;
-            body.appendChild(h("div", { className: "stat-label", style: "margin-top:14px;margin-bottom:6px" }, t("cr_cat_" + cat) + " (" + items.length + ")"));
+            const restorables = items.filter(f => f.restorable);
+            const head = h("div", { style: "display:flex;align-items:center;gap:10px;margin-top:14px;margin-bottom:6px" },
+                [h("span", { className: "stat-label" }, t("cr_cat_" + cat) + " (" + items.length + ")")]);
+            // One-click restore for the whole category (guests keep their own
+            // specialized bulk button; info has nothing restorable anyway).
+            if (restorables.length && cat !== "guests") {
+                const catBtn = h("button", { className: "btn btn-sm" },
+                    t("cr_restore_cat").replace("{n}", String(restorables.length)));
+                catBtn.onclick = async () => {
+                    let msg = t("cr_cat_bulk_confirm")
+                        .replace("{n}", String(restorables.length))
+                        .replace("{c}", t("cr_cat_" + cat))
+                        .replace("{h}", _crAddr());
+                    if (cat === "network") msg += "\n\n" + t("cr_network_warn");
+                    if (restorables.some(f => f.path === "etc/fstab")) msg += "\n\n" + t("cr_fstab_warn");
+                    if (!confirm(msg)) return;
+                    catBtn.disabled = true;
+                    try {
+                        const r = await API.post("/api/dr/restore-category", Object.assign(_crTarget(), {
+                            backup_host: backupHostSel.value, file: backupSel.value,
+                            category: cat, force: overwriteCb.checked,
+                        }));
+                        toast(t("cr_cat_bulk_done")
+                            .replace("{r}", String(r.restored || 0))
+                            .replace("{s}", String(r.skipped || 0))
+                            .replace("{f}", String(r.failed || 0)),
+                            r.success ? "success" : "error");
+                    } catch (e) { toast(e.message || t("failed"), "error"); }
+                    finally { catBtn.disabled = false; }
+                };
+                head.appendChild(catBtn);
+            }
+            body.appendChild(head);
             const tb = h("tbody");
             items.forEach(f => {
                 tb.appendChild(h("tr", {}, [

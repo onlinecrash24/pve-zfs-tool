@@ -268,7 +268,10 @@ CONTENT = [
     "System-Infos (nur zur Ansicht, nicht wiederherstellbar — z. B. die erfasste Paketliste)",
 ]),
 ("p", "Jede Datei lässt sich vor dem Zurückspielen ansehen. Eine bereits vorhandene Datei wird "
-      "nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist."),
+      "nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist. Neben jeder "
+      "Kategorie-Überschrift gibt es zudem einen Button „Alle wiederherstellen“, der sämtliche "
+      "Dateien der Kategorie mit einem Klick zurückspielt — bei den Paketquellen (APT) landen "
+      "so Repositories und Signing-Keyrings gemeinsam auf dem Ziel."),
 ("h2", "12.3 Alle Gast-Konfigurationen auf einmal"),
 ("p", "Über einen einzelnen Button lassen sich alle im Backup enthaltenen VM-/CT-"
       "Konfigurationen gebündelt wiederherstellen — bereits vorhandene werden dabei "
@@ -279,7 +282,8 @@ CONTENT = [
       "Läuft als Hintergrund-Vorgang, da dies je nach Anzahl der Pakete etwas dauern kann."),
 ("warn", "Vor dem Nachinstallieren der Pakete müssen zuerst die Paketquellen (APT) "
          "wiederhergestellt werden — sonst kennt der frische Host die benötigten Repositories "
-         "noch nicht."),
+         "und deren Signing-Keys noch nicht. Das Tool prüft das vor dem Start automatisch und "
+         "warnt, falls Dateien aus der APT-Kategorie auf dem Ziel noch fehlen."),
 ("h2", "12.5 Empfohlener Ablauf nach einer Neuinstallation"),
 ("numbered", [
     "Proxmox VE frisch installieren (möglichst gleiche Version)",
