@@ -160,6 +160,10 @@ done
 # Command captures (best-effort)
 pveversion -v          > "$STAGE/cmd/pveversion.txt"        2>&1 || true
 dpkg --get-selections  > "$STAGE/cmd/dpkg-selections.txt"   2>&1 || true
+# Manually-installed package set -- a restore reinstalls THESE via apt-get
+# install and lets apt pull the dependencies, so autoremove tracking stays
+# clean (vs. marking every dependency as manual).
+apt-mark showmanual    > "$STAGE/cmd/apt-manual.txt"       2>/dev/null || true
 ip -d address show     > "$STAGE/cmd/ip-address.txt"        2>&1 || true
 ip route show          > "$STAGE/cmd/ip-route.txt"          2>&1 || true
 zpool status           > "$STAGE/cmd/zpool-status.txt"      2>&1 || true

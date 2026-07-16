@@ -146,8 +146,8 @@ def test_script_includes_priv_when_requested():
 
 def test_script_captures_expected_commands():
     s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
-    for cmd in ("pveversion -v", "dpkg --get-selections", "ip route show",
-                "zpool status", "zfs list", "pvecm status"):
+    for cmd in ("pveversion -v", "dpkg --get-selections", "apt-mark showmanual",
+                "ip route show", "zpool status", "zfs list", "pvecm status"):
         assert cmd in s
 
 

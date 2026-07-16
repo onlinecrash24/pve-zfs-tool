@@ -556,15 +556,19 @@ CONTENT = [
     ["# je gefundener .../<qemu-server|lxc>/<vmid>.conf: wie \"Einzelne Datei wiederherstellen\""]),
 ("cmd", "Pakete nachinstallieren", "In sich abgeschlossener Hintergrund-Task: (1) stellt "
     "zuerst die APT-Quellen und Signing-Keyrings aus dem Backup wieder her (force), damit "
-    "Drittanbieter-Pakete überhaupt auflösbar sind; (2) wendet die gesicherte "
-    "dpkg --get-selections-Liste an (nur install/hold, additiv); (3) prüft ehrlich, welche "
-    "angeforderten Pakete danach noch NICHT installiert sind. Punkt 3 ist nötig, weil "
-    "dpkg --set-selections unbekannte Paketnamen still ignoriert — ein apt-Exit 0 bedeutet "
-    "also nicht, dass wirklich alles installiert wurde.",
+    "Drittanbieter-Pakete überhaupt auflösbar sind; (2) installiert die gesicherte "
+    "Paketliste per apt-get install — NICHT via dpkg --set-selections + dselect-upgrade, "
+    "denn auf einem frisch installierten Host kennt dpkg die Pakete noch nicht, verwirft die "
+    "Selektionen still und installiert nichts (\"0 newly installed\"). Bevorzugt wird der "
+    "apt-mark showmanual-Satz aus dem Backup (Abhängigkeiten zieht apt selbst, autoremove "
+    "bleibt sauber), sonst die volle install-Liste. Namen, die apt nicht kennt (z. B. ein "
+    "alter, nicht mehr im Repo vorhandener Kernel), werden vorher herausgefiltert, da "
+    "apt-get install sonst komplett abbricht. (3) prüft ehrlich, welche angeforderten Pakete "
+    "danach noch NICHT installiert sind.",
     ["# 1. restore_backup_category(host, backup, 'apt', force=True)",
-     "echo <base64-selektionen> | base64 -d | dpkg --set-selections",
      "apt-get update -qq || true",
-     "apt-get -y dselect-upgrade",
+     "apt-cache pkgnames | sort -u > avail   # nur real verfügbare Namen behalten",
+     "grep -Fxf avail <angeforderte_liste> | xargs apt-get install -y -o Dpkg::Options::=--force-confold",
      "# 3. dpkg-query -W -f='${Package}\\n' | sort -u  vs.  angeforderte Liste (grep -Fxv)"]),
 ("cmd", "Ad-hoc-Ziel: Verbindungstest / Tool-Key installieren", "Für einen noch nicht "
     "registrierten, frisch installierten Host per IP + Passwort (nie gespeichert).",
@@ -589,8 +593,8 @@ CONTENT = [
      "cp -a /etc/cron.d /etc/cron.{hourly,daily,weekly,monthly}/zfs-auto-snapshot $STAGE/  # Retention",
      "cp -a /etc/bashclub $STAGE/   # Replikations-Config",
      "cp -a /etc/modprobe.d/zfs.conf $STAGE/   # ARC-Limit",
-     "pveversion -v; dpkg --get-selections; ip -d address show; ip route show; "
-     "zpool status; zpool list; zfs list; pvecm status   # Befehls-Snapshots",
+     "pveversion -v; dpkg --get-selections; apt-mark showmanual; ip -d address show; "
+     "ip route show; zpool status; zpool list; zfs list; pvecm status   # Befehls-Snapshots",
      "tar -C $STAGE -czf <ziel>.tar.gz ."]),
 ("cmd", "Backup abrufen / auflisten / löschen", "",
     ["# SFTP-Get der fertigen Datei ins Docker-Volume /app/data/host-backups/<host>/",
@@ -747,7 +751,7 @@ CONTENT = [
          "/api/replication/health, /api/replication/checkzfs"],
         ["Disaster Recovery", "/api/dr/replicas, /api/dr/reverse-sync, /api/dr/reverse-precheck"],
         ["Config Restore", "/api/dr/backup-contents, /api/dr/restore-file, /api/dr/restore-category, "
-         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, /api/dr/target-files-check, "
+         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, "
          "/api/dr/adhoc-test, /api/dr/install-key, /api/dr/reinstall-packages"],
         ["Benachrichtigungen", "/api/notifications/config, /api/notifications/test/*"],
         ["KI-Berichte", "/api/ai/config, /api/ai/report, /api/ai/chat, /api/ai/report/pdf/<id>"],

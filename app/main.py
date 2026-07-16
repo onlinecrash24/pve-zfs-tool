@@ -2205,24 +2205,6 @@ def api_dr_restore_category():
     return jsonify(res)
 
 
-@app.route("/api/dr/target-files-check", methods=["POST"])
-@login_required
-def api_dr_target_files_check():
-    """Pre-flight: which restorable files of a backup category are still
-    missing on the target host (POST so ad-hoc credentials stay in the body)."""
-    from app.dr import check_target_files
-    from app.hostbackup import backup_path
-    data = request.get_json(silent=True) or {}
-    target = _resolve_target(data)
-    backup_host = _find_host(data.get("backup_host", ""))
-    if not target or not backup_host:
-        return jsonify({"total": 0, "missing": [], "error": "host not found"}), 404
-    path = backup_path(backup_host, (data.get("file") or "").strip())
-    if not path:
-        return jsonify({"total": 0, "missing": [], "error": "backup not found"}), 404
-    return jsonify(check_target_files(target, path, (data.get("category") or "").strip()))
-
-
 @app.route("/api/dr/adhoc-test", methods=["POST"])
 @login_required
 def api_dr_adhoc_test():
@@ -2259,9 +2241,8 @@ def api_dr_install_key():
 @login_required
 def api_dr_reinstall_packages():
     """Reinstall the backed-up package set as a background task. Self-contained:
-    restores the APT repos + signing keys from the backup first, then applies
-    the package selection (install/hold only) via dpkg --set-selections +
-    apt-get dselect-upgrade."""
+    restores the APT repos + signing keys from the backup first, then installs
+    the captured package set via apt-get install (see reinstall_packages_async)."""
     from app.dr import read_dpkg_selections, reinstall_packages_async
     from app.hostbackup import backup_path
     data = request.get_json(silent=True) or {}

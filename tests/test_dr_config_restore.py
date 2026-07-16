@@ -291,28 +291,18 @@ def test_install_package_names_install_only_arch_stripped():
     assert names == ["pve-manager", "vim"]
 
 
-# --- pre-flight: missing files on target ------------------------------------
+# --- apt-mark showmanual capture (preferred reinstall source) ---------------
 
-def test_check_target_files_reports_missing(tmp_path, monkeypatch):
+def test_read_apt_manual_present(tmp_path):
+    path = _make_backup(tmp_path, {
+        "./cmd/apt-manual.txt": "mc\nntfs-3g\nvim:amd64\nmc\n",
+    })
+    # arch stripped, sorted, unique
+    assert dr.read_apt_manual(path) == ["mc", "ntfs-3g", "vim"]
+
+
+def test_read_apt_manual_absent_returns_empty(tmp_path):
+    # older backup without the apt-mark capture -> [] (reinstall falls back to
+    # the full dpkg selection)
     path = _make_backup(tmp_path, BACKUP)
-    def run(host, cmd, timeout=10):
-        if cmd.strip() == "hostname":
-            return {"stdout": "n", "success": True}
-        # the batch existence-check: pretend the keyring is missing
-        return {"stdout": "/usr/share/keyrings/bashclub-archive-keyring.gpg\n",
-                "success": True}
-    monkeypatch.setattr(dr, "run_command", run)
-    r = dr.check_target_files({"address": "h"}, path, "apt")
-    assert r["total"] == 3
-    assert r["missing"] == ["/usr/share/keyrings/bashclub-archive-keyring.gpg"]
-
-
-def test_check_target_files_all_present(tmp_path, monkeypatch):
-    path = _make_backup(tmp_path, BACKUP)
-    def run(host, cmd, timeout=10):
-        if cmd.strip() == "hostname":
-            return {"stdout": "n", "success": True}
-        return {"stdout": "", "success": True}   # nothing missing
-    monkeypatch.setattr(dr, "run_command", run)
-    r = dr.check_target_files({"address": "h"}, path, "apt")
-    assert r["total"] == 3 and r["missing"] == []
+    assert dr.read_apt_manual(path) == []

@@ -658,38 +658,6 @@ def restore_all_configs(host: Dict[str, Any], backup_file: str,
     return _restore_member_list(host, backup_file, members, force)
 
 
-def check_target_files(host: Dict[str, Any], backup_file: str,
-                       category: str) -> Dict[str, Any]:
-    """Which restorable files of a category are still MISSING on the target?
-
-    Used as a pre-flight before the package reinstall: if APT sources /
-    signing keyrings from the backup aren't on the host yet, apt will fail
-    (NO_PUBKEY / missing repo) and take the whole dselect-upgrade down with
-    it. One SSH round-trip for the whole list."""
-    try:
-        members = _category_members(backup_file, category)
-    except (tarfile.TarError, OSError) as e:
-        return {"total": 0, "missing": [], "error": str(e)[:200]}
-    if not members:
-        return {"total": 0, "missing": []}
-
-    node = _local_node_name(host)
-    dests = []
-    for _member, rel in members:
-        dest = _backup_target_path(rel, node)
-        if dest:
-            dests.append(dest)
-    script = "".join(f"[ -e {shlex.quote(d)} ] || echo {shlex.quote(d)}\n"
-                     for d in dests)
-    r = run_command(host, script, timeout=30)
-    if not r.get("success"):
-        return {"total": len(dests), "missing": [],
-                "error": (r.get("stderr") or "").strip()[:200]}
-    missing = [ln.strip() for ln in (r.get("stdout") or "").splitlines()
-               if ln.strip()]
-    return {"total": len(dests), "missing": missing}
-
-
 def read_dpkg_selections(backup_file: str) -> str:
     """Return the captured ``dpkg --get-selections`` text from the backup, or ''."""
     try:
@@ -701,6 +669,23 @@ def read_dpkg_selections(backup_file: str) -> str:
     except (tarfile.TarError, OSError):
         return ""
     return ""
+
+
+def read_apt_manual(backup_file: str) -> List[str]:
+    """Manually-installed package names captured via ``apt-mark showmanual``,
+    or [] if the backup predates that capture (older backups only carry the
+    full dpkg selection). Arch suffix stripped, sorted+unique."""
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                if m.isfile() and _rel(m.name) == "cmd/apt-manual.txt":
+                    f = tf.extractfile(m)
+                    txt = f.read().decode("utf-8", "replace") if f else ""
+                    return sorted({ln.strip().split(":")[0]
+                                   for ln in txt.splitlines() if ln.strip()})
+    except (tarfile.TarError, OSError):
+        pass
+    return []
 
 
 def _filter_selections(text: str) -> str:
@@ -731,13 +716,18 @@ def reinstall_packages_async(target_host: Dict[str, Any], backup_file: str) -> s
 
     1. Restore the APT sources + signing keyrings from the backup (force) so
        third-party packages (bashclub, etc.) are actually resolvable.
-    2. apt-get update, then dpkg --set-selections + apt-get dselect-upgrade
-       (install/hold only -- additive, never removes).
+    2. Reinstall via ``apt-get install <names>`` -- NOT dpkg --set-selections +
+       dselect-upgrade. On a freshly-installed host dpkg doesn't know packages
+       it has never seen, so set-selections silently drops them and
+       dselect-upgrade installs nothing ("0 newly installed"). apt-get install
+       resolves them from the repos and pulls dependencies.
+       The name set is the backup's ``apt-mark showmanual`` capture when
+       present (so apt pulls deps and autoremove tracking stays clean), else
+       the full install-marked selection for older backups. Names apt doesn't
+       know (e.g. an old pinned kernel no longer in the repo) are filtered out
+       first, since apt-get install aborts on any single unknown name.
     3. Honestly report which requested packages are STILL not installed
-       afterwards. This matters because dpkg --set-selections silently ignores
-       package names it doesn't know, so apt exiting 0 does NOT by itself mean
-       every backed-up package got installed (the old code reported such runs
-       as a plain success)."""
+       afterwards."""
 
     def _job(progress, host, bf):
         # 1. Repos + keys first -- force so the fresh host's sources are
@@ -746,35 +736,43 @@ def reinstall_packages_async(target_host: Dict[str, Any], backup_file: str) -> s
         apt_res = restore_backup_category(host, bf, "apt", force=True)
         apt_restored = apt_res.get("restored", 0)
 
-        selections = _filter_selections(read_dpkg_selections(bf))
-        want = _install_package_names(selections)
+        # Prefer the manually-installed set; fall back to the full install list
+        # for backups made before apt-mark was captured.
+        want = read_apt_manual(bf)
+        if not want:
+            want = _install_package_names(_filter_selections(read_dpkg_selections(bf)))
         if not want:
             progress("No installable package list in backup", ok=False)
             return {"success": False, "error": "no installable package selections",
                     "apt_restored": apt_restored}
         count = len(want)
 
-        progress(f"Repos restored ({apt_restored}). Applying {count} package selections …")
-        sel_b64 = base64.b64encode(selections.encode("utf-8")).decode("ascii")
+        progress(f"Repos restored ({apt_restored}). Installing {count} packages via apt …")
         req_b64 = base64.b64encode(("\n".join(want) + "\n").encode("utf-8")).decode("ascii")
-        # POSIX sh only (no process substitution): grep -Fxv of the installed
-        # set against the requested set yields the still-missing packages.
+        # POSIX sh: filter the wanted set to what apt actually has (apt-get
+        # install aborts entirely on one unknown name), install via xargs, then
+        # grep -Fxv the installed set against the wanted set for the honest
+        # still-missing list.
         script = (
-            f"echo {shlex.quote(req_b64)} | base64 -d > /tmp/.pvezfs_req\n"
-            f"echo {shlex.quote(sel_b64)} | base64 -d | dpkg --set-selections\n"
+            f"echo {shlex.quote(req_b64)} | base64 -d | sort -u > /tmp/.pvezfs_req\n"
             "DEBIAN_FRONTEND=noninteractive apt-get update -qq || true\n"
-            "DEBIAN_FRONTEND=noninteractive apt-get -y dselect-upgrade 2>&1\n"
-            "EC=$?\n"
-            "dpkg-query -W -f='${Package}\\n' 2>/dev/null | sort -u > /tmp/.pvezfs_inst\n"
-            "grep -Fxv -f /tmp/.pvezfs_inst /tmp/.pvezfs_req > /tmp/.pvezfs_miss 2>/dev/null || true\n"
+            "apt-cache pkgnames 2>/dev/null | sort -u > /tmp/.pvezfs_avail\n"
+            "grep -Fxf /tmp/.pvezfs_avail /tmp/.pvezfs_req > /tmp/.pvezfs_inst 2>/dev/null || true\n"
+            "if [ -s /tmp/.pvezfs_inst ]; then\n"
+            "  DEBIAN_FRONTEND=noninteractive xargs apt-get install -y "
+            "-o Dpkg::Options::=--force-confold < /tmp/.pvezfs_inst 2>&1\n"
+            "  EC=$?\n"
+            "else EC=0; echo 'no requested package is available from the repos'; fi\n"
+            "dpkg-query -W -f='${Package}\\n' 2>/dev/null | sort -u > /tmp/.pvezfs_have\n"
+            "grep -Fxv -f /tmp/.pvezfs_have /tmp/.pvezfs_req > /tmp/.pvezfs_miss 2>/dev/null || true\n"
             "echo \"__missing_count=$(grep -c . /tmp/.pvezfs_miss 2>/dev/null || echo 0)\"\n"
             "echo __missing_begin\n"
-            "head -40 /tmp/.pvezfs_miss 2>/dev/null || true\n"
+            "head -60 /tmp/.pvezfs_miss 2>/dev/null || true\n"
             "echo __missing_end\n"
-            "rm -f /tmp/.pvezfs_req /tmp/.pvezfs_inst /tmp/.pvezfs_miss\n"
+            "rm -f /tmp/.pvezfs_req /tmp/.pvezfs_avail /tmp/.pvezfs_inst /tmp/.pvezfs_have /tmp/.pvezfs_miss\n"
             "echo __exit=$EC\n"
         )
-        progress("Running apt-get dselect-upgrade (this can take a while) …")
+        progress("Running apt-get install (this can take a while) …")
         r = run_command(host, script, timeout=3 * 3600)
         out = r.get("stdout") or ""
         em = re.search(r"__exit=(\d+)\s*$", out.strip())
