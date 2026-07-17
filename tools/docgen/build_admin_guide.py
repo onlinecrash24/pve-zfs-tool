@@ -579,6 +579,15 @@ CONTENT = [
      "apt-cache pkgnames | sort -u > avail   # nur real verfügbare Namen behalten",
      "grep -Fxf avail <angeforderte_liste> | xargs apt-get install -y -o Dpkg::Options::=--force-confold",
      "# 3. dpkg-query -W -f='${Package}\\n' | sort -u  vs.  angeforderte Liste (grep -Fxv)"]),
+("cmd", "ZFS-Eigenschaften anwenden", "Spielt die lokal gesetzten Pool-/Dataset-Eigenschaften "
+    "aus dem Backup zurück (nur source=local; vererbte/Default/Read-only werden ausgelassen, "
+    "wodurch die Vererbung automatisch erhalten bleibt). Schließt die Lücke, die zfs send -R "
+    "offen lässt: Pool-Eigenschaften (autotrim/autoexpand) und nicht-replizierte Datasets. "
+    "Wird nur auf bereits vorhandene Objekte angewendet, jeder Set einzeln fehlertolerant "
+    "(nur bei Erstellung setzbare Properties scheitern und werden gemeldet).",
+    ["zpool list -H -o name; zfs list -H -o name -t filesystem,volume   # was existiert?",
+     "zpool set <property>=<wert> <pool>   # je lokal gesetzter Pool-Eigenschaft",
+     "zfs set <property>=<wert> <dataset>   # je lokal gesetzter Dataset-Eigenschaft"]),
 ("cmd", "Reboot des Ziel-Hosts", "Nötig, damit die wiederhergestellte Konfiguration (Netzwerk, "
     "fstab, Dienste, Kernel) wirksam wird. Der Neustart wird verzögert im Hintergrund "
     "abgesetzt, damit der SSH-Aufruf sauber zurückkehrt, statt mit der Verbindung zu sterben, "
@@ -612,6 +621,8 @@ CONTENT = [
      "cp -a /etc/modprobe.d/zfs.conf $STAGE/   # ARC-Limit",
      "pveversion -v; dpkg --get-selections; apt-mark showmanual; ip -d address show; "
      "ip route show; zpool status; zpool list; zfs list; pvecm status   # Befehls-Snapshots",
+     "zpool get -H -o name,property,value,source all   # Pool-Eigenschaften (mit Quelle)",
+     "zfs get -H -o name,property,value,source -t filesystem,volume all   # Dataset-Eigenschaften",
      "tar -C $STAGE -czf <ziel>.tar.gz ."]),
 ("cmd", "Backup abrufen / auflisten / löschen", "",
     ["# SFTP-Get der fertigen Datei ins Docker-Volume /app/data/host-backups/<host>/",
@@ -768,8 +779,9 @@ CONTENT = [
          "/api/replication/health, /api/replication/checkzfs"],
         ["Disaster Recovery", "/api/dr/replicas, /api/dr/reverse-sync, /api/dr/reverse-precheck"],
         ["Config Restore", "/api/dr/backup-contents, /api/dr/restore-file, /api/dr/restore-category, "
-         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, /api/dr/reboot-target, "
-         "/api/dr/adhoc-test, /api/dr/install-key, /api/dr/reinstall-packages"],
+         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, /api/dr/zfs-properties, "
+         "/api/dr/apply-zfs-properties, /api/dr/reboot-target, /api/dr/adhoc-test, "
+         "/api/dr/install-key, /api/dr/reinstall-packages"],
         ["Benachrichtigungen", "/api/notifications/config, /api/notifications/test/*"],
         ["KI-Berichte", "/api/ai/config, /api/ai/report, /api/ai/chat, /api/ai/report/pdf/<id>"],
         ["Audit / Cache", "/api/audit, /api/cache/stats, /api/cache/invalidate"],

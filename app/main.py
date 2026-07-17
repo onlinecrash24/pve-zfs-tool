@@ -2207,6 +2207,46 @@ def api_dr_restore_category():
     return jsonify(res)
 
 
+@app.route("/api/dr/zfs-properties", methods=["GET"])
+@login_required
+def api_dr_zfs_properties():
+    """Preview the locally-set pool/dataset properties captured in a backup."""
+    from app.dr import read_zfs_properties
+    from app.hostbackup import backup_path
+    backup_host = _find_host(request.args.get("backup_host", ""))
+    if not backup_host:
+        return jsonify({"error": "host not found"}), 404
+    path = backup_path(backup_host, (request.args.get("file") or "").strip())
+    if not path:
+        return jsonify({"error": "backup not found"}), 404
+    return jsonify(read_zfs_properties(path))
+
+
+@app.route("/api/dr/apply-zfs-properties", methods=["POST"])
+@login_required
+def api_dr_apply_zfs_properties():
+    """Re-apply the backup's locally-set ZFS pool/dataset properties onto the
+    target (autotrim/autoexpand, compression, com.sun:auto-snapshot labels,
+    quotas, inheritance points)."""
+    from app.dr import apply_zfs_properties
+    from app.hostbackup import backup_path
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    backup_host = _find_host(data.get("backup_host", ""))
+    if not target or not backup_host:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    path = backup_path(backup_host, (data.get("file") or "").strip())
+    if not path:
+        return jsonify({"success": False, "error": "backup not found"}), 404
+    res = apply_zfs_properties(target, path)
+    audit_log("dr.apply_zfs_properties", target=target.get("address"),
+              host=target.get("address"), success=res.get("success", False),
+              details={"file": data.get("file"), "pools_set": res.get("pools_set"),
+                       "datasets_set": res.get("datasets_set"),
+                       "failed": res.get("failed"), "skipped": res.get("skipped")})
+    return jsonify(res)
+
+
 @app.route("/api/dr/reboot-target", methods=["POST"])
 @login_required
 def api_dr_reboot_target():

@@ -291,6 +291,97 @@ def test_install_package_names_install_only_arch_stripped():
     assert names == ["pve-manager", "vim"]
 
 
+# --- ZFS property capture + restore -----------------------------------------
+
+_ZPOOL_PROPS = (
+    "rpool\tautotrim\ton\tlocal\n"
+    "rpool\tautoexpand\ton\tlocal\n"
+    "rpool\tsize\t1T\t-\n"                 # read-only -> source '-' -> skipped
+    "rpool\tashift\t12\tlocal\n"           # denylisted (create-time)
+    "rpool\tfeature@lz4_compress\tactive\tlocal\n"  # feature@ -> skipped
+    "rpool\tautoreplace\toff\tdefault\n"   # default -> skipped
+)
+_ZFS_PROPS = (
+    "rpool/data\tcompression\tlz4\tlocal\n"
+    "rpool/data\tcom.sun:auto-snapshot\tfalse\tlocal\n"
+    "rpool/data/sub\tcompression\tlz4\tinherited from rpool/data\n"  # inherited -> skipped
+    "rpool/data\tused\t10G\t-\n"           # read-only -> skipped
+    "rpool/vm-100-disk-0\tvolblocksize\t8k\tlocal\n"  # create-time -> skipped
+    "rpool/vm-100-disk-0\tquota\tnone\tlocal\n"
+)
+
+
+def test_read_zfs_properties_filters_to_settable_local(tmp_path):
+    path = _make_backup(tmp_path, {
+        "./cmd/zpool-properties.txt": _ZPOOL_PROPS,
+        "./cmd/zfs-properties.txt": _ZFS_PROPS,
+    })
+    p = dr.read_zfs_properties(path)
+    pool_props = {(x["property"], x["value"]) for x in p["pools"]}
+    assert pool_props == {("autotrim", "on"), ("autoexpand", "on")}
+    ds_props = {(x["name"], x["property"], x["value"]) for x in p["datasets"]}
+    assert ds_props == {
+        ("rpool/data", "compression", "lz4"),
+        ("rpool/data", "com.sun:auto-snapshot", "false"),
+        ("rpool/vm-100-disk-0", "quota", "none"),
+    }
+    # inherited/default/read-only/create-time/feature@ are all excluded
+    assert not any(x["property"] == "ashift" for x in p["pools"])
+    assert not any(x["property"].startswith("feature@") for x in p["pools"])
+    assert not any(x["property"] == "volblocksize" for x in p["datasets"])
+
+
+def test_read_zfs_properties_absent_returns_empty(tmp_path):
+    path = _make_backup(tmp_path, BACKUP)   # no property files
+    p = dr.read_zfs_properties(path)
+    assert p == {"pools": [], "datasets": []}
+
+
+def test_apply_zfs_properties_sets_existing_skips_missing(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, {
+        "./cmd/zpool-properties.txt": "rpool\tautotrim\ton\tlocal\n",
+        "./cmd/zfs-properties.txt": ("rpool/data\tcompression\tlz4\tlocal\n"
+                                     "tank/gone\tcompression\tlz4\tlocal\n"),
+    })
+    cmds = []
+    def run(host, cmd, timeout=10):
+        if cmd.startswith("zpool list"):
+            return {"success": True, "stdout": "rpool\n"}
+        if cmd.startswith("zfs list"):
+            return {"success": True, "stdout": "rpool\nrpool/data\n"}   # tank/gone absent
+        cmds.append(cmd)
+        # echo back OK markers for each set line
+        out = []
+        for ln in cmd.splitlines():
+            if "zpool set" in ln: out.append("OK\tpool\trpool\tautotrim")
+            elif "zfs set" in ln: out.append("OK\tds\trpool/data\tcompression")
+        return {"success": True, "stdout": "\n".join(out)}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.apply_zfs_properties({"address": "h"}, path)
+    assert r["pools_set"] == 1 and r["datasets_set"] == 1
+    assert r["not_present"] == ["tank/gone"] and r["skipped"] == 1
+    assert r["success"] is True
+    # the set batch used zpool set / zfs set, and never touched the missing one
+    batch = cmds[0]
+    assert "zpool set autotrim=on rpool" in batch
+    assert "tank/gone" not in batch
+
+
+def test_apply_zfs_properties_reports_failures(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, {
+        "./cmd/zfs-properties.txt": "rpool/data\tcompression\tbogus\tlocal\n",
+    })
+    def run(host, cmd, timeout=10):
+        if cmd.startswith("zpool list"):
+            return {"success": True, "stdout": ""}
+        if cmd.startswith("zfs list"):
+            return {"success": True, "stdout": "rpool/data\n"}
+        return {"success": True, "stdout": "ERR\tds\trpool/data\tcompression"}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.apply_zfs_properties({"address": "h"}, path)
+    assert r["failed"] == 1 and r["success"] is False
+
+
 # --- reboot the restore target ----------------------------------------------
 
 def test_reboot_target_backgrounds_the_reboot(monkeypatch):

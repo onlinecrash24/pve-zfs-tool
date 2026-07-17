@@ -5761,6 +5761,59 @@ async function viewConfigRestore() {
             tbl.appendChild(tb);
             body.appendChild(tbl);
         });
+
+        // ZFS properties (pool-level autotrim/autoexpand + dataset props like
+        // com.sun:auto-snapshot labels / quotas): not file-restorable, applied
+        // via a dedicated action. zfs send -R carries dataset props for
+        // replicated datasets, but NOT pool props -- this fills that gap.
+        if (files.some(f => f.path === "cmd/zfs-properties.txt" || f.path === "cmd/zpool-properties.txt")) {
+            const zp = h("div", { className: "card", style: "margin-top:16px" });
+            zp.appendChild(h("div", { className: "card-header" }, t("cr_zfsprops_title")));
+            const zpb = h("div", { className: "card-body" });
+            zpb.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("cr_zfsprops_intro")));
+            const prevBtn = h("button", { className: "btn btn-sm" }, t("cr_zfsprops_preview"));
+            const applyBtn = h("button", { className: "btn btn-warning btn-sm", style: "margin-left:8px" }, t("cr_zfsprops_apply"));
+            prevBtn.onclick = async () => {
+                let r;
+                try {
+                    r = await API.get("/api/dr/zfs-properties?backup_host=" + encodeURIComponent(backupHostSel.value) +
+                        "&file=" + encodeURIComponent(backupSel.value));
+                } catch (e) { toast(e.message || t("failed"), "error"); return; }
+                const rows = [];
+                (r.pools || []).forEach(p => rows.push(["zpool", p.name, p.property, p.value]));
+                (r.datasets || []).forEach(p => rows.push(["zfs", p.name, p.property, p.value]));
+                if (!rows.length) { openModal(t("cr_zfsprops_title"), `<p>${escapeHtml(t("cr_zfsprops_none"))}</p>`); return; }
+                const html = "<table class='data-table' style='width:100%;font-size:12px'><thead><tr>" +
+                    `<th></th><th>${escapeHtml(t("cr_zfsprops_obj"))}</th><th>Property</th><th>${escapeHtml(t("cr_zfsprops_value"))}</th>` +
+                    "</tr></thead><tbody>" +
+                    rows.map(x => `<tr><td>${escapeHtml(x[0])}</td><td style='font-family:monospace'>${escapeHtml(x[1])}</td><td style='font-family:monospace'>${escapeHtml(x[2])}</td><td style='font-family:monospace'>${escapeHtml(x[3])}</td></tr>`).join("") +
+                    "</tbody></table>";
+                openModal(t("cr_zfsprops_title") + " (" + rows.length + ")", html);
+            };
+            applyBtn.onclick = async () => {
+                if (!confirm(t("cr_zfsprops_confirm").replace("{h}", _crAddr()))) return;
+                applyBtn.disabled = true;
+                try {
+                    const r = await API.post("/api/dr/apply-zfs-properties", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value,
+                    }));
+                    toast(t("cr_zfsprops_done")
+                        .replace("{p}", String((r.pools_set || 0) + (r.datasets_set || 0)))
+                        .replace("{s}", String(r.skipped || 0))
+                        .replace("{f}", String(r.failed || 0)), r.success ? "success" : "error");
+                    const fails = (r.results || []).filter(x => x.status === "ERR").map(x => x.kind + " " + x.name + " : " + x.property);
+                    const np = r.not_present || [];
+                    let html = "";
+                    if (fails.length) html += `<p><b>${escapeHtml(t("cr_zfsprops_failed_h"))}</b></p><pre class="output" style="font-size:11px">${escapeHtml(fails.join("\n"))}</pre>`;
+                    if (np.length) html += `<p><b>${escapeHtml(t("cr_zfsprops_notpresent_h"))}</b></p><pre class="output" style="font-size:11px">${escapeHtml(np.join("\n"))}</pre>`;
+                    if (html) openModal(t("cr_zfsprops_title"), html);
+                } catch (e) { toast(e.message || t("failed"), "error"); }
+                finally { applyBtn.disabled = false; }
+            };
+            zpb.appendChild(h("div", { style: "display:flex;align-items:center;flex-wrap:wrap" }, [prevBtn, applyBtn]));
+            zp.appendChild(zpb);
+            body.appendChild(zp);
+        }
     }
 
     async function loadBackups() {

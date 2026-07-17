@@ -708,6 +708,118 @@ def reboot_target(host: Dict[str, Any]) -> Dict[str, Any]:
             "error": (r.get("stderr") or "").strip()[:200] or "reboot command failed"}
 
 
+# ZFS property restore -----------------------------------------------------
+#
+# Only *locally-set* properties (source=local) are re-applied: inherited and
+# default values follow automatically, and read-only props report source "-"
+# (so they're naturally excluded). Restoring only the local-set points also
+# reproduces the inheritance tree -- children stay inherited.
+
+# Create-time-only dataset properties that can't be changed on an existing
+# dataset (a `zfs set` would just error); skip them silently.
+_ZPROP_SKIP_DATASET = {
+    "volblocksize", "volsize", "casesensitivity", "normalization", "utf8only",
+    "encryption", "keyformat", "keylocation", "pbkdf2iters",
+}
+# Pool properties not settable via `zpool set` in a meaningful way.
+_ZPROP_SKIP_POOL = {"ashift", "version"}
+_PROP_NAME_RE = re.compile(r"^[a-z][a-zA-Z0-9_:.-]*$")
+
+
+def _read_prop_rows(backup_file: str, rel_target: str):
+    """(name, property, value, source) rows from a captured `*get -H` TSV."""
+    rows = []
+    try:
+        with tarfile.open(backup_file, "r:*") as tf:
+            for m in tf.getmembers():
+                if m.isfile() and _rel(m.name) == rel_target:
+                    f = tf.extractfile(m)
+                    txt = f.read().decode("utf-8", "replace") if f else ""
+                    for ln in txt.splitlines():
+                        parts = ln.split("\t")
+                        if len(parts) >= 4:
+                            rows.append((parts[0], parts[1], parts[2], parts[3]))
+                    break
+    except (tarfile.TarError, OSError):
+        pass
+    return rows
+
+
+def read_zfs_properties(backup_file: str) -> Dict[str, Any]:
+    """Locally-set pool + dataset properties from the backup that can be
+    re-applied. Returns {'pools': [{name,property,value}], 'datasets': [...]}.
+    Empty lists for backups made before this capture was added."""
+    pools = []
+    for name, prop, val, src in _read_prop_rows(backup_file, "cmd/zpool-properties.txt"):
+        if src != "local" or prop in _ZPROP_SKIP_POOL or prop.startswith("feature@"):
+            continue
+        if not _PROP_NAME_RE.match(prop):
+            continue
+        pools.append({"name": name, "property": prop, "value": val})
+    datasets = []
+    for name, prop, val, src in _read_prop_rows(backup_file, "cmd/zfs-properties.txt"):
+        if src != "local" or prop in _ZPROP_SKIP_DATASET:
+            continue
+        if not _PROP_NAME_RE.match(prop):
+            continue
+        datasets.append({"name": name, "property": prop, "value": val})
+    return {"pools": pools, "datasets": datasets}
+
+
+def apply_zfs_properties(host: Dict[str, Any], backup_file: str) -> Dict[str, Any]:
+    """Re-apply the backup's locally-set pool/dataset properties onto the
+    objects that currently EXIST on the target (via zpool set / zfs set).
+    Objects not present (pool not created / dataset not replicated yet) are
+    skipped and reported; each set is error-tolerant so a create-time-only
+    property can't abort the batch."""
+    props = read_zfs_properties(backup_file)
+    plan = ([("pool", p) for p in props["pools"]]
+            + [("ds", p) for p in props["datasets"]])
+    if not plan:
+        return {"success": True, "pools_set": 0, "datasets_set": 0,
+                "skipped": 0, "failed": 0, "results": [], "not_present": []}
+
+    pr = run_command(host, "zpool list -H -o name 2>/dev/null", timeout=20)
+    existing_pools = {l.strip() for l in (pr.get("stdout") or "").splitlines() if l.strip()}
+    dr_ = run_command(host, "zfs list -H -o name -t filesystem,volume 2>/dev/null", timeout=30)
+    existing_ds = {l.strip() for l in (dr_.get("stdout") or "").splitlines() if l.strip()}
+
+    lines, present = [], []
+    for kind, it in plan:
+        exists = it["name"] in (existing_pools if kind == "pool" else existing_ds)
+        if not exists:
+            continue
+        present.append((kind, it))
+        setter = "zpool" if kind == "pool" else "zfs"
+        tok = shlex.quote(f"{it['property']}={it['value']}")
+        obj = shlex.quote(it["name"])
+        tag = "\t".join((kind, it["name"], it["property"]))
+        ok_marker = shlex.quote("OK\t" + tag)
+        err_marker = shlex.quote("ERR\t" + tag)
+        lines.append(
+            f"if {setter} set {tok} {obj} >/dev/null 2>&1; then "
+            f"echo {ok_marker}; else echo {err_marker}; fi"
+        )
+
+    results = []
+    if lines:
+        r = run_command(host, "\n".join(lines), timeout=180)
+        for ln in (r.get("stdout") or "").splitlines():
+            parts = ln.split("\t")
+            if len(parts) >= 4 and parts[0] in ("OK", "ERR"):
+                results.append({"status": parts[0], "kind": parts[1],
+                                "name": parts[2], "property": parts[3]})
+
+    pools_set = sum(1 for x in results if x["status"] == "OK" and x["kind"] == "pool")
+    ds_set = sum(1 for x in results if x["status"] == "OK" and x["kind"] == "ds")
+    failed = sum(1 for x in results if x["status"] == "ERR")
+    not_present = sorted({it["name"] for kind, it in plan
+                          if it["name"] not in (existing_pools if kind == "pool" else existing_ds)})
+    return {"success": failed == 0, "pools_set": pools_set, "datasets_set": ds_set,
+            "skipped": len(not_present), "failed": failed,
+            "results": results, "not_present": not_present}
+
+
 def read_dpkg_selections(backup_file: str) -> str:
     """Return the captured ``dpkg --get-selections`` text from the backup, or ''."""
     try:

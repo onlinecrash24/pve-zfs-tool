@@ -169,6 +169,12 @@ ip route show          > "$STAGE/cmd/ip-route.txt"          2>&1 || true
 zpool status           > "$STAGE/cmd/zpool-status.txt"      2>&1 || true
 zpool list             > "$STAGE/cmd/zpool-list.txt"        2>&1 || true
 zfs list -o name,used,avail,refer,mountpoint > "$STAGE/cmd/zfs-list.txt" 2>&1 || true
+# Pool + dataset properties (with source), so a restore can re-apply the
+# locally-set ones (autotrim/autoexpand, compression, com.sun:auto-snapshot
+# labels, quotas, inheritance points). zfs send -R carries dataset props for
+# replicated datasets, but NOT pool props and not non-replicated datasets.
+zpool get -H -o name,property,value,source all 2>/dev/null > "$STAGE/cmd/zpool-properties.txt" || true
+zfs get -H -o name,property,value,source -t filesystem,volume all 2>/dev/null > "$STAGE/cmd/zfs-properties.txt" || true
 pvecm status           > "$STAGE/cmd/pvecm-status.txt"      2>&1 || true
 ls -l /sys/class/net/  > "$STAGE/cmd/net-devices.txt"       2>&1 || true
 for n in /sys/class/net/*; do

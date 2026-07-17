@@ -176,6 +176,14 @@ def test_script_captures_fstab_and_vzdump_conf():
     assert "/etc/vzdump.conf" in s
 
 
+def test_script_captures_zfs_properties():
+    # pool + dataset properties (with source) so a restore can re-apply the
+    # locally-set ones (autotrim/autoexpand, com.sun:auto-snapshot labels, ...)
+    s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
+    assert "zpool get -H -o name,property,value,source all" in s
+    assert "zfs get -H -o name,property,value,source" in s
+
+
 def test_script_captures_zfs_tool_ancillary_configs():
     # so all ZFS-tool features survive a restore: snapshot retention (cron),
     # replication config, ARC limit.

@@ -337,7 +337,19 @@ CONTENT = [
 ("p", "Stellt alle im Backup enthaltenen VM-/CT-Konfigurationen gebündelt wieder her — wie die "
       "anderen Bulk-Aktionen überschreibt sie vorhandene Configs beim Fortfahren (mit dem "
       "Hinweis-Dialog, falls „Überschreiben“ nicht angehakt ist)."),
-("h2", "12.8 Empfohlener Ablauf nach einer Neuinstallation"),
+("h2", "12.8 ZFS-Eigenschaften wiederherstellen"),
+("p", "Neben den Konfigurationsdateien lassen sich auch die lokal gesetzten ZFS-Eigenschaften "
+      "aus dem Backup zurückspielen — Pool-Eigenschaften wie autotrim/autoexpand sowie "
+      "Dataset-Eigenschaften wie Kompression, Quotas und die com.sun:auto-snapshot-Labels samt "
+      "ihrer Vererbung. Der Bereich am Ende der Ansicht bietet „Vorschau“ (zeigt, welche "
+      "Eigenschaften erfasst sind) und „ZFS-Eigenschaften anwenden“."),
+("note", "Der Reverse-Sync bringt die Dataset-Eigenschaften der replizierten Datasets ohnehin "
+         "schon mit. Diese Aktion schließt die verbleibende Lücke: Pool-Eigenschaften (die "
+         "kommen über kein send/recv zurück und stehen beim frisch angelegten Pool auf Default) "
+         "und Eigenschaften nicht-replizierter Datasets. Angewendet wird nur auf bereits "
+         "vorhandene Pools/Datasets; nur bei der Erstellung setzbare Eigenschaften werden "
+         "übersprungen und gemeldet."),
+("h2", "12.9 Empfohlener Ablauf nach einer Neuinstallation"),
 ("numbered", [
     "Proxmox VE frisch installieren (möglichst gleiche Version)",
     "PVE Config Restore öffnen, Ad-hoc-Ziel mit IP + Passwort des frischen Hosts wählen",
@@ -347,6 +359,8 @@ CONTENT = [
     "den registrierten Host um",
     "„Alle Gast-Configs wiederherstellen“",
     "In Disaster Recovery die VM-/CT-Festplatten per Reverse-Sync zurückholen",
+    "„ZFS-Eigenschaften anwenden“ — Pool-Eigenschaften (autotrim/autoexpand) und ggf. "
+    "nicht-replizierte Dataset-Eigenschaften nachziehen",
     "Gäste starten",
 ]),
 
