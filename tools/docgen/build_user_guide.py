@@ -276,10 +276,12 @@ CONTENT = [
     "Sonstiges /etc/pve",
     "System-Infos (nur zur Ansicht, nicht wiederherstellbar — z. B. die erfasste Paketliste)",
 ]),
-("p", "Jede Datei lässt sich vor dem Zurückspielen ansehen. Eine bereits vorhandene Datei wird "
-      "nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist. Neben jeder "
-      "Kategorie-Überschrift gibt es zudem einen Button „Alle wiederherstellen“, der sämtliche "
-      "Dateien der Kategorie einzeln mit einem Klick zurückspielt."),
+("p", "Die Kategorien sind auf- und zuklappbar (standardmäßig zugeklappt) — ein Klick auf die "
+      "Überschrift zeigt bzw. verbirgt die Dateiliste. Jede Datei lässt sich vor dem "
+      "Zurückspielen ansehen; eine bereits vorhandene Datei wird nur überschrieben, wenn "
+      "„Vorhandene Dateien überschreiben“ aktiviert ist. Neben jeder Kategorie-Überschrift gibt "
+      "es zudem einen Button „Alle wiederherstellen“, der sämtliche Dateien der Kategorie "
+      "einzeln mit einem Klick zurückspielt."),
 ("h2", "12.3 Die vier Haupt-Aktionen (in dieser Reihenfolge)"),
 ("p", "Ganz oben stehen vier Buttons, die den empfohlenen Ablauf von links nach rechts "
       "abbilden:"),

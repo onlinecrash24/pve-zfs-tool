@@ -5530,7 +5530,7 @@ async function viewConfigRestore() {
         // 1. Reinstall packages -- self-contained: the backend first restores
         //    the APT sources + signing keys from the backup, then installs.
         if (files.some(f => f.path === "cmd/dpkg-selections.txt")) {
-            const pkgBtn = h("button", { className: "btn btn-warning btn-sm" }, t("cr_pkg_install"));
+            const pkgBtn = h("button", { className: "btn btn-warning btn-sm" }, "1. " + t("cr_pkg_install"));
             pkgBtn.onclick = async () => {
                 if (!confirm(t("cr_pkg_confirm").replace("{h}", _crAddr()))) return;
                 pkgBtn.disabled = true; pkgStatus.innerHTML = "";
@@ -5577,7 +5577,7 @@ async function viewConfigRestore() {
         // 2. Restore all configs (everything restorable except guests + info)
         const cfgCount = files.filter(f => f.restorable && f.category !== "guests" && f.category !== "info").length;
         if (cfgCount) {
-            const cfgBtn = h("button", { className: "btn btn-primary btn-sm" }, t("cr_restore_all_configs").replace("{n}", String(cfgCount)));
+            const cfgBtn = h("button", { className: "btn btn-warning btn-sm" }, "2. " + t("cr_restore_all_configs").replace("{n}", String(cfgCount)));
             cfgBtn.onclick = async () => {
                 const msg = t("cr_allcfg_confirm").replace("{n}", String(cfgCount)).replace("{h}", _crAddr())
                     + "\n\n" + t("cr_allcfg_warn");
@@ -5603,7 +5603,7 @@ async function viewConfigRestore() {
         //    configs), so switch the picker over to it and wait for it to
         //    return -- the guest configs in step 4 then go over the tool's key.
         const rebootStatus = h("div", { style: "margin-top:8px;font-size:12px" });
-        const rebootBtn = h("button", { className: "btn btn-sm" }, t("cr_reboot"));
+        const rebootBtn = h("button", { className: "btn btn-warning btn-sm" }, "3. " + t("cr_reboot"));
         rebootBtn.onclick = async () => {
             const addr = _crAddr();
             if (!confirm(t("cr_reboot_confirm").replace("{h}", addr))) return;
@@ -5664,7 +5664,7 @@ async function viewConfigRestore() {
         // 4. Restore all guest configs
         const guestCount = files.filter(f => f.category === "guests").length;
         if (guestCount) {
-            const bulkBtn = h("button", { className: "btn btn-sm" }, t("cr_restore_all_guests").replace("{n}", guestCount));
+            const bulkBtn = h("button", { className: "btn btn-warning btn-sm" }, "4. " + t("cr_restore_all_guests").replace("{n}", guestCount));
             bulkBtn.onclick = async () => {
                 if (!confirm(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
                 bulkBtn.disabled = true;
@@ -5687,14 +5687,30 @@ async function viewConfigRestore() {
             const items = files.filter(f => f.category === cat);
             if (!items.length) return;
             const restorables = items.filter(f => f.restorable);
-            const head = h("div", { style: "display:flex;align-items:center;gap:10px;margin-top:14px;margin-bottom:6px" },
-                [h("span", { className: "stat-label" }, t("cr_cat_" + cat) + " (" + items.length + ")")]);
+
+            // Collapsible section, collapsed by default. The caret + title
+            // toggle the table; the "Restore all" button doesn't (stopPropagation).
+            const caret = h("span", { style: "display:inline-block;width:12px;transition:transform .15s;color:var(--text-secondary)" }, "▶");
+            const title = h("span", { className: "stat-label", style: "cursor:pointer;user-select:none" },
+                [caret, " " + t("cr_cat_" + cat) + " (" + items.length + ")"]);
+            const head = h("div", { style: "display:flex;align-items:center;gap:10px;margin-top:14px;margin-bottom:6px" }, [title]);
+
+            const tbl = h("table", { className: "data-table", style: "width:100%;display:none" });
+            let open = false;
+            const toggle = () => {
+                open = !open;
+                tbl.style.display = open ? "" : "none";
+                caret.style.transform = open ? "rotate(90deg)" : "";
+            };
+            title.onclick = toggle;
+
             // One-click restore for the whole category (guests keep their own
             // specialized bulk button; info has nothing restorable anyway).
             if (restorables.length && cat !== "guests") {
                 const catBtn = h("button", { className: "btn btn-sm" },
                     t("cr_restore_cat").replace("{n}", String(restorables.length)));
-                catBtn.onclick = async () => {
+                catBtn.onclick = async (ev) => {
+                    ev.stopPropagation();
                     let msg = t("cr_cat_bulk_confirm")
                         .replace("{n}", String(restorables.length))
                         .replace("{c}", t("cr_cat_" + cat))
@@ -5732,7 +5748,6 @@ async function viewConfigRestore() {
                     ]),
                 ]));
             });
-            const tbl = h("table", { className: "data-table", style: "width:100%" });
             tbl.appendChild(tb);
             body.appendChild(tbl);
         });
