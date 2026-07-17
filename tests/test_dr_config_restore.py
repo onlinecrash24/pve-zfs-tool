@@ -291,6 +291,30 @@ def test_install_package_names_install_only_arch_stripped():
     assert names == ["pve-manager", "vim"]
 
 
+# --- reboot the restore target ----------------------------------------------
+
+def test_reboot_target_backgrounds_the_reboot(monkeypatch):
+    seen = {}
+    def run(host, cmd, timeout=10):
+        seen["cmd"] = cmd
+        return {"success": True, "stdout": "__reboot_scheduled__\n"}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.reboot_target({"address": "h"})
+    assert r["success"] is True
+    # backgrounded with a delay so the SSH call returns instead of dying with
+    # the connection the reboot tears down
+    assert "nohup" in seen["cmd"] and "sleep 2" in seen["cmd"]
+    assert "systemctl reboot" in seen["cmd"]
+
+
+def test_reboot_target_reports_failure(monkeypatch):
+    monkeypatch.setattr(dr, "run_command",
+                        lambda host, cmd, timeout=10: {"success": False, "stdout": "",
+                                                       "stderr": "permission denied"})
+    r = dr.reboot_target({"address": "h"})
+    assert r["success"] is False and "permission denied" in r["error"]
+
+
 # --- apt-mark showmanual capture (preferred reinstall source) ---------------
 
 def test_read_apt_manual_present(tmp_path):

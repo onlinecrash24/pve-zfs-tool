@@ -280,14 +280,16 @@ CONTENT = [
       "nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist. Neben jeder "
       "Kategorie-Überschrift gibt es zudem einen Button „Alle wiederherstellen“, der sämtliche "
       "Dateien der Kategorie einzeln mit einem Klick zurückspielt."),
-("h2", "12.3 Die drei Haupt-Aktionen (in dieser Reihenfolge)"),
-("p", "Ganz oben stehen drei Buttons, die den empfohlenen Ablauf abbilden. Von links nach "
-      "rechts:"),
+("h2", "12.3 Die vier Haupt-Aktionen (in dieser Reihenfolge)"),
+("p", "Ganz oben stehen vier Buttons, die den empfohlenen Ablauf von links nach rechts "
+      "abbilden:"),
 ("numbered", [
     "Pakete nachinstallieren — der erste und wichtigste Schritt (siehe 12.4).",
     "Alle Configs wiederherstellen — spielt alle Konfigurationen außer den Gast-Configs in "
     "einem Rutsch zurück (siehe 12.5).",
-    "Alle Gast-Configs wiederherstellen — legt die VM-/CT-Definitionen an (siehe 12.6).",
+    "Reboot — startet den Ziel-Host neu, damit die wiederhergestellte Konfiguration wirksam "
+    "wird (siehe 12.6).",
+    "Alle Gast-Configs wiederherstellen — legt die VM-/CT-Definitionen an (siehe 12.7).",
 ]),
 ("h2", "12.4 Pakete nachinstallieren"),
 ("p", "Dieser Schritt ist in sich abgeschlossen: Er stellt ZUERST die Paketquellen und "
@@ -308,18 +310,34 @@ CONTENT = [
          "Netzwerkkarten und Datenträger des ALTEN Hosts verweisen. Nach dem Zurückspielen "
          "prüfen und bei Bedarf neu starten — Erreichbarkeit oder Boot-Verhalten können sich "
          "ändern."),
-("h2", "12.6 Alle Gast-Konfigurationen auf einmal"),
+("h2", "12.6 Reboot"),
+("p", "Startet den Ziel-Host neu — nötig, damit die wiederhergestellte Konfiguration (Netzwerk, "
+      "fstab, Dienste, Kernel) tatsächlich wirksam wird. Der Neustart wird verzögert im "
+      "Hintergrund ausgelöst, sodass die Meldung sauber zurückkommt."),
+("p", "Danach passiert etwas Praktisches: Weil mit den Configs auch das Netzwerk und die "
+      "authorized_keys zurückgespielt wurden, ist der Host nach dem Neustart wieder per "
+      "SSH-Schlüssel des Tools erreichbar. Die Oberfläche stellt den Ziel-Host deshalb "
+      "automatisch von „Anderer Host (IP + Zugangsdaten)“ auf „Registrierter Host“ um und wählt "
+      "den passenden registrierten Host aus. Anschließend wartet sie, bis der Host wieder online "
+      "ist, und meldet das — erst dann sind die Gast-Configs sinnvoll."),
+("note", "Gibt es keinen registrierten Host mit dieser Adresse, bleibt das Ad-hoc-Ziel bestehen "
+         "und ein Hinweis erscheint. Kommt der Host nicht zurück, meldet die Oberfläche das nach "
+         "einigen Minuten — dann lohnt ein Blick auf Netzwerk-Config und /etc/fstab an der "
+         "Konsole."),
+("h2", "12.7 Alle Gast-Konfigurationen auf einmal"),
 ("p", "Stellt alle im Backup enthaltenen VM-/CT-Konfigurationen gebündelt wieder her — bereits "
       "vorhandene werden übersprungen, sofern nicht das Überschreiben aktiviert wurde."),
-("h2", "12.7 Empfohlener Ablauf nach einer Neuinstallation"),
+("h2", "12.8 Empfohlener Ablauf nach einer Neuinstallation"),
 ("numbered", [
     "Proxmox VE frisch installieren (möglichst gleiche Version)",
     "PVE Config Restore öffnen, Ad-hoc-Ziel mit IP + Passwort des frischen Hosts wählen",
     "„Pakete nachinstallieren“ — bringt Repos, Keys und Pakete in einem Schritt",
     "„Alle Configs wiederherstellen“ — Netzwerk, Storage, Firewall, User, SSH usw.",
+    "„Reboot“ — danach ist der Host per Key erreichbar; das Ziel stellt sich automatisch auf "
+    "den registrierten Host um",
     "„Alle Gast-Configs wiederherstellen“",
     "In Disaster Recovery die VM-/CT-Festplatten per Reverse-Sync zurückholen",
-    "Netzwerk/fstab prüfen, Host neu starten, Gäste starten",
+    "Gäste starten",
 ]),
 
 # =====================================================================

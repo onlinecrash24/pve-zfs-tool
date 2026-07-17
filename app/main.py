@@ -2207,6 +2207,24 @@ def api_dr_restore_category():
     return jsonify(res)
 
 
+@app.route("/api/dr/reboot-target", methods=["POST"])
+@login_required
+def api_dr_reboot_target():
+    """Reboot the restore target so the restored config takes effect."""
+    from app.dr import reboot_target
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    if not target:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    res = reboot_target(target)
+    # The pooled connection dies with the reboot; drop cached results so the
+    # host is re-probed fresh when it comes back.
+    ssh_cache.invalidate_host(target.get("address", ""))
+    audit_log("dr.reboot_target", target=target.get("address"),
+              host=target.get("address"), success=res.get("success", False))
+    return jsonify(res)
+
+
 @app.route("/api/dr/adhoc-test", methods=["POST"])
 @login_required
 def api_dr_adhoc_test():

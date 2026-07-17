@@ -692,6 +692,22 @@ def restore_all_configs(host: Dict[str, Any], backup_file: str,
     return _restore_member_list(host, backup_file, members, force)
 
 
+def reboot_target(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Reboot the restore target so the restored config (network, fstab,
+    services, kernel) actually takes effect.
+
+    Backgrounded with a short delay so this SSH call returns cleanly instead
+    of dying together with the connection the reboot tears down."""
+    cmd = ("nohup sh -c 'sleep 2; systemctl reboot || reboot' >/dev/null 2>&1 & "
+           "echo __reboot_scheduled__")
+    r = run_command(host, cmd, timeout=20)
+    ok = "__reboot_scheduled__" in (r.get("stdout") or "")
+    if ok:
+        return {"success": True}
+    return {"success": False,
+            "error": (r.get("stderr") or "").strip()[:200] or "reboot command failed"}
+
+
 def read_dpkg_selections(backup_file: str) -> str:
     """Return the captured ``dpkg --get-selections`` text from the backup, or ''."""
     try:

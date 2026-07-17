@@ -5597,7 +5597,71 @@ async function viewConfigRestore() {
             actionRow.appendChild(cfgBtn);
         }
 
-        // 3. Restore all guest configs
+        // 3. Reboot: the restored config (network, fstab, services) only takes
+        //    effect after a restart. Afterwards the host is key-reachable as a
+        //    REGISTERED host (authorized_keys + network came back with the
+        //    configs), so switch the picker over to it and wait for it to
+        //    return -- the guest configs in step 4 then go over the tool's key.
+        const rebootStatus = h("div", { style: "margin-top:8px;font-size:12px" });
+        const rebootBtn = h("button", { className: "btn btn-sm" }, t("cr_reboot"));
+        rebootBtn.onclick = async () => {
+            const addr = _crAddr();
+            if (!confirm(t("cr_reboot_confirm").replace("{h}", addr))) return;
+            rebootBtn.disabled = true;
+            rebootStatus.innerHTML = "";
+            try {
+                const r = await API.post("/api/dr/reboot-target", _crTarget());
+                if (!r || !r.success) {
+                    toast((r && r.error) || t("failed"), "error");
+                    rebootBtn.disabled = false; return;
+                }
+            } catch (e) { toast(e.message || t("failed"), "error"); rebootBtn.disabled = false; return; }
+            toast(t("cr_reboot_sent"), "success");
+
+            const reg = hosts.find(hh => hh.address === addr);
+            const waitP = h("div", { className: "muted", style: "margin-top:4px" });
+            if (reg) {
+                // Point the picker at the registered host that was just restored
+                modeSel.value = "registered";
+                modeSel.onchange();
+                targetSel.value = reg.address;
+                rebootStatus.appendChild(h("div", { style: "color:var(--success)" },
+                    "✓ " + t("cr_reboot_switched").replace("{h}", reg.name || reg.address)));
+                rebootStatus.appendChild(waitP);
+                let tries = 0;
+                const maxTries = 30;               // ~5 min at 10 s
+                const tick = async () => {
+                    tries++;
+                    let up = false;
+                    try {
+                        const tr = await API.post("/api/hosts/test", { address: reg.address });
+                        up = !!(tr && tr.success);
+                    } catch (e) { up = false; }
+                    if (up) {
+                        waitP.textContent = "✓ " + t("cr_reboot_back");
+                        waitP.style.color = "var(--success)";
+                        rebootBtn.disabled = false;
+                        return;
+                    }
+                    if (tries >= maxTries) {
+                        waitP.textContent = t("cr_reboot_timeout");
+                        rebootBtn.disabled = false;
+                        return;
+                    }
+                    waitP.textContent = t("cr_reboot_waiting") + " (" + tries + "/" + maxTries + ")";
+                    setTimeout(tick, 10000);
+                };
+                waitP.textContent = t("cr_reboot_waiting");
+                setTimeout(tick, 15000);           // let it actually go down first
+            } else {
+                rebootStatus.appendChild(h("div", { className: "muted" },
+                    t("cr_reboot_no_registered").replace("{h}", addr)));
+                rebootBtn.disabled = false;
+            }
+        };
+        actionRow.appendChild(rebootBtn);
+
+        // 4. Restore all guest configs
         const guestCount = files.filter(f => f.category === "guests").length;
         if (guestCount) {
             const bulkBtn = h("button", { className: "btn btn-sm" }, t("cr_restore_all_guests").replace("{n}", guestCount));
@@ -5617,6 +5681,7 @@ async function viewConfigRestore() {
 
         body.appendChild(actionRow);
         body.appendChild(pkgStatus);
+        body.appendChild(rebootStatus);
 
         _CR_CATS.forEach(cat => {
             const items = files.filter(f => f.category === cat);

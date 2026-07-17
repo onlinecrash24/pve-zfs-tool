@@ -579,6 +579,14 @@ CONTENT = [
      "apt-cache pkgnames | sort -u > avail   # nur real verfügbare Namen behalten",
      "grep -Fxf avail <angeforderte_liste> | xargs apt-get install -y -o Dpkg::Options::=--force-confold",
      "# 3. dpkg-query -W -f='${Package}\\n' | sort -u  vs.  angeforderte Liste (grep -Fxv)"]),
+("cmd", "Reboot des Ziel-Hosts", "Nötig, damit die wiederhergestellte Konfiguration (Netzwerk, "
+    "fstab, Dienste, Kernel) wirksam wird. Der Neustart wird verzögert im Hintergrund "
+    "abgesetzt, damit der SSH-Aufruf sauber zurückkehrt, statt mit der Verbindung zu sterben, "
+    "die der Reboot abreißt. Danach stellt die Oberfläche das Ziel automatisch auf den "
+    "registrierten Host mit derselben Adresse um (nach dem Restore ist er per Tool-Key "
+    "erreichbar) und pollt /api/hosts/test, bis er zurück ist.",
+    ["nohup sh -c 'sleep 2; systemctl reboot || reboot' >/dev/null 2>&1 &",
+     "echo __reboot_scheduled__"]),
 ("cmd", "Ad-hoc-Ziel: Verbindungstest / Tool-Key installieren", "Für einen noch nicht "
     "registrierten, frisch installierten Host per IP + Passwort (nie gespeichert).",
     ["hostname; pveversion   # Verbindungstest",
@@ -760,7 +768,7 @@ CONTENT = [
          "/api/replication/health, /api/replication/checkzfs"],
         ["Disaster Recovery", "/api/dr/replicas, /api/dr/reverse-sync, /api/dr/reverse-precheck"],
         ["Config Restore", "/api/dr/backup-contents, /api/dr/restore-file, /api/dr/restore-category, "
-         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, "
+         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, /api/dr/reboot-target, "
          "/api/dr/adhoc-test, /api/dr/install-key, /api/dr/reinstall-packages"],
         ["Benachrichtigungen", "/api/notifications/config, /api/notifications/test/*"],
         ["KI-Berichte", "/api/ai/config, /api/ai/report, /api/ai/chat, /api/ai/report/pdf/<id>"],
