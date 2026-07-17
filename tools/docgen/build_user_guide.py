@@ -278,10 +278,16 @@ CONTENT = [
 ]),
 ("p", "Die Kategorien sind auf- und zuklappbar (standardmäßig zugeklappt) — ein Klick auf die "
       "Überschrift zeigt bzw. verbirgt die Dateiliste. Jede Datei lässt sich vor dem "
-      "Zurückspielen ansehen; eine bereits vorhandene Datei wird nur überschrieben, wenn "
-      "„Vorhandene Dateien überschreiben“ aktiviert ist. Neben jeder Kategorie-Überschrift gibt "
-      "es zudem einen Button „Alle wiederherstellen“, der sämtliche Dateien der Kategorie "
-      "einzeln mit einem Klick zurückspielt."),
+      "Zurückspielen ansehen. Beim Zurückspielen einer EINZELNEN Datei wird eine bereits "
+      "vorhandene nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist "
+      "(sonst bleibt sie unangetastet — die Sicherheitsleine für den gezielten Restore). Neben "
+      "jeder Kategorie-Überschrift gibt es zudem einen Button „Alle wiederherstellen“."),
+("note", "Bulk-Aktionen („Alle Configs“, „Alle wiederherstellen“ je Kategorie, „Alle "
+         "Gast-Configs“) ersetzen vorhandene Dateien beim Fortfahren grundsätzlich — ein "
+         "vollständiger Restore soll die alten Configs ja zurückbringen. Ist „Überschreiben“ "
+         "nicht angehakt, weist der Bestätigungsdialog vor dem Ausführen ausdrücklich darauf "
+         "hin, damit vorhandene Stock-Dateien eines frisch installierten Hosts nicht "
+         "stillschweigend übersprungen werden."),
 ("h2", "12.3 Die vier Haupt-Aktionen (in dieser Reihenfolge)"),
 ("p", "Ganz oben stehen vier Buttons, die den empfohlenen Ablauf von links nach rechts "
       "abbilden:"),
@@ -307,7 +313,8 @@ CONTENT = [
 ("p", "Spielt mit einem Klick alle wiederherstellbaren Konfigurationsdateien zurück — Netzwerk, "
       "Storage, APT-Quellen, Firewall, Jobs/Cron, User, SSH-Zugang und Sonstiges. Ausgenommen "
       "sind nur die Gast-Configs (eigener Button) und die reinen Info-Ausgaben. Vorhandene "
-      "Dateien werden übersprungen, sofern „Überschreiben“ nicht aktiviert ist."),
+      "Dateien werden dabei mit den Versionen aus dem Backup überschrieben (siehe Hinweis in "
+      "12.2)."),
 ("warn", "Hierin sind auch die Netzwerk-Konfiguration und /etc/fstab enthalten, die auf "
          "Netzwerkkarten und Datenträger des ALTEN Hosts verweisen. Nach dem Zurückspielen "
          "prüfen und bei Bedarf neu starten — Erreichbarkeit oder Boot-Verhalten können sich "
@@ -327,8 +334,9 @@ CONTENT = [
          "einigen Minuten — dann lohnt ein Blick auf Netzwerk-Config und /etc/fstab an der "
          "Konsole."),
 ("h2", "12.7 Alle Gast-Konfigurationen auf einmal"),
-("p", "Stellt alle im Backup enthaltenen VM-/CT-Konfigurationen gebündelt wieder her — bereits "
-      "vorhandene werden übersprungen, sofern nicht das Überschreiben aktiviert wurde."),
+("p", "Stellt alle im Backup enthaltenen VM-/CT-Konfigurationen gebündelt wieder her — wie die "
+      "anderen Bulk-Aktionen überschreibt sie vorhandene Configs beim Fortfahren (mit dem "
+      "Hinweis-Dialog, falls „Überschreiben“ nicht angehakt ist)."),
 ("h2", "12.8 Empfohlener Ablauf nach einer Neuinstallation"),
 ("numbered", [
     "Proxmox VE frisch installieren (möglichst gleiche Version)",

@@ -5425,6 +5425,16 @@ async function viewConfigRestore() {
         : { target: targetSel.value };
     const _crAddr = () => modeSel.value === "adhoc" ? (adhocAddr.value.trim() || "?") : targetSel.value;
 
+    // Bulk restores replace files by design. If "Overwrite" is off, the confirm
+    // spells out that proceeding overwrites (so pre-existing stock files on a
+    // fresh host aren't silently skipped). Proceeding always overwrites; the
+    // per-file restore keeps the skip-unless-overwrite safety instead.
+    const _confirmBulk = (actionMsg) => {
+        let m = actionMsg;
+        if (!overwriteCb.checked) m += "\n\n" + t("cr_bulk_overwrite_note");
+        return confirm(m);
+    };
+
     const regWrap = h("div", {}, targetSel);
     const adhocStatus = h("div", { style: "font-size:12px;margin-top:6px" });
     const testBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px" }, t("cr_test"));
@@ -5581,11 +5591,11 @@ async function viewConfigRestore() {
             cfgBtn.onclick = async () => {
                 const msg = t("cr_allcfg_confirm").replace("{n}", String(cfgCount)).replace("{h}", _crAddr())
                     + "\n\n" + t("cr_allcfg_warn");
-                if (!confirm(msg)) return;
+                if (!_confirmBulk(msg)) return;
                 cfgBtn.disabled = true;
                 try {
                     const r = await API.post("/api/dr/restore-all-configs", Object.assign(_crTarget(), {
-                        backup_host: backupHostSel.value, file: backupSel.value, force: overwriteCb.checked,
+                        backup_host: backupHostSel.value, file: backupSel.value, force: true,
                     }));
                     toast(t("cr_cat_bulk_done")
                         .replace("{r}", String(r.restored || 0))
@@ -5666,11 +5676,11 @@ async function viewConfigRestore() {
         if (guestCount) {
             const bulkBtn = h("button", { className: "btn btn-warning btn-sm" }, "4. " + t("cr_restore_all_guests").replace("{n}", guestCount));
             bulkBtn.onclick = async () => {
-                if (!confirm(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
+                if (!_confirmBulk(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
                 bulkBtn.disabled = true;
                 try {
                     const r = await API.post("/api/dr/restore-all-guests", Object.assign(_crTarget(), {
-                        backup_host: backupHostSel.value, file: backupSel.value, force: overwriteCb.checked,
+                        backup_host: backupHostSel.value, file: backupSel.value, force: true,
                     }));
                     toast(t("cr_bulk_done").replace("{r}", r.restored || 0).replace("{s}", r.skipped || 0), r.success ? "success" : "error");
                 } catch (e) { toast(e.message || t("failed"), "error"); }
@@ -5717,12 +5727,12 @@ async function viewConfigRestore() {
                         .replace("{h}", _crAddr());
                     if (cat === "network") msg += "\n\n" + t("cr_network_warn");
                     if (restorables.some(f => f.path === "etc/fstab")) msg += "\n\n" + t("cr_fstab_warn");
-                    if (!confirm(msg)) return;
+                    if (!_confirmBulk(msg)) return;
                     catBtn.disabled = true;
                     try {
                         const r = await API.post("/api/dr/restore-category", Object.assign(_crTarget(), {
                             backup_host: backupHostSel.value, file: backupSel.value,
-                            category: cat, force: overwriteCb.checked,
+                            category: cat, force: true,
                         }));
                         toast(t("cr_cat_bulk_done")
                             .replace("{r}", String(r.restored || 0))
