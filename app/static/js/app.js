@@ -5198,6 +5198,19 @@ async function viewDR() {
             ]);
             body.appendChild(forceLabel);
 
+            // Rebuilt destination = new SSH host key -> refresh known_hosts on
+            // the sending host, else StrictHostKeyChecking aborts. Default on,
+            // because reverse-sync targets a rebuilt/recovered host by design.
+            const rkCb = h("input", { type: "checkbox", checked: "checked" });
+            const rkLabel = h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:var(--bg-secondary,rgba(120,120,120,0.08));border:1px solid var(--border,#333);border-radius:6px;cursor:pointer;margin-top:10px" }, [
+                rkCb,
+                h("div", {}, [
+                    h("div", { style: "font-weight:600" }, t("dr_reverse_refreshkey_label")),
+                    h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" }, t("dr_reverse_refreshkey_hint")),
+                ]),
+            ]);
+            body.appendChild(rkLabel);
+
             const runBtn = h("button", { className: "btn btn-warning", style: "margin-top:12px" }, t("dr_reverse_start"));
             const statusBlock = h("div", { style: "margin-top:12px" });
             body.appendChild(runBtn);
@@ -5242,6 +5255,7 @@ async function viewDR() {
                         source_dataset: srcDs,
                         snapshot: revSnapSel.value || null,
                         force: force,
+                        refresh_host_key: rkCb.checked,
                     });
                 } catch (e) {
                     statusBlock.innerHTML = "";
@@ -5272,9 +5286,13 @@ async function viewDR() {
                             statusBlock.appendChild(h("p", {}, "✅ " + t("dr_reverse_ok")));
                         } else {
                             const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
-                            const hint = /destination has snapshots|must destroy them/i.test(res.log_tail || "")
-                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("dr_reverse_failed_snapshots"))}</div>`
-                                : "";
+                            const warnBox = (msg) => `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(msg)}</div>`;
+                            let hint = "";
+                            if (res.host_key_error) {
+                                hint = warnBox(t("dr_reverse_failed_hostkey"));
+                            } else if (/destination has snapshots|must destroy them/i.test(res.log_tail || "")) {
+                                hint = warnBox(t("dr_reverse_failed_snapshots"));
+                            }
                             openModal(t("dr_reverse_failed"), `${hint}<p>${escapeHtml(t("dr_reverse_failed_intro"))} (exit=${escapeHtml(String(res.exit_code))})</p>${tail}`);
                         }
                         runBtn.disabled = false;

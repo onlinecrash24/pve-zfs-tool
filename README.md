@@ -72,6 +72,7 @@
 
 ### Disaster Recovery
 - **Reverse Sync** -- Send a replica back to a rebuilt source host with `zfs send -R | ssh <source> zfs recv`, reusing the SSH trust established during replication setup
+- **Reinstalled-Host Host Key** -- A rebuilt destination has a new SSH host key, which would abort the transfer under strict checking ("REMOTE HOST IDENTIFICATION HAS CHANGED"); an on-by-default option drops the stale `known_hosts` entry and re-scans the current key (fingerprint logged). A host-key failure gets a targeted hint pointing at that option
 - **Guest Config Restore** -- Reverse sync restores only the disk; this step puts the VM/CT config (`/etc/pve/{qemu-server,lxc}/<vmid>.conf`) back from a host-config backup so Proxmox shows the guest again -- derives the VMID/type from the replica dataset, previews the config, and won't overwrite an existing one unless confirmed
 - **Replica Discovery** -- Scans every registered host for replica roots and lists the replicated datasets and their snapshots
 - **Flexible Target** -- Pick a registered host or a free-form address/port/user (a rebuilt host may have a new IP); the destination dataset defaults to the original source path

@@ -225,6 +225,15 @@ CONTENT = [
          "intakt und hat eigene Live-Daten), erscheint eine deutliche Warnung — ein "
          "Zurücksenden ist dann in der Regel gar nicht nötig und würde von ZFS ohnehin "
          "verweigert werden, um die Live-Daten zu schützen."),
+("p", "Neu installierter Ziel-Host: Ein frisch aufgesetzter Host hat einen neuen SSH-Host-Key. "
+      "Der sendende Replikat-Host kennt aber noch den alten und würde die Übertragung mit "
+      "„REMOTE HOST IDENTIFICATION HAS CHANGED / Host key verification failed“ abbrechen. Dafür "
+      "gibt es die Option „Ziel-Host wurde neu installiert (neuen SSH-Host-Key übernehmen)“ — "
+      "standardmäßig aktiviert, da der Reverse-Sync ja gerade auf einen wiederhergestellten Host "
+      "zielt. Sie entfernt den veralteten Eintrag und liest den aktuellen Key neu ein (der "
+      "Fingerprint wird im Verlauf protokolliert). Nur ausschalten, wenn der Ziel-Host NICHT neu "
+      "installiert wurde. Schlägt der Sync doch mit einem Host-Key-Fehler fehl, weist eine "
+      "Meldung genau auf diese Option hin."),
 ("h2", "11.1 Nach dem Reverse-Sync: Guest-Konfiguration wiederherstellen"),
 ("p", "Der Reverse-Sync bringt ausschließlich die Festplatten-Daten zurück. Proxmox zeigt die "
       "VM oder den Container erst wieder an, wenn auch dessen Konfigurationsdatei existiert. "

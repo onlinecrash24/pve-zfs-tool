@@ -521,6 +521,15 @@ CONTENT = [
     "intakten Quelle) — dort würde ZFS den Empfang ohnehin verweigern.",
     ["zfs list -H -o name <quell_dataset>",
      "zfs list -H -t snapshot -o name -r -d 1 <quell_dataset>"]),
+("cmd", "Host-Key auffrischen (Ziel neu installiert)", "Ein neu aufgesetzter Ziel-Host hat einen "
+    "neuen SSH-Host-Key; der veraltete known_hosts-Eintrag des sendenden Replikat-Hosts lässt "
+    "StrictHostKeyChecking sonst abbrechen (\"REMOTE HOST IDENTIFICATION HAS CHANGED\"). Bei "
+    "aktivierter Option (Standard, da Reverse-Sync auf einen wiederhergestellten Host zielt) "
+    "wird der alte Eintrag entfernt und der aktuelle Key neu eingelesen — der Fingerprint wird "
+    "protokolliert, also nicht still vertraut.",
+    ["ssh-keygen -f ~/.ssh/known_hosts -R <quelle>",
+     "ssh-keygen -f ~/.ssh/known_hosts -R [<quelle>]:<port>",
+     "ssh-keyscan -T 10 -p <port> <quelle> | tee -a ~/.ssh/known_hosts | ssh-keygen -lf -   # Fingerprint loggen"]),
 ("cmd", "Reverse-Sync ausführen", "Läuft als Hintergrund-Task (bis zu 12 Stunden Timeout), da "
     "ein voller Resend bei großen Datenmengen lange dauern kann. -F ist die abgesicherte "
     "Rollback-Option; sie überschreibt eine eigene, abweichende Snapshot-Kette am Ziel NICHT — "

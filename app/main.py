@@ -2017,6 +2017,7 @@ def api_dr_reverse_sync():
             source_dataset=(data.get("source_dataset") or None),
             snapshot=(data.get("snapshot") or None),
             force=bool(data.get("force")),
+            refresh_host_key=bool(data.get("refresh_host_key")),
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -2024,7 +2025,8 @@ def api_dr_reverse_sync():
               host=host["address"], success=True,
               details={"task_id": task_id,
                        "source_address": data.get("source_address"),
-                       "force": bool(data.get("force"))})
+                       "force": bool(data.get("force")),
+                       "refresh_host_key": bool(data.get("refresh_host_key"))})
     return jsonify({"success": True, "task_id": task_id})
 
 

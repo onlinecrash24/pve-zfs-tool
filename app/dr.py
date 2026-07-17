@@ -185,7 +185,8 @@ def reverse_sync_async(target_host: Dict[str, Any],
                        source_user: str,
                        source_dataset: Optional[str] = None,
                        snapshot: Optional[str] = None,
-                       force: bool = False) -> str:
+                       force: bool = False,
+                       refresh_host_key: bool = False) -> str:
     """Send the replica back to a (rebuilt) source host via SSH.
 
     ``replica_dataset`` lives on ``target_host`` (the box that holds the
@@ -196,6 +197,11 @@ def reverse_sync_async(target_host: Dict[str, Any],
     defaults to the newest snapshot under ``replica_dataset``. ``force``
     enables ``zfs recv -F`` which rolls back the destination to match
     the stream -- otherwise we use the safer no-rollback recv.
+    ``refresh_host_key``: a rebuilt destination has a NEW SSH host key, so the
+    replica host's stale known_hosts entry makes StrictHostKeyChecking abort
+    ("REMOTE HOST IDENTIFICATION HAS CHANGED"). When set, the stale entry is
+    dropped and the current key re-scanned (and its fingerprint logged) on the
+    sending host before the transfer.
     """
     if not _DS_RE.match(replica_dataset or "") or "/" not in replica_dataset:
         raise ValueError("invalid replica dataset")
@@ -220,7 +226,29 @@ def reverse_sync_async(target_host: Dict[str, Any],
 
     user = (source_user or "root")
 
-    def _job(progress, _host, _replica, _root, _addr, _port, _user, _src_ds, _snap, _force):
+    def _job(progress, _host, _replica, _root, _addr, _port, _user, _src_ds, _snap,
+             _force, _refresh):
+        # A rebuilt destination has a new SSH host key -> refresh the sending
+        # host's known_hosts (drop the stale entry, re-scan the current key)
+        # before the transfer, logging the fingerprint so the accepted key is
+        # visible (not silently trusted).
+        if _refresh:
+            progress(f"Refreshing SSH host key for {_addr}:{_port} …")
+            hostport = f"[{_addr}]:{_port}"
+            prep = (
+                "mkdir -p ~/.ssh && chmod 700 ~/.ssh; touch ~/.ssh/known_hosts; "
+                f"ssh-keygen -f ~/.ssh/known_hosts -R {shlex.quote(_addr)} >/dev/null 2>&1; "
+                f"ssh-keygen -f ~/.ssh/known_hosts -R {shlex.quote(hostport)} >/dev/null 2>&1; "
+                f"ssh-keyscan -T 10 -p {_port} {shlex.quote(_addr)} 2>/dev/null "
+                "| tee -a ~/.ssh/known_hosts | ssh-keygen -lf - 2>/dev/null | head -n 3"
+            )
+            pr = run_command(_host, prep, timeout=40)
+            fps = [ln.strip() for ln in (pr.get("stdout") or "").splitlines() if ln.strip()]
+            if fps:
+                progress("Accepted host key " + fps[0][:120])
+            else:
+                progress("Warning: could not scan destination host key (continuing) …")
+
         # Determine snapshot if not given: newest under replica
         if not _snap:
             progress("Resolving newest replica snapshot …")
@@ -262,6 +290,11 @@ def reverse_sync_async(target_host: Dict[str, Any],
         if m:
             exit_code = int(m.group(1))
         ok = r.get("success", False) and exit_code == 0
+        # Stale/changed destination host key -> tell the UI so it can point at
+        # the "destination was reinstalled" option instead of a generic error.
+        host_key_error = bool(re.search(
+            r"REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed",
+            out))
         progress(f"Finished (exit={exit_code})", ok=ok, exit_code=exit_code)
         # Strip the trailing __exit= marker for the result tail.
         cleaned = re.sub(r"__exit=\d+\s*$", "", out).strip()
@@ -272,6 +305,7 @@ def reverse_sync_async(target_host: Dict[str, Any],
             "source_dataset": _src_ds,
             "source_target": f"{_user}@{_addr}:{_port}",
             "force": bool(_force),
+            "host_key_error": host_key_error,
             "log_tail": cleaned[-3000:],
         }
 
@@ -279,7 +313,7 @@ def reverse_sync_async(target_host: Dict[str, Any],
         "reverse_sync", _job,
         target_host, replica_dataset, replica_root,
         source_address, source_port, user,
-        source_dataset, snapshot, bool(force),
+        source_dataset, snapshot, bool(force), bool(refresh_host_key),
         prefix="dr",
     )
 

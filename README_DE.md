@@ -72,6 +72,7 @@
 
 ### Disaster Recovery
 - **Reverse-Sync** -- Sendet ein Replikat zurück an einen wiederhergestellten Quell-Host via `zfs send -R | ssh <quelle> zfs recv` und nutzt das beim Replikations-Setup eingerichtete SSH-Vertrauen weiter
+- **Host-Key bei neu installiertem Ziel** -- Ein neu aufgesetzter Ziel-Host hat einen neuen SSH-Host-Key, der die Übertragung bei strikter Prüfung abbrechen würde ("REMOTE HOST IDENTIFICATION HAS CHANGED"); eine standardmäßig aktive Option entfernt den veralteten `known_hosts`-Eintrag und liest den aktuellen Key neu ein (Fingerprint wird protokolliert). Bei einem Host-Key-Fehler weist eine gezielte Meldung auf genau diese Option hin
 - **Guest-Konfiguration wiederherstellen** -- Der Reverse-Sync stellt nur die Disk wieder her; dieser Schritt spielt die VM/CT-Konfiguration (`/etc/pve/{qemu-server,lxc}/<vmid>.conf`) aus einem Host-Config-Backup zurück, damit Proxmox den Gast wieder anzeigt -- leitet VMID/Typ aus dem Replikat-Dataset ab, zeigt die Config zur Vorschau und überschreibt eine vorhandene nur nach Bestätigung
 - **Replikat-Erkennung** -- Scannt jeden registrierten Host nach Replikat-Wurzeln und listet die replizierten Datasets samt ihren Snapshots
 - **Flexibles Ziel** -- Registrierten Host wählen oder freie Adresse/Port/User angeben (ein neu aufgesetzter Host hat evtl. eine neue IP); das Ziel-Dataset ist mit dem Original-Quellpfad vorbelegt
