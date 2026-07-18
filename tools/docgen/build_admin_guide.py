@@ -521,6 +521,15 @@ CONTENT = [
     "intakten Quelle) — dort würde ZFS den Empfang ohnehin verweigern.",
     ["zfs list -H -o name <quell_dataset>",
      "zfs list -H -t snapshot -o name -r -d 1 <quell_dataset>"]),
+("cmd", "Host-Key auffrischen (Ziel neu installiert)", "Ein neu aufgesetzter Ziel-Host hat einen "
+    "neuen SSH-Host-Key; der veraltete known_hosts-Eintrag des sendenden Replikat-Hosts lässt "
+    "StrictHostKeyChecking sonst abbrechen (\"REMOTE HOST IDENTIFICATION HAS CHANGED\"). Bei "
+    "aktivierter Option (Standard, da Reverse-Sync auf einen wiederhergestellten Host zielt) "
+    "wird der alte Eintrag entfernt und der aktuelle Key neu eingelesen — der Fingerprint wird "
+    "protokolliert, also nicht still vertraut.",
+    ["ssh-keygen -f ~/.ssh/known_hosts -R <quelle>",
+     "ssh-keygen -f ~/.ssh/known_hosts -R [<quelle>]:<port>",
+     "ssh-keyscan -T 10 -p <port> <quelle> | tee -a ~/.ssh/known_hosts | ssh-keygen -lf -   # Fingerprint loggen"]),
 ("cmd", "Reverse-Sync ausführen", "Läuft als Hintergrund-Task (bis zu 12 Stunden Timeout), da "
     "ein voller Resend bei großen Datenmengen lange dauern kann. -F ist die abgesicherte "
     "Rollback-Option; sie überschreibt eine eigene, abweichende Snapshot-Kette am Ziel NICHT — "
@@ -547,15 +556,46 @@ CONTENT = [
      "mkdir -p <zielverzeichnis>",
      "echo <base64-inhalt> | base64 -d > <ziel>",
      "chmod +x <ziel>   # nur falls im Archiv als ausführbar markiert"]),
+("cmd", "Alle Configs wiederherstellen", "Ein-Klick-Wiederherstellung ALLER wiederherstellbaren "
+    "Konfigurationsdateien außer Gast-Configs (eigener Button) und Info-Ausgaben — Netzwerk, "
+    "Storage/fstab, APT, Firewall, Jobs/Cron, User, SSH, Sonstiges. Node-Name wird einmal für "
+    "den ganzen Stapel aufgelöst.",
+    ["# je Datei wie \"Einzelne Datei wiederherstellen\", Kategorie ∉ {guests, info}"]),
 ("cmd", "Alle Gast-Configs auf einmal wiederherstellen", "Bulk-Variante der Einzel-Wiederherstellung, überspringt vorhandene Configs ohne Überschreiben-Option.",
     ["# je gefundener .../<qemu-server|lxc>/<vmid>.conf: wie \"Einzelne Datei wiederherstellen\""]),
-("cmd", "Pakete nachinstallieren", "Nutzt die im Backup gesicherte dpkg --get-selections-Liste; "
-    "gefiltert auf install/hold (additiv — entfernt nie Pakete). Läuft als Hintergrund-Task, da "
-    "apt-get lange dauern kann. Voraussetzung: Die Paketquellen (APT) wurden zuvor "
-    "wiederhergestellt.",
-    ["echo <base64-selektionen> | base64 -d | dpkg --set-selections",
+("cmd", "Pakete nachinstallieren", "In sich abgeschlossener Hintergrund-Task: (1) stellt "
+    "zuerst die APT-Quellen und Signing-Keyrings aus dem Backup wieder her (force), damit "
+    "Drittanbieter-Pakete überhaupt auflösbar sind; (2) installiert die gesicherte "
+    "Paketliste per apt-get install — NICHT via dpkg --set-selections + dselect-upgrade, "
+    "denn auf einem frisch installierten Host kennt dpkg die Pakete noch nicht, verwirft die "
+    "Selektionen still und installiert nichts (\"0 newly installed\"). Bevorzugt wird der "
+    "apt-mark showmanual-Satz aus dem Backup (Abhängigkeiten zieht apt selbst, autoremove "
+    "bleibt sauber), sonst die volle install-Liste. Namen, die apt nicht kennt (z. B. ein "
+    "alter, nicht mehr im Repo vorhandener Kernel), werden vorher herausgefiltert, da "
+    "apt-get install sonst komplett abbricht. (3) prüft ehrlich, welche angeforderten Pakete "
+    "danach noch NICHT installiert sind.",
+    ["# 1. restore_backup_category(host, backup, 'apt', force=True)",
      "apt-get update -qq || true",
-     "apt-get -y dselect-upgrade"]),
+     "apt-cache pkgnames | sort -u > avail   # nur real verfügbare Namen behalten",
+     "grep -Fxf avail <angeforderte_liste> | xargs apt-get install -y -o Dpkg::Options::=--force-confold",
+     "# 3. dpkg-query -W -f='${Package}\\n' | sort -u  vs.  angeforderte Liste (grep -Fxv)"]),
+("cmd", "ZFS-Eigenschaften anwenden", "Spielt die lokal gesetzten Pool-/Dataset-Eigenschaften "
+    "aus dem Backup zurück (nur source=local; vererbte/Default/Read-only werden ausgelassen, "
+    "wodurch die Vererbung automatisch erhalten bleibt). Schließt die Lücke, die zfs send -R "
+    "offen lässt: Pool-Eigenschaften (autotrim/autoexpand) und nicht-replizierte Datasets. "
+    "Wird nur auf bereits vorhandene Objekte angewendet, jeder Set einzeln fehlertolerant "
+    "(nur bei Erstellung setzbare Properties scheitern und werden gemeldet).",
+    ["zpool list -H -o name; zfs list -H -o name -t filesystem,volume   # was existiert?",
+     "zpool set <property>=<wert> <pool>   # je lokal gesetzter Pool-Eigenschaft",
+     "zfs set <property>=<wert> <dataset>   # je lokal gesetzter Dataset-Eigenschaft"]),
+("cmd", "Reboot des Ziel-Hosts", "Nötig, damit die wiederhergestellte Konfiguration (Netzwerk, "
+    "fstab, Dienste, Kernel) wirksam wird. Der Neustart wird verzögert im Hintergrund "
+    "abgesetzt, damit der SSH-Aufruf sauber zurückkehrt, statt mit der Verbindung zu sterben, "
+    "die der Reboot abreißt. Danach stellt die Oberfläche das Ziel automatisch auf den "
+    "registrierten Host mit derselben Adresse um (nach dem Restore ist er per Tool-Key "
+    "erreichbar) und pollt /api/hosts/test, bis er zurück ist.",
+    ["nohup sh -c 'sleep 2; systemctl reboot || reboot' >/dev/null 2>&1 &",
+     "echo __reboot_scheduled__"]),
 ("cmd", "Ad-hoc-Ziel: Verbindungstest / Tool-Key installieren", "Für einen noch nicht "
     "registrierten, frisch installierten Host per IP + Passwort (nie gespeichert).",
     ["hostname; pveversion   # Verbindungstest",
@@ -573,12 +613,16 @@ CONTENT = [
      "cp -a /etc/udev/rules.d/*net*.rules /etc/systemd/network/*.link $STAGE/  # NIC-Namens-Artefakte",
      "ethtool -i <nic>; udevadm info -q property <nic>   # NIC-Identität (MAC/Treiber/Pfad)",
      "tar -C /etc/apt --exclude=auth.conf* -cf - . | tar -C $STAGE/etc/apt -xf -   # APT-Repos + Keys",
+     "cp -a --parents /usr/share/keyrings/*.gpg $STAGE/   # Signing-Keyrings AUSSERHALB /etc/apt (deb822)",
+     "cp -a --parents /etc/fstab /etc/vzdump.conf $STAGE/   # manuelle Mounts + vzdump-Defaults",
      "cat /root/.ssh/authorized_keys > $STAGE/root/.ssh/authorized_keys   # nur Public Keys",
      "cp -a /etc/cron.d /etc/cron.{hourly,daily,weekly,monthly}/zfs-auto-snapshot $STAGE/  # Retention",
      "cp -a /etc/bashclub $STAGE/   # Replikations-Config",
      "cp -a /etc/modprobe.d/zfs.conf $STAGE/   # ARC-Limit",
-     "pveversion -v; dpkg --get-selections; ip -d address show; ip route show; "
-     "zpool status; zpool list; zfs list; pvecm status   # Befehls-Snapshots",
+     "pveversion -v; dpkg --get-selections; apt-mark showmanual; ip -d address show; "
+     "ip route show; zpool status; zpool list; zfs list; pvecm status   # Befehls-Snapshots",
+     "zpool get -H -o name,property,value,source all   # Pool-Eigenschaften (mit Quelle)",
+     "zfs get -H -o name,property,value,source -t filesystem,volume all   # Dataset-Eigenschaften",
      "tar -C $STAGE -czf <ziel>.tar.gz ."]),
 ("cmd", "Backup abrufen / auflisten / löschen", "",
     ["# SFTP-Get der fertigen Datei ins Docker-Volume /app/data/host-backups/<host>/",
@@ -734,8 +778,10 @@ CONTENT = [
         ["Replikation", "/api/replication/install, /api/replication/config, /api/replication/cron, "
          "/api/replication/health, /api/replication/checkzfs"],
         ["Disaster Recovery", "/api/dr/replicas, /api/dr/reverse-sync, /api/dr/reverse-precheck"],
-        ["Config Restore", "/api/dr/backup-contents, /api/dr/restore-file, /api/dr/restore-all-guests, "
-         "/api/dr/adhoc-test, /api/dr/install-key, /api/dr/reinstall-packages"],
+        ["Config Restore", "/api/dr/backup-contents, /api/dr/restore-file, /api/dr/restore-category, "
+         "/api/dr/restore-all-configs, /api/dr/restore-all-guests, /api/dr/zfs-properties, "
+         "/api/dr/apply-zfs-properties, /api/dr/reboot-target, /api/dr/adhoc-test, "
+         "/api/dr/install-key, /api/dr/reinstall-packages"],
         ["Benachrichtigungen", "/api/notifications/config, /api/notifications/test/*"],
         ["KI-Berichte", "/api/ai/config, /api/ai/report, /api/ai/chat, /api/ai/report/pdf/<id>"],
         ["Audit / Cache", "/api/audit, /api/cache/stats, /api/cache/invalidate"],

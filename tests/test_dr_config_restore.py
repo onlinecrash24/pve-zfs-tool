@@ -28,6 +28,10 @@ BACKUP = {
     "./etc/pve/nodes/pve251/qemu-server/100.conf": "cores: 2\n",
     "./etc/pve/nodes/pve251/lxc/253.conf": "arch: amd64\n",
     "./etc/apt/sources.list.d/pve.list": "deb http://download.proxmox.com/debian/pve trixie pve-no-subscription\n",
+    "./etc/apt/sources.list.d/bashclub.sources": "Types: deb\nSigned-By: /usr/share/keyrings/bashclub-archive-keyring.gpg\n",
+    "./usr/share/keyrings/bashclub-archive-keyring.gpg": "FAKEGPGBINARY",
+    "./etc/fstab": "UUID=abc / zfs defaults 0 0\n",
+    "./etc/vzdump.conf": "compress: zstd\n",
     "./etc/cron.d/zfs-auto-snapshot": "*/15 * * * * root zfs-auto-snapshot ...\n",
     "./etc/bashclub/192.168.66.70.conf": "SOURCE=root@192.168.66.70\n",
     "./root/.ssh/authorized_keys": "ssh-ed25519 AAAAC3Nz tool@host\n",
@@ -51,6 +55,12 @@ def test_list_categorizes_and_flags_restorable(tmp_path):
     assert files["cmd/dpkg-selections.txt"]["category"] == "info"
     assert files["root/.ssh/authorized_keys"]["category"] == "ssh"
     assert files["etc/apt/sources.list.d/pve.list"]["category"] == "apt"
+    # signing keyrings OUTSIDE /etc/apt (deb822 convention) belong to apt too
+    assert files["usr/share/keyrings/bashclub-archive-keyring.gpg"]["category"] == "apt"
+    assert files["usr/share/keyrings/bashclub-archive-keyring.gpg"]["restorable"] is True
+    assert files["etc/fstab"]["category"] == "storage"
+    assert files["etc/fstab"]["restorable"] is True
+    assert files["etc/vzdump.conf"]["category"] == "jobs"
     assert files["etc/cron.d/zfs-auto-snapshot"]["category"] == "jobs"
     assert files["etc/bashclub/192.168.66.70.conf"]["category"] == "jobs"
     # command captures are info-only; config files + authorized_keys restorable
@@ -70,6 +80,13 @@ def test_target_path_and_node_remap():
         == "/etc/pve/nodes/newnode/qemu-server/100.conf"
     # authorized_keys maps back to /root/.ssh
     assert dr._backup_target_path("root/.ssh/authorized_keys", "x") == "/root/.ssh/authorized_keys"
+    # APT signing keyrings under /usr/share/keyrings (outside /etc) restore too
+    assert dr._backup_target_path("usr/share/keyrings/bashclub-archive-keyring.gpg", "x") \
+        == "/usr/share/keyrings/bashclub-archive-keyring.gpg"
+    assert dr._backup_target_path("usr/share/keyrings/key.asc", "x") == "/usr/share/keyrings/key.asc"
+    # ... but only key files, and nothing else under /usr
+    assert dr._backup_target_path("usr/share/keyrings/evil.sh", "x") is None
+    assert dr._backup_target_path("usr/bin/evil", "x") is None
     # not restorable
     assert dr._backup_target_path("cmd/pveversion.txt", "x") is None
     assert dr._backup_target_path("var/lib/x", "x") is None
@@ -192,3 +209,215 @@ def test_restore_non_exec_file_no_chmod(tmp_path, monkeypatch):
     monkeypatch.setattr(dr, "run_command", _run_capturing(captured))
     dr.restore_backup_file({"address": "h"}, path, "./etc/pve/storage.cfg")
     assert "chmod +x" not in captured["cmd"]
+
+
+# --- category bulk restore --------------------------------------------------
+
+def test_restore_backup_category_apt_includes_keyrings(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    written = []
+    def run(host, cmd, timeout=10):
+        if cmd.strip() == "hostname":
+            return {"stdout": "n", "success": True}
+        if "base64 -d" in cmd:
+            written.append(cmd)
+            return {"stdout": "__OK__", "success": True}
+        return {"stdout": "__NO__", "success": True}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.restore_backup_category({"address": "h"}, path, "apt")
+    # both sources files AND the keyring outside /etc/apt got restored
+    assert r["total"] == 3 and r["restored"] == 3 and r["failed"] == 0
+    assert any("/usr/share/keyrings/bashclub-archive-keyring.gpg" in c for c in written)
+
+
+def test_restore_backup_category_skips_existing(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    monkeypatch.setattr(dr, "run_command", _fake_run(exists=True))
+    r = dr.restore_backup_category({"address": "h"}, path, "apt", force=False)
+    assert r["restored"] == 0 and r["skipped"] == 3 and r["success"] is True
+
+
+def test_restore_backup_category_empty(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, {"./cmd/pveversion.txt": "pve 9\n"})
+    monkeypatch.setattr(dr, "run_command", _fake_run(exists=False))
+    r = dr.restore_backup_category({"address": "h"}, path, "apt")
+    assert r["total"] == 0 and r["success"] is True
+
+
+# --- restore all configs (everything except guests + info) ------------------
+
+def test_restore_all_configs_covers_everything_but_guests(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, BACKUP)
+    written = []
+    def run(host, cmd, timeout=10):
+        if cmd.strip() == "hostname":
+            return {"stdout": "n", "success": True}
+        if "base64 -d" in cmd:
+            written.append(cmd)
+            return {"stdout": "__OK__", "success": True}
+        return {"stdout": "__NO__", "success": True}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.restore_all_configs({"address": "h"}, path)
+    # every restorable non-guest, non-info file gets written; the 2 guest
+    # confs and the 2 cmd/ captures are left out.
+    assert r["failed"] == 0 and r["restored"] == r["total"] and r["total"] >= 10
+    # guest configs are NOT touched here (own button)
+    assert not any("/qemu-server/100.conf" in c for c in written)
+    assert not any("/lxc/253.conf" in c for c in written)
+    # but the important recovery bits ARE
+    assert any("/etc/network/interfaces" in c for c in written)
+    assert any("/usr/share/keyrings/bashclub-archive-keyring.gpg" in c for c in written)
+    assert any("/etc/fstab" in c for c in written)
+
+
+def test_restore_all_configs_excludes_guests_and_info(tmp_path, monkeypatch):
+    # a backup of ONLY guest configs + info captures -> nothing for all-configs
+    path = _make_backup(tmp_path, {
+        "./etc/pve/nodes/pve1/qemu-server/100.conf": "cores: 2\n",
+        "./cmd/pveversion.txt": "pve 9\n",
+    })
+    monkeypatch.setattr(dr, "run_command", _fake_run(exists=False))
+    r = dr.restore_all_configs({"address": "h"}, path)
+    assert r["total"] == 0 and r["success"] is True
+
+
+# --- install-package-name extraction (honest still-missing check) -----------
+
+def test_install_package_names_install_only_arch_stripped():
+    sel = "pve-manager\tinstall\nvim:amd64\tinstall\nzfsutils-linux\thold\n"
+    names = dr._install_package_names(sel)
+    # only 'install' lines (hold excluded from the must-be-installed check),
+    # arch suffix stripped, sorted+unique
+    assert names == ["pve-manager", "vim"]
+
+
+# --- ZFS property capture + restore -----------------------------------------
+
+_ZPOOL_PROPS = (
+    "rpool\tautotrim\ton\tlocal\n"
+    "rpool\tautoexpand\ton\tlocal\n"
+    "rpool\tsize\t1T\t-\n"                 # read-only -> source '-' -> skipped
+    "rpool\tashift\t12\tlocal\n"           # denylisted (create-time)
+    "rpool\tfeature@lz4_compress\tactive\tlocal\n"  # feature@ -> skipped
+    "rpool\tautoreplace\toff\tdefault\n"   # default -> skipped
+)
+_ZFS_PROPS = (
+    "rpool/data\tcompression\tlz4\tlocal\n"
+    "rpool/data\tcom.sun:auto-snapshot\tfalse\tlocal\n"
+    "rpool/data/sub\tcompression\tlz4\tinherited from rpool/data\n"  # inherited -> skipped
+    "rpool/data\tused\t10G\t-\n"           # read-only -> skipped
+    "rpool/vm-100-disk-0\tvolblocksize\t8k\tlocal\n"  # create-time -> skipped
+    "rpool/vm-100-disk-0\tquota\tnone\tlocal\n"
+)
+
+
+def test_read_zfs_properties_filters_to_settable_local(tmp_path):
+    path = _make_backup(tmp_path, {
+        "./cmd/zpool-properties.txt": _ZPOOL_PROPS,
+        "./cmd/zfs-properties.txt": _ZFS_PROPS,
+    })
+    p = dr.read_zfs_properties(path)
+    pool_props = {(x["property"], x["value"]) for x in p["pools"]}
+    assert pool_props == {("autotrim", "on"), ("autoexpand", "on")}
+    ds_props = {(x["name"], x["property"], x["value"]) for x in p["datasets"]}
+    assert ds_props == {
+        ("rpool/data", "compression", "lz4"),
+        ("rpool/data", "com.sun:auto-snapshot", "false"),
+        ("rpool/vm-100-disk-0", "quota", "none"),
+    }
+    # inherited/default/read-only/create-time/feature@ are all excluded
+    assert not any(x["property"] == "ashift" for x in p["pools"])
+    assert not any(x["property"].startswith("feature@") for x in p["pools"])
+    assert not any(x["property"] == "volblocksize" for x in p["datasets"])
+
+
+def test_read_zfs_properties_absent_returns_empty(tmp_path):
+    path = _make_backup(tmp_path, BACKUP)   # no property files
+    p = dr.read_zfs_properties(path)
+    assert p == {"pools": [], "datasets": []}
+
+
+def test_apply_zfs_properties_sets_existing_skips_missing(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, {
+        "./cmd/zpool-properties.txt": "rpool\tautotrim\ton\tlocal\n",
+        "./cmd/zfs-properties.txt": ("rpool/data\tcompression\tlz4\tlocal\n"
+                                     "tank/gone\tcompression\tlz4\tlocal\n"),
+    })
+    cmds = []
+    def run(host, cmd, timeout=10):
+        if cmd.startswith("zpool list"):
+            return {"success": True, "stdout": "rpool\n"}
+        if cmd.startswith("zfs list"):
+            return {"success": True, "stdout": "rpool\nrpool/data\n"}   # tank/gone absent
+        cmds.append(cmd)
+        # echo back OK markers for each set line
+        out = []
+        for ln in cmd.splitlines():
+            if "zpool set" in ln: out.append("OK\tpool\trpool\tautotrim")
+            elif "zfs set" in ln: out.append("OK\tds\trpool/data\tcompression")
+        return {"success": True, "stdout": "\n".join(out)}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.apply_zfs_properties({"address": "h"}, path)
+    assert r["pools_set"] == 1 and r["datasets_set"] == 1
+    assert r["not_present"] == ["tank/gone"] and r["skipped"] == 1
+    assert r["success"] is True
+    # the set batch used zpool set / zfs set, and never touched the missing one
+    batch = cmds[0]
+    assert "zpool set autotrim=on rpool" in batch
+    assert "tank/gone" not in batch
+
+
+def test_apply_zfs_properties_reports_failures(tmp_path, monkeypatch):
+    path = _make_backup(tmp_path, {
+        "./cmd/zfs-properties.txt": "rpool/data\tcompression\tbogus\tlocal\n",
+    })
+    def run(host, cmd, timeout=10):
+        if cmd.startswith("zpool list"):
+            return {"success": True, "stdout": ""}
+        if cmd.startswith("zfs list"):
+            return {"success": True, "stdout": "rpool/data\n"}
+        return {"success": True, "stdout": "ERR\tds\trpool/data\tcompression"}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.apply_zfs_properties({"address": "h"}, path)
+    assert r["failed"] == 1 and r["success"] is False
+
+
+# --- reboot the restore target ----------------------------------------------
+
+def test_reboot_target_backgrounds_the_reboot(monkeypatch):
+    seen = {}
+    def run(host, cmd, timeout=10):
+        seen["cmd"] = cmd
+        return {"success": True, "stdout": "__reboot_scheduled__\n"}
+    monkeypatch.setattr(dr, "run_command", run)
+    r = dr.reboot_target({"address": "h"})
+    assert r["success"] is True
+    # backgrounded with a delay so the SSH call returns instead of dying with
+    # the connection the reboot tears down
+    assert "nohup" in seen["cmd"] and "sleep 2" in seen["cmd"]
+    assert "systemctl reboot" in seen["cmd"]
+
+
+def test_reboot_target_reports_failure(monkeypatch):
+    monkeypatch.setattr(dr, "run_command",
+                        lambda host, cmd, timeout=10: {"success": False, "stdout": "",
+                                                       "stderr": "permission denied"})
+    r = dr.reboot_target({"address": "h"})
+    assert r["success"] is False and "permission denied" in r["error"]
+
+
+# --- apt-mark showmanual capture (preferred reinstall source) ---------------
+
+def test_read_apt_manual_present(tmp_path):
+    path = _make_backup(tmp_path, {
+        "./cmd/apt-manual.txt": "mc\nntfs-3g\nvim:amd64\nmc\n",
+    })
+    # arch stripped, sorted, unique
+    assert dr.read_apt_manual(path) == ["mc", "ntfs-3g", "vim"]
+
+
+def test_read_apt_manual_absent_returns_empty(tmp_path):
+    # older backup without the apt-mark capture -> [] (reinstall falls back to
+    # the full dpkg selection)
+    path = _make_backup(tmp_path, BACKUP)
+    assert dr.read_apt_manual(path) == []

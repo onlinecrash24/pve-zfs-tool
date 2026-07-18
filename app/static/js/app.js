@@ -5198,6 +5198,19 @@ async function viewDR() {
             ]);
             body.appendChild(forceLabel);
 
+            // Rebuilt destination = new SSH host key -> refresh known_hosts on
+            // the sending host, else StrictHostKeyChecking aborts. Default on,
+            // because reverse-sync targets a rebuilt/recovered host by design.
+            const rkCb = h("input", { type: "checkbox", checked: "checked" });
+            const rkLabel = h("label", { style: "display:flex;align-items:flex-start;gap:8px;padding:10px;background:var(--bg-secondary,rgba(120,120,120,0.08));border:1px solid var(--border,#333);border-radius:6px;cursor:pointer;margin-top:10px" }, [
+                rkCb,
+                h("div", {}, [
+                    h("div", { style: "font-weight:600" }, t("dr_reverse_refreshkey_label")),
+                    h("div", { style: "font-size:12px;color:var(--text-secondary);margin-top:3px" }, t("dr_reverse_refreshkey_hint")),
+                ]),
+            ]);
+            body.appendChild(rkLabel);
+
             const runBtn = h("button", { className: "btn btn-warning", style: "margin-top:12px" }, t("dr_reverse_start"));
             const statusBlock = h("div", { style: "margin-top:12px" });
             body.appendChild(runBtn);
@@ -5242,6 +5255,7 @@ async function viewDR() {
                         source_dataset: srcDs,
                         snapshot: revSnapSel.value || null,
                         force: force,
+                        refresh_host_key: rkCb.checked,
                     });
                 } catch (e) {
                     statusBlock.innerHTML = "";
@@ -5272,9 +5286,13 @@ async function viewDR() {
                             statusBlock.appendChild(h("p", {}, "✅ " + t("dr_reverse_ok")));
                         } else {
                             const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
-                            const hint = /destination has snapshots|must destroy them/i.test(res.log_tail || "")
-                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("dr_reverse_failed_snapshots"))}</div>`
-                                : "";
+                            const warnBox = (msg) => `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(msg)}</div>`;
+                            let hint = "";
+                            if (res.host_key_error) {
+                                hint = warnBox(t("dr_reverse_failed_hostkey"));
+                            } else if (/destination has snapshots|must destroy them/i.test(res.log_tail || "")) {
+                                hint = warnBox(t("dr_reverse_failed_snapshots"));
+                            }
                             openModal(t("dr_reverse_failed"), `${hint}<p>${escapeHtml(t("dr_reverse_failed_intro"))} (exit=${escapeHtml(String(res.exit_code))})</p>${tail}`);
                         }
                         runBtn.disabled = false;
@@ -5407,6 +5425,16 @@ async function viewConfigRestore() {
         : { target: targetSel.value };
     const _crAddr = () => modeSel.value === "adhoc" ? (adhocAddr.value.trim() || "?") : targetSel.value;
 
+    // Bulk restores replace files by design. If "Overwrite" is off, the confirm
+    // spells out that proceeding overwrites (so pre-existing stock files on a
+    // fresh host aren't silently skipped). Proceeding always overwrites; the
+    // per-file restore keeps the skip-unless-overwrite safety instead.
+    const _confirmBulk = (actionMsg) => {
+        let m = actionMsg;
+        if (!overwriteCb.checked) m += "\n\n" + t("cr_bulk_overwrite_note");
+        return confirm(m);
+    };
+
     const regWrap = h("div", {}, targetSel);
     const adhocStatus = h("div", { style: "font-size:12px;margin-top:6px" });
     const testBtn = h("button", { className: "btn btn-sm", style: "margin-top:8px" }, t("cr_test"));
@@ -5468,6 +5496,7 @@ async function viewConfigRestore() {
     const restoreFile = async (f) => {
         let msg = t("cr_restore_confirm").replace("{f}", f.path).replace("{h}", _crAddr());
         if (f.category === "network") msg += "\n\n" + t("cr_network_warn");
+        if (f.path === "etc/fstab") msg += "\n\n" + t("cr_fstab_warn");
         if (!confirm(msg)) return;
         try {
             const r = await API.post("/api/dr/restore-file", Object.assign(_crTarget(), {
@@ -5501,27 +5530,17 @@ async function viewConfigRestore() {
         body.appendChild(h("label", { style: "display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer" },
             [overwriteCb, h("span", { style: "font-size:13px" }, t("cr_overwrite"))]));
 
-        const guestCount = files.filter(f => f.category === "guests").length;
-        if (guestCount) {
-            const bulkBtn = h("button", { className: "btn btn-primary btn-sm" }, t("cr_restore_all_guests").replace("{n}", guestCount));
-            bulkBtn.onclick = async () => {
-                if (!confirm(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
-                bulkBtn.disabled = true;
-                try {
-                    const r = await API.post("/api/dr/restore-all-guests", Object.assign(_crTarget(), {
-                        backup_host: backupHostSel.value, file: backupSel.value, force: overwriteCb.checked,
-                    }));
-                    toast(t("cr_bulk_done").replace("{r}", r.restored || 0).replace("{s}", r.skipped || 0), r.success ? "success" : "error");
-                } catch (e) { toast(e.message || t("failed"), "error"); }
-                finally { bulkBtn.disabled = false; }
-            };
-            body.appendChild(bulkBtn);
-        }
+        // Primary recovery actions, in the recommended order:
+        //   1) Reinstall packages (restores repos+keys itself, then installs)
+        //   2) Restore all configs (everything except guests)
+        //   3) Restore all guest configs
+        const actionRow = h("div", { style: "display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px" });
+        const pkgStatus = h("div", { style: "margin-top:8px" });
 
-        // Package reinstall (needs repos restored first + network)
+        // 1. Reinstall packages -- self-contained: the backend first restores
+        //    the APT sources + signing keys from the backup, then installs.
         if (files.some(f => f.path === "cmd/dpkg-selections.txt")) {
-            const pkgBtn = h("button", { className: "btn btn-warning btn-sm", style: "margin-left:8px" }, t("cr_pkg_install"));
-            const pkgStatus = h("div", { style: "margin-top:8px" });
+            const pkgBtn = h("button", { className: "btn btn-warning btn-sm" }, "1. " + t("cr_pkg_install"));
             pkgBtn.onclick = async () => {
                 if (!confirm(t("cr_pkg_confirm").replace("{h}", _crAddr()))) return;
                 pkgBtn.disabled = true; pkgStatus.innerHTML = "";
@@ -5533,31 +5552,199 @@ async function viewConfigRestore() {
                         backup_host: backupHostSel.value, file: backupSel.value,
                     }));
                 } catch (e) { toast(e.message || t("failed"), "error"); pkgBtn.disabled = false; return; }
-                if (!kick || !kick.task_id) { pkgStatus.innerHTML = ""; toast(kick.error || t("failed"), "error"); pkgBtn.disabled = false; return; }
+                if (!kick || !kick.task_id) { pkgStatus.innerHTML = ""; toast((kick && kick.error) || t("failed"), "error"); pkgBtn.disabled = false; return; }
                 toast(t("cr_pkg_running"), "info");
                 pollReplicationTask(kick.task_id, {
                     onTick: (rec) => { prog.textContent = rec.progress || "…"; },
                     onDone: (rec) => {
                         const res = rec.result || {};
                         prog.textContent = "";
-                        if (res.success) { toast(t("cr_pkg_ok"), "success"); pkgStatus.appendChild(h("p", {}, "✅ " + t("cr_pkg_ok"))); }
-                        else {
-                            const tail = res.log_tail ? `<pre class="output" style="max-height:260px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
-                            openModal(t("cr_pkg_failed"), `<p>exit=${escapeHtml(String(res.exit_code))}</p>${tail}`);
+                        if (res.success) {
+                            toast(t("cr_pkg_ok"), "success");
+                            pkgStatus.appendChild(h("p", {}, "✅ " + t("cr_pkg_ok_detail")
+                                .replace("{n}", String(res.requested || 0))
+                                .replace("{a}", String(res.apt_restored || 0))));
+                        } else {
+                            const missCount = res.missing_count || 0;
+                            const missList = (res.missing || []).length
+                                ? `<p style="font-family:monospace;font-size:12px;word-break:break-all">${escapeHtml((res.missing || []).join(", "))}</p>` : "";
+                            const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
+                            const repoIssue = missCount > 0 || /NO_PUBKEY|Failed to fetch|is not signed|does not have a Release file/i.test(res.log_tail || "");
+                            const hint = repoIssue
+                                ? `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(t("cr_pkg_partial_hint"))}</div>`
+                                : "";
+                            const summary = `<p>exit=${escapeHtml(String(res.exit_code))} · ${escapeHtml(t("cr_pkg_missing_n").replace("{n}", String(missCount)))}</p>`;
+                            openModal(t("cr_pkg_failed"), `${hint}${summary}${missList}${tail}`);
                         }
                         pkgBtn.disabled = false;
                     },
                     onError: (msg) => { toast(msg || t("failed"), "error"); pkgBtn.disabled = false; },
                 });
             };
-            body.appendChild(pkgBtn);
-            body.appendChild(pkgStatus);
+            actionRow.appendChild(pkgBtn);
         }
+
+        // 2. Restore all configs (everything restorable except guests + info)
+        const cfgCount = files.filter(f => f.restorable && f.category !== "guests" && f.category !== "info").length;
+        if (cfgCount) {
+            const cfgBtn = h("button", { className: "btn btn-warning btn-sm" }, "2. " + t("cr_restore_all_configs").replace("{n}", String(cfgCount)));
+            cfgBtn.onclick = async () => {
+                const msg = t("cr_allcfg_confirm").replace("{n}", String(cfgCount)).replace("{h}", _crAddr())
+                    + "\n\n" + t("cr_allcfg_warn");
+                if (!_confirmBulk(msg)) return;
+                cfgBtn.disabled = true;
+                try {
+                    const r = await API.post("/api/dr/restore-all-configs", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value, force: true,
+                    }));
+                    toast(t("cr_cat_bulk_done")
+                        .replace("{r}", String(r.restored || 0))
+                        .replace("{s}", String(r.skipped || 0))
+                        .replace("{f}", String(r.failed || 0)), r.success ? "success" : "error");
+                } catch (e) { toast(e.message || t("failed"), "error"); }
+                finally { cfgBtn.disabled = false; }
+            };
+            actionRow.appendChild(cfgBtn);
+        }
+
+        // 3. Reboot: the restored config (network, fstab, services) only takes
+        //    effect after a restart. Afterwards the host is key-reachable as a
+        //    REGISTERED host (authorized_keys + network came back with the
+        //    configs), so switch the picker over to it and wait for it to
+        //    return -- the guest configs in step 4 then go over the tool's key.
+        const rebootStatus = h("div", { style: "margin-top:8px;font-size:12px" });
+        const rebootBtn = h("button", { className: "btn btn-warning btn-sm" }, "3. " + t("cr_reboot"));
+        rebootBtn.onclick = async () => {
+            const addr = _crAddr();
+            if (!confirm(t("cr_reboot_confirm").replace("{h}", addr))) return;
+            rebootBtn.disabled = true;
+            rebootStatus.innerHTML = "";
+            try {
+                const r = await API.post("/api/dr/reboot-target", _crTarget());
+                if (!r || !r.success) {
+                    toast((r && r.error) || t("failed"), "error");
+                    rebootBtn.disabled = false; return;
+                }
+            } catch (e) { toast(e.message || t("failed"), "error"); rebootBtn.disabled = false; return; }
+            toast(t("cr_reboot_sent"), "success");
+
+            const reg = hosts.find(hh => hh.address === addr);
+            const waitP = h("div", { className: "muted", style: "margin-top:4px" });
+            if (reg) {
+                // Point the picker at the registered host that was just restored
+                modeSel.value = "registered";
+                modeSel.onchange();
+                targetSel.value = reg.address;
+                rebootStatus.appendChild(h("div", { style: "color:var(--success)" },
+                    "✓ " + t("cr_reboot_switched").replace("{h}", reg.name || reg.address)));
+                rebootStatus.appendChild(waitP);
+                let tries = 0;
+                const maxTries = 30;               // ~5 min at 10 s
+                const tick = async () => {
+                    tries++;
+                    let up = false;
+                    try {
+                        const tr = await API.post("/api/hosts/test", { address: reg.address });
+                        up = !!(tr && tr.success);
+                    } catch (e) { up = false; }
+                    if (up) {
+                        waitP.textContent = "✓ " + t("cr_reboot_back");
+                        waitP.style.color = "var(--success)";
+                        rebootBtn.disabled = false;
+                        return;
+                    }
+                    if (tries >= maxTries) {
+                        waitP.textContent = t("cr_reboot_timeout");
+                        rebootBtn.disabled = false;
+                        return;
+                    }
+                    waitP.textContent = t("cr_reboot_waiting") + " (" + tries + "/" + maxTries + ")";
+                    setTimeout(tick, 10000);
+                };
+                waitP.textContent = t("cr_reboot_waiting");
+                setTimeout(tick, 15000);           // let it actually go down first
+            } else {
+                rebootStatus.appendChild(h("div", { className: "muted" },
+                    t("cr_reboot_no_registered").replace("{h}", addr)));
+                rebootBtn.disabled = false;
+            }
+        };
+        actionRow.appendChild(rebootBtn);
+
+        // 4. Restore all guest configs
+        const guestCount = files.filter(f => f.category === "guests").length;
+        if (guestCount) {
+            const bulkBtn = h("button", { className: "btn btn-warning btn-sm" }, "4. " + t("cr_restore_all_guests").replace("{n}", guestCount));
+            bulkBtn.onclick = async () => {
+                if (!_confirmBulk(t("cr_bulk_confirm").replace("{n}", guestCount).replace("{h}", _crAddr()))) return;
+                bulkBtn.disabled = true;
+                try {
+                    const r = await API.post("/api/dr/restore-all-guests", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value, force: true,
+                    }));
+                    toast(t("cr_bulk_done").replace("{r}", r.restored || 0).replace("{s}", r.skipped || 0), r.success ? "success" : "error");
+                } catch (e) { toast(e.message || t("failed"), "error"); }
+                finally { bulkBtn.disabled = false; }
+            };
+            actionRow.appendChild(bulkBtn);
+        }
+
+        body.appendChild(actionRow);
+        body.appendChild(pkgStatus);
+        body.appendChild(rebootStatus);
 
         _CR_CATS.forEach(cat => {
             const items = files.filter(f => f.category === cat);
             if (!items.length) return;
-            body.appendChild(h("div", { className: "stat-label", style: "margin-top:14px;margin-bottom:6px" }, t("cr_cat_" + cat) + " (" + items.length + ")"));
+            const restorables = items.filter(f => f.restorable);
+
+            // Collapsible section, collapsed by default. The caret + title
+            // toggle the table; the "Restore all" button doesn't (stopPropagation).
+            const caret = h("span", { style: "display:inline-block;width:12px;transition:transform .15s;color:var(--text-secondary)" }, "▶");
+            const title = h("span", { className: "stat-label", style: "cursor:pointer;user-select:none" },
+                [caret, " " + t("cr_cat_" + cat) + " (" + items.length + ")"]);
+            const head = h("div", { style: "display:flex;align-items:center;gap:10px;margin-top:14px;margin-bottom:6px" }, [title]);
+
+            const tbl = h("table", { className: "data-table", style: "width:100%;display:none" });
+            let open = false;
+            const toggle = () => {
+                open = !open;
+                tbl.style.display = open ? "" : "none";
+                caret.style.transform = open ? "rotate(90deg)" : "";
+            };
+            title.onclick = toggle;
+
+            // One-click restore for the whole category (guests keep their own
+            // specialized bulk button; info has nothing restorable anyway).
+            if (restorables.length && cat !== "guests") {
+                const catBtn = h("button", { className: "btn btn-sm" },
+                    t("cr_restore_cat").replace("{n}", String(restorables.length)));
+                catBtn.onclick = async (ev) => {
+                    ev.stopPropagation();
+                    let msg = t("cr_cat_bulk_confirm")
+                        .replace("{n}", String(restorables.length))
+                        .replace("{c}", t("cr_cat_" + cat))
+                        .replace("{h}", _crAddr());
+                    if (cat === "network") msg += "\n\n" + t("cr_network_warn");
+                    if (restorables.some(f => f.path === "etc/fstab")) msg += "\n\n" + t("cr_fstab_warn");
+                    if (!_confirmBulk(msg)) return;
+                    catBtn.disabled = true;
+                    try {
+                        const r = await API.post("/api/dr/restore-category", Object.assign(_crTarget(), {
+                            backup_host: backupHostSel.value, file: backupSel.value,
+                            category: cat, force: true,
+                        }));
+                        toast(t("cr_cat_bulk_done")
+                            .replace("{r}", String(r.restored || 0))
+                            .replace("{s}", String(r.skipped || 0))
+                            .replace("{f}", String(r.failed || 0)),
+                            r.success ? "success" : "error");
+                    } catch (e) { toast(e.message || t("failed"), "error"); }
+                    finally { catBtn.disabled = false; }
+                };
+                head.appendChild(catBtn);
+            }
+            body.appendChild(head);
             const tb = h("tbody");
             items.forEach(f => {
                 tb.appendChild(h("tr", {}, [
@@ -5571,10 +5758,62 @@ async function viewConfigRestore() {
                     ]),
                 ]));
             });
-            const tbl = h("table", { className: "data-table", style: "width:100%" });
             tbl.appendChild(tb);
             body.appendChild(tbl);
         });
+
+        // ZFS properties (pool-level autotrim/autoexpand + dataset props like
+        // com.sun:auto-snapshot labels / quotas): not file-restorable, applied
+        // via a dedicated action. zfs send -R carries dataset props for
+        // replicated datasets, but NOT pool props -- this fills that gap.
+        if (files.some(f => f.path === "cmd/zfs-properties.txt" || f.path === "cmd/zpool-properties.txt")) {
+            const zp = h("div", { className: "card", style: "margin-top:16px" });
+            zp.appendChild(h("div", { className: "card-header" }, t("cr_zfsprops_title")));
+            const zpb = h("div", { className: "card-body" });
+            zpb.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("cr_zfsprops_intro")));
+            const prevBtn = h("button", { className: "btn btn-sm" }, t("cr_zfsprops_preview"));
+            const applyBtn = h("button", { className: "btn btn-warning btn-sm", style: "margin-left:8px" }, t("cr_zfsprops_apply"));
+            prevBtn.onclick = async () => {
+                let r;
+                try {
+                    r = await API.get("/api/dr/zfs-properties?backup_host=" + encodeURIComponent(backupHostSel.value) +
+                        "&file=" + encodeURIComponent(backupSel.value));
+                } catch (e) { toast(e.message || t("failed"), "error"); return; }
+                const rows = [];
+                (r.pools || []).forEach(p => rows.push(["zpool", p.name, p.property, p.value]));
+                (r.datasets || []).forEach(p => rows.push(["zfs", p.name, p.property, p.value]));
+                if (!rows.length) { openModal(t("cr_zfsprops_title"), `<p>${escapeHtml(t("cr_zfsprops_none"))}</p>`); return; }
+                const html = "<table class='data-table' style='width:100%;font-size:12px'><thead><tr>" +
+                    `<th></th><th>${escapeHtml(t("cr_zfsprops_obj"))}</th><th>Property</th><th>${escapeHtml(t("cr_zfsprops_value"))}</th>` +
+                    "</tr></thead><tbody>" +
+                    rows.map(x => `<tr><td>${escapeHtml(x[0])}</td><td style='font-family:monospace'>${escapeHtml(x[1])}</td><td style='font-family:monospace'>${escapeHtml(x[2])}</td><td style='font-family:monospace'>${escapeHtml(x[3])}</td></tr>`).join("") +
+                    "</tbody></table>";
+                openModal(t("cr_zfsprops_title") + " (" + rows.length + ")", html);
+            };
+            applyBtn.onclick = async () => {
+                if (!confirm(t("cr_zfsprops_confirm").replace("{h}", _crAddr()))) return;
+                applyBtn.disabled = true;
+                try {
+                    const r = await API.post("/api/dr/apply-zfs-properties", Object.assign(_crTarget(), {
+                        backup_host: backupHostSel.value, file: backupSel.value,
+                    }));
+                    toast(t("cr_zfsprops_done")
+                        .replace("{p}", String((r.pools_set || 0) + (r.datasets_set || 0)))
+                        .replace("{s}", String(r.skipped || 0))
+                        .replace("{f}", String(r.failed || 0)), r.success ? "success" : "error");
+                    const fails = (r.results || []).filter(x => x.status === "ERR").map(x => x.kind + " " + x.name + " : " + x.property);
+                    const np = r.not_present || [];
+                    let html = "";
+                    if (fails.length) html += `<p><b>${escapeHtml(t("cr_zfsprops_failed_h"))}</b></p><pre class="output" style="font-size:11px">${escapeHtml(fails.join("\n"))}</pre>`;
+                    if (np.length) html += `<p><b>${escapeHtml(t("cr_zfsprops_notpresent_h"))}</b></p><pre class="output" style="font-size:11px">${escapeHtml(np.join("\n"))}</pre>`;
+                    if (html) openModal(t("cr_zfsprops_title"), html);
+                } catch (e) { toast(e.message || t("failed"), "error"); }
+                finally { applyBtn.disabled = false; }
+            };
+            zpb.appendChild(h("div", { style: "display:flex;align-items:center;flex-wrap:wrap" }, [prevBtn, applyBtn]));
+            zp.appendChild(zpb);
+            body.appendChild(zp);
+        }
     }
 
     async function loadBackups() {

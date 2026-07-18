@@ -146,8 +146,8 @@ def test_script_includes_priv_when_requested():
 
 def test_script_captures_expected_commands():
     s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
-    for cmd in ("pveversion -v", "dpkg --get-selections", "ip route show",
-                "zpool status", "zfs list", "pvecm status"):
+    for cmd in ("pveversion -v", "dpkg --get-selections", "apt-mark showmanual",
+                "ip route show", "zpool status", "zfs list", "pvecm status"):
         assert cmd in s
 
 
@@ -165,6 +165,23 @@ def test_script_captures_apt_repos_excludes_auth():
     s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
     assert "/etc/apt" in s
     assert "--exclude=auth.conf" in s
+    # keyrings OUTSIDE /etc/apt (deb822 convention, e.g. bashclub) -- without
+    # them the restored .sources fail signature verification (NO_PUBKEY)
+    assert "/usr/share/keyrings/" in s
+
+
+def test_script_captures_fstab_and_vzdump_conf():
+    s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
+    assert "/etc/fstab" in s
+    assert "/etc/vzdump.conf" in s
+
+
+def test_script_captures_zfs_properties():
+    # pool + dataset properties (with source) so a restore can re-apply the
+    # locally-set ones (autotrim/autoexpand, com.sun:auto-snapshot labels, ...)
+    s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
+    assert "zpool get -H -o name,property,value,source all" in s
+    assert "zfs get -H -o name,property,value,source" in s
 
 
 def test_script_captures_zfs_tool_ancillary_configs():

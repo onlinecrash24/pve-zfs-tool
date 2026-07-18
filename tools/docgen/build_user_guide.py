@@ -225,6 +225,15 @@ CONTENT = [
          "intakt und hat eigene Live-Daten), erscheint eine deutliche Warnung — ein "
          "Zurücksenden ist dann in der Regel gar nicht nötig und würde von ZFS ohnehin "
          "verweigert werden, um die Live-Daten zu schützen."),
+("p", "Neu installierter Ziel-Host: Ein frisch aufgesetzter Host hat einen neuen SSH-Host-Key. "
+      "Der sendende Replikat-Host kennt aber noch den alten und würde die Übertragung mit "
+      "„REMOTE HOST IDENTIFICATION HAS CHANGED / Host key verification failed“ abbrechen. Dafür "
+      "gibt es die Option „Ziel-Host wurde neu installiert (neuen SSH-Host-Key übernehmen)“ — "
+      "standardmäßig aktiviert, da der Reverse-Sync ja gerade auf einen wiederhergestellten Host "
+      "zielt. Sie entfernt den veralteten Eintrag und liest den aktuellen Key neu ein (der "
+      "Fingerprint wird im Verlauf protokolliert). Nur ausschalten, wenn der Ziel-Host NICHT neu "
+      "installiert wurde. Schlägt der Sync doch mit einem Host-Key-Fehler fehl, weist eine "
+      "Meldung genau auf diese Option hin."),
 ("h2", "11.1 Nach dem Reverse-Sync: Guest-Konfiguration wiederherstellen"),
 ("p", "Der Reverse-Sync bringt ausschließlich die Festplatten-Daten zurück. Proxmox zeigt die "
       "VM oder den Container erst wieder an, wenn auch dessen Konfigurationsdatei existiert. "
@@ -267,27 +276,91 @@ CONTENT = [
     "Sonstiges /etc/pve",
     "System-Infos (nur zur Ansicht, nicht wiederherstellbar — z. B. die erfasste Paketliste)",
 ]),
-("p", "Jede Datei lässt sich vor dem Zurückspielen ansehen. Eine bereits vorhandene Datei wird "
-      "nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist."),
-("h2", "12.3 Alle Gast-Konfigurationen auf einmal"),
-("p", "Über einen einzelnen Button lassen sich alle im Backup enthaltenen VM-/CT-"
-      "Konfigurationen gebündelt wiederherstellen — bereits vorhandene werden dabei "
-      "übersprungen, sofern nicht ausdrücklich das Überschreiben aktiviert wurde."),
+("p", "Die Kategorien sind auf- und zuklappbar (standardmäßig zugeklappt) — ein Klick auf die "
+      "Überschrift zeigt bzw. verbirgt die Dateiliste. Jede Datei lässt sich vor dem "
+      "Zurückspielen ansehen. Beim Zurückspielen einer EINZELNEN Datei wird eine bereits "
+      "vorhandene nur überschrieben, wenn „Vorhandene Dateien überschreiben“ aktiviert ist "
+      "(sonst bleibt sie unangetastet — die Sicherheitsleine für den gezielten Restore). Neben "
+      "jeder Kategorie-Überschrift gibt es zudem einen Button „Alle wiederherstellen“."),
+("note", "Bulk-Aktionen („Alle Configs“, „Alle wiederherstellen“ je Kategorie, „Alle "
+         "Gast-Configs“) ersetzen vorhandene Dateien beim Fortfahren grundsätzlich — ein "
+         "vollständiger Restore soll die alten Configs ja zurückbringen. Ist „Überschreiben“ "
+         "nicht angehakt, weist der Bestätigungsdialog vor dem Ausführen ausdrücklich darauf "
+         "hin, damit vorhandene Stock-Dateien eines frisch installierten Hosts nicht "
+         "stillschweigend übersprungen werden."),
+("h2", "12.3 Die vier Haupt-Aktionen (in dieser Reihenfolge)"),
+("p", "Ganz oben stehen vier Buttons, die den empfohlenen Ablauf von links nach rechts "
+      "abbilden:"),
+("numbered", [
+    "Pakete nachinstallieren — der erste und wichtigste Schritt (siehe 12.4).",
+    "Alle Configs wiederherstellen — spielt alle Konfigurationen außer den Gast-Configs in "
+    "einem Rutsch zurück (siehe 12.5).",
+    "Reboot — startet den Ziel-Host neu, damit die wiederhergestellte Konfiguration wirksam "
+    "wird (siehe 12.6).",
+    "Alle Gast-Configs wiederherstellen — legt die VM-/CT-Definitionen an (siehe 12.7).",
+]),
 ("h2", "12.4 Pakete nachinstallieren"),
-("p", "Wendet die im Backup gesicherte Paketliste an (nur Pakete, die installiert bzw. "
-      "festgehalten waren — es werden nie Pakete entfernt) und installiert die fehlenden nach. "
-      "Läuft als Hintergrund-Vorgang, da dies je nach Anzahl der Pakete etwas dauern kann."),
-("warn", "Vor dem Nachinstallieren der Pakete müssen zuerst die Paketquellen (APT) "
-         "wiederhergestellt werden — sonst kennt der frische Host die benötigten Repositories "
-         "noch nicht."),
-("h2", "12.5 Empfohlener Ablauf nach einer Neuinstallation"),
+("p", "Dieser Schritt ist in sich abgeschlossen: Er stellt ZUERST die Paketquellen und "
+      "Signing-Keys aus dem Backup wieder her (Repositories inkl. der Keyrings unter "
+      "/usr/share/keyrings) und wendet dann die gesicherte Paketliste an (nur install/hold — "
+      "es werden nie Pakete entfernt). Läuft als Hintergrund-Vorgang mit Live-Fortschritt."),
+("note", "Da die Repos und Keys hier automatisch mitkommen, muss dafür vorher nichts separat "
+         "wiederhergestellt werden. Nach dem Lauf meldet das Tool ehrlich, wie viele der "
+         "angeforderten Pakete am Ende tatsächlich installiert sind — bleiben welche übrig "
+         "(z. B. weil ein Paket in keinem der Repos verfügbar ist), werden sie mitsamt "
+         "apt-Log aufgelistet, statt den Lauf fälschlich als voll erfolgreich zu melden."),
+("h2", "12.5 Alle Configs wiederherstellen"),
+("p", "Spielt mit einem Klick alle wiederherstellbaren Konfigurationsdateien zurück — Netzwerk, "
+      "Storage, APT-Quellen, Firewall, Jobs/Cron, User, SSH-Zugang und Sonstiges. Ausgenommen "
+      "sind nur die Gast-Configs (eigener Button) und die reinen Info-Ausgaben. Vorhandene "
+      "Dateien werden dabei mit den Versionen aus dem Backup überschrieben (siehe Hinweis in "
+      "12.2)."),
+("warn", "Hierin sind auch die Netzwerk-Konfiguration und /etc/fstab enthalten, die auf "
+         "Netzwerkkarten und Datenträger des ALTEN Hosts verweisen. Nach dem Zurückspielen "
+         "prüfen und bei Bedarf neu starten — Erreichbarkeit oder Boot-Verhalten können sich "
+         "ändern."),
+("h2", "12.6 Reboot"),
+("p", "Startet den Ziel-Host neu — nötig, damit die wiederhergestellte Konfiguration (Netzwerk, "
+      "fstab, Dienste, Kernel) tatsächlich wirksam wird. Der Neustart wird verzögert im "
+      "Hintergrund ausgelöst, sodass die Meldung sauber zurückkommt."),
+("p", "Danach passiert etwas Praktisches: Weil mit den Configs auch das Netzwerk und die "
+      "authorized_keys zurückgespielt wurden, ist der Host nach dem Neustart wieder per "
+      "SSH-Schlüssel des Tools erreichbar. Die Oberfläche stellt den Ziel-Host deshalb "
+      "automatisch von „Anderer Host (IP + Zugangsdaten)“ auf „Registrierter Host“ um und wählt "
+      "den passenden registrierten Host aus. Anschließend wartet sie, bis der Host wieder online "
+      "ist, und meldet das — erst dann sind die Gast-Configs sinnvoll."),
+("note", "Gibt es keinen registrierten Host mit dieser Adresse, bleibt das Ad-hoc-Ziel bestehen "
+         "und ein Hinweis erscheint. Kommt der Host nicht zurück, meldet die Oberfläche das nach "
+         "einigen Minuten — dann lohnt ein Blick auf Netzwerk-Config und /etc/fstab an der "
+         "Konsole."),
+("h2", "12.7 Alle Gast-Konfigurationen auf einmal"),
+("p", "Stellt alle im Backup enthaltenen VM-/CT-Konfigurationen gebündelt wieder her — wie die "
+      "anderen Bulk-Aktionen überschreibt sie vorhandene Configs beim Fortfahren (mit dem "
+      "Hinweis-Dialog, falls „Überschreiben“ nicht angehakt ist)."),
+("h2", "12.8 ZFS-Eigenschaften wiederherstellen"),
+("p", "Neben den Konfigurationsdateien lassen sich auch die lokal gesetzten ZFS-Eigenschaften "
+      "aus dem Backup zurückspielen — Pool-Eigenschaften wie autotrim/autoexpand sowie "
+      "Dataset-Eigenschaften wie Kompression, Quotas und die com.sun:auto-snapshot-Labels samt "
+      "ihrer Vererbung. Der Bereich am Ende der Ansicht bietet „Vorschau“ (zeigt, welche "
+      "Eigenschaften erfasst sind) und „ZFS-Eigenschaften anwenden“."),
+("note", "Der Reverse-Sync bringt die Dataset-Eigenschaften der replizierten Datasets ohnehin "
+         "schon mit. Diese Aktion schließt die verbleibende Lücke: Pool-Eigenschaften (die "
+         "kommen über kein send/recv zurück und stehen beim frisch angelegten Pool auf Default) "
+         "und Eigenschaften nicht-replizierter Datasets. Angewendet wird nur auf bereits "
+         "vorhandene Pools/Datasets; nur bei der Erstellung setzbare Eigenschaften werden "
+         "übersprungen und gemeldet."),
+("h2", "12.9 Empfohlener Ablauf nach einer Neuinstallation"),
 ("numbered", [
     "Proxmox VE frisch installieren (möglichst gleiche Version)",
     "PVE Config Restore öffnen, Ad-hoc-Ziel mit IP + Passwort des frischen Hosts wählen",
-    "Netzwerk-Konfiguration wiederherstellen (danach ggf. Neustart/Reload nötig)",
-    "Paketquellen (APT) wiederherstellen, dann Pakete nachinstallieren",
-    "Storage-Konfiguration, alle Gast-Konfigurationen und SSH-Zugang wiederherstellen",
+    "„Pakete nachinstallieren“ — bringt Repos, Keys und Pakete in einem Schritt",
+    "„Alle Configs wiederherstellen“ — Netzwerk, Storage, Firewall, User, SSH usw.",
+    "„Reboot“ — danach ist der Host per Key erreichbar; das Ziel stellt sich automatisch auf "
+    "den registrierten Host um",
+    "„Alle Gast-Configs wiederherstellen“",
     "In Disaster Recovery die VM-/CT-Festplatten per Reverse-Sync zurückholen",
+    "„ZFS-Eigenschaften anwenden“ — Pool-Eigenschaften (autotrim/autoexpand) und ggf. "
+    "nicht-replizierte Dataset-Eigenschaften nachziehen",
     "Gäste starten",
 ]),
 
