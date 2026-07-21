@@ -167,6 +167,11 @@ def _has_dejavu():
     return os.path.exists(os.path.join(FONT_DIR, "DejaVuSans.ttf"))
 
 
+# Aspect ratio (width/height) of logo-small.png, used to place the title clear
+# of the logo in the PDF header. Update if the logo asset's proportions change.
+_LOGO_ASPECT = 2080 / 480
+
+
 def _has_logo():
     """Check if logo-small.png exists."""
     return os.path.exists(os.path.join(IMG_DIR, "logo-small.png"))
@@ -220,16 +225,18 @@ class ReportPDF(FPDF):
     def header(self):
         # --- Logo + Title row ---
         y_start = self.get_y()
+        logo_h = 11
         if _has_logo():
             try:
-                self.image(os.path.join(IMG_DIR, "logo-small.png"), x=self.l_margin, y=y_start, h=12)
+                self.image(os.path.join(IMG_DIR, "logo-small.png"), x=self.l_margin, y=y_start, h=logo_h)
             except Exception:
                 pass
 
-        # Title — right-aligned or centered
+        # Title — placed just after the logo (offset derived from the logo's
+        # actual width so a wider logo can't overlap the title), else centered.
         self._f("B", 16)
         self.set_text_color(*COLORS["accent"])
-        title_x = self.l_margin + 45 if _has_logo() else self.l_margin
+        title_x = self.l_margin + logo_h * _LOGO_ASPECT + 6 if _has_logo() else self.l_margin
         self.set_xy(title_x, y_start)
         self.cell(self.w - title_x - self.r_margin, 7, self._s("AI Report"), align="L" if _has_logo() else "C")
 

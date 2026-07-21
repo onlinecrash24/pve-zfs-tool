@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="app/static/img/logo.png" alt="PVE ZFS Tool" width="500">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="app/static/img/logo-dark-bg.png">
+    <img src="app/static/img/logo-light-bg.png" alt="PVE ZFS Tool" width="500">
+  </picture>
 </p>
 
 <p align="center">A Docker-based web application for managing ZFS pools, datasets, snapshots, and auto-snapshots across one or more Proxmox VE hosts via SSH.</p>
