@@ -109,7 +109,7 @@ body {
     border-left-color: var(--accent);
 }
 
-.nav-item .icon { font-size: 16px; width: 20px; text-align: center; }
+.nav-item .icon { width: 18px; height: 18px; flex-shrink: 0; display: block; }
 
 /* Host selector in sidebar */
 .host-selector {
