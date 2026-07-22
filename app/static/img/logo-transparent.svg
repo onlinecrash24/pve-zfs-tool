@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="520" height="120" viewBox="0 0 520 120">
 <g>
-<rect x="60" y="35" width="88" height="20" rx="10" fill="#f3903f"></rect>
-<rect x="60" y="61" width="88" height="20" rx="10" fill="#e8791f"></rect>
-<rect x="60" y="87" width="88" height="20" rx="10" fill="#d9600f"></rect>
+<rect x="60" y="35" width="88" height="20" rx="10" fill="#4a94d6"></rect>
+<rect x="60" y="61" width="88" height="20" rx="10" fill="#3b82c4"></rect>
+<rect x="60" y="87" width="88" height="20" rx="10" fill="#2f6ba8"></rect>
 </g>
 <text x="172" y="76" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="52" font-weight="800" fill="#161513">PVE<tspan font-weight="400" fill="#161513" fill-opacity="0.5" dx="10">ZFS Tool</tspan></text>
 </svg>
