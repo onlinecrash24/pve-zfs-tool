@@ -45,13 +45,26 @@ def save_hosts(hosts):
             json.dump(hosts, f, indent=2)
 
 
-def get_host_fingerprint(address, port=22):
-    """Fetch SSH host key fingerprint from a remote host (TOFU step 1)."""
+def get_host_fingerprint(address, port=22, timeout=6):
+    """Fetch SSH host key fingerprint from a remote host (TOFU step 1).
+
+    Uses an explicit connect + handshake timeout. Passing a plain
+    ``(address, port)`` tuple to ``paramiko.Transport`` connects with NO
+    timeout, so an unreachable / black-holed host (firewall drops the SYN)
+    hangs on the OS-default TCP timeout -- minutes -- which stalls the
+    add-host request and, on the single-worker gunicorn, can get the worker
+    killed and take the whole app down. Creating the socket ourselves with a
+    timeout bounds the wait.
+    """
+    sock = None
+    transport = None
     try:
-        transport = paramiko.Transport((address, int(port)))
-        transport.connect()
+        sock = socket.create_connection((address, int(port)), timeout=timeout)
+        transport = paramiko.Transport(sock)
+        transport.banner_timeout = timeout
+        transport.handshake_timeout = timeout
+        transport.start_client(timeout=timeout)
         key = transport.get_remote_server_key()
-        transport.close()
         fp = hashlib.sha256(key.asbytes()).hexdigest()
         fp_display = ":".join(fp[i:i+2] for i in range(0, 32, 2))  # first 16 bytes
         return {
@@ -62,6 +75,17 @@ def get_host_fingerprint(address, port=22):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+    finally:
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                pass
+        elif sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
 def add_host(name, address, port=22, user="root"):

@@ -13,6 +13,35 @@ def test_run_command_password_bypasses_pool(monkeypatch):
     assert sm.run_command({"address": "h"}, "cmd")["via"] == "pooled"
 
 
+def test_get_host_fingerprint_bounds_connect_with_timeout(monkeypatch):
+    # An unreachable host must fail fast, not hang on the OS-default TCP
+    # timeout: the connect has to go through socket.create_connection WITH a
+    # timeout (not the timeout-less paramiko.Transport((addr, port)) tuple).
+    calls = {}
+    def fake_create_connection(addr, timeout=None):
+        calls["addr"] = addr
+        calls["timeout"] = timeout
+        raise OSError("network unreachable")
+    monkeypatch.setattr(sm.socket, "create_connection", fake_create_connection)
+    r = sm.get_host_fingerprint("10.99.99.99", 22, timeout=3)
+    assert r["success"] is False
+    assert calls["addr"] == ("10.99.99.99", 22)
+    assert calls["timeout"] == 3
+
+
+def test_add_host_adds_even_when_fingerprint_unreachable(tmp_path, monkeypatch):
+    # Adding an unreachable host still registers it (TOFU happens later on the
+    # first real connection); it must not hang or fail on the fingerprint step.
+    monkeypatch.setattr(sm, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(sm, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.setattr(sm, "KNOWN_HOSTS", str(tmp_path / "known_hosts"))
+    monkeypatch.setattr(sm, "get_host_fingerprint",
+                        lambda addr, port=22: {"success": False, "error": "timeout"})
+    ok, _ = sm.add_host("pve9", "10.99.99.99", 22, "root")
+    assert ok is True
+    assert any(h["address"] == "10.99.99.99" for h in sm.load_hosts())
+
+
 def test_forget_host_key_removes_only_that_address(tmp_path, monkeypatch):
     kh = str(tmp_path / "known_hosts")
     monkeypatch.setattr(sm, "KNOWN_HOSTS", kh)
