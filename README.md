@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="app/static/img/logo-dark-bg.png">
-    <img src="app/static/img/logo-light-bg.png" alt="PVE ZFS Tool" width="500">
+    <source media="(prefers-color-scheme: dark)" srcset="app/static/img/logo.svg">
+    <img src="app/static/img/logo-transparent.svg" alt="PVE ZFS Tool" width="500">
   </picture>
 </p>
 
