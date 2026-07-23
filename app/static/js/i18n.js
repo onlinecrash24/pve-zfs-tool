@@ -161,7 +161,7 @@ const TRANSLATIONS = {
         dr_reverse_ok: "Reverse sync completed",
         dr_reverse_failed: "Reverse sync failed",
         dr_reverse_failed_intro: "Reverse sync exited with an error.",
-        nav_proxmox: "Proxmox",
+        nav_proxmox: "Proxmox VE",
         nav_vms_cts: "VMs & CTs",
         nav_system: "System",
         nav_health: "Health",
@@ -803,6 +803,8 @@ const TRANSLATIONS = {
         ev_health_warning: "Health Warning",
         ev_host_offline: "Host Offline",
         ev_auto_snapshot: "Auto-Snapshot Events",
+        ev_replication_lag: "Replication lag",
+        ev_host_backup_failed: "Host backup failed",
         ev_ai_report: "AI Report Generated",
 
         // Metrics
@@ -1217,7 +1219,7 @@ const TRANSLATIONS = {
         dr_reverse_ok: "Reverse-Sync abgeschlossen",
         dr_reverse_failed: "Reverse-Sync fehlgeschlagen",
         dr_reverse_failed_intro: "Reverse-Sync wurde mit Fehler beendet.",
-        nav_proxmox: "Proxmox",
+        nav_proxmox: "Proxmox VE",
         nav_vms_cts: "VMs & CTs",
         nav_system: "System",
         nav_health: "Zustand",
@@ -1859,6 +1861,8 @@ const TRANSLATIONS = {
         ev_health_warning: "Zustandswarnung",
         ev_host_offline: "Host offline",
         ev_auto_snapshot: "Auto-Snapshot-Ereignisse",
+        ev_replication_lag: "Replikations-Verzögerung",
+        ev_host_backup_failed: "Host-Backup fehlgeschlagen",
         ev_ai_report: "KI-Bericht erstellt",
 
         // Metrics

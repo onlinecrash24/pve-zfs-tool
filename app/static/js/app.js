@@ -6038,6 +6038,8 @@ async function viewNotifications() {
         health_warning: t("ev_health_warning"),
         host_offline: t("ev_host_offline"),
         auto_snapshot: t("ev_auto_snapshot"),
+        replication_lag: t("ev_replication_lag"),
+        host_backup_failed: t("ev_host_backup_failed"),
     };
 
     const evGrid = h("div", { className: "grid grid-3" });

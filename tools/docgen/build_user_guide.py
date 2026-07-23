@@ -56,7 +56,7 @@ CONTENT = [
 ("bullets", [
     "Übersicht — Startseite und Hosts-Verwaltung",
     "ZFS — Pools, Datasets, Snapshots, Snapshot-Prüfung, Replikation, Disaster Recovery",
-    "Proxmox — VMs & CTs, PVE Config Restore",
+    "Proxmox VE — VMs & CTs, PVE Config Restore",
     "System — Zustand, Metriken, Audit-Log, Benachrichtigungen, KI-Berichte",
 ]),
 ("p", "Oben rechts in der Seitenleiste lässt sich die Sprache (Deutsch/Englisch) umschalten und "
