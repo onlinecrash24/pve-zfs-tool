@@ -1160,6 +1160,43 @@ def _compute_next_run(now, entry):
     return candidate.strftime("%Y-%m-%d %H:%M")
 
 
+def _period_run_key(now, interval):
+    """The last-run key for the current period (must match the loop's key):
+    ISO week for weekly, calendar date for daily."""
+    if interval == "weekly":
+        iso = now.isocalendar()
+        return f"{iso[0]}-W{iso[1]}"
+    return now.strftime("%Y-%m-%d")
+
+
+def _period_target_passed(now, entry):
+    """Has this schedule's target moment for the current period already passed
+    at ``now``? Used to seed ONLY already-elapsed schedules at (re)start, so a
+    restart before the scheduled hour doesn't wrongly mark today as done and
+    skip an upcoming run."""
+    hour = int(entry.get("hour", 6))
+    if entry.get("interval") == "weekly":
+        wd = int(entry.get("weekday", 0))
+        if now.weekday() > wd:
+            return True                       # the weekday already went by this week
+        if now.weekday() == wd and now.hour >= hour:
+            return True                       # today is the day and the hour passed
+        return False
+    return now.hour >= hour                   # daily: just the hour
+
+
+def _seed_elapsed_schedules(now):
+    """Seed ``_last_run_keys`` for enabled schedules whose current-period
+    target has already passed, so they don't fire immediately on (re)start.
+    Upcoming schedules are deliberately left unseeded so a restart before the
+    scheduled hour still fires them at their time. setdefault keeps this
+    idempotent -- it never clobbers a schedule that already ran this period."""
+    for entry in get_active_schedules():
+        if entry["enabled"] and _period_target_passed(now, entry):
+            _last_run_keys.setdefault(entry["key"],
+                                      _period_run_key(now, entry["interval"]))
+
+
 def _scheduler_loop():
     """Background thread for scheduled report generation.
 
@@ -1187,11 +1224,7 @@ def _scheduler_loop():
 
                 interval = entry["interval"]
                 target_hour = entry["hour"]
-
-                if interval == "weekly":
-                    run_key = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
-                else:
-                    run_key = now.strftime("%Y-%m-%d")
+                run_key = _period_run_key(now, interval)
 
                 should_run = False
                 if now.hour >= target_hour and _last_run_keys.get(entry["key"]) != run_key:
@@ -1286,16 +1319,21 @@ def start_scheduler():
     """
     global _scheduler_thread, _last_run_key
     with _scheduler_start_lock:
+        # Seed last-run for schedules whose target already passed -- runs on
+        # every call (startup AND the POST /api/ai/config re-arm) so a
+        # just-saved past-time schedule doesn't fire immediately either.
+        # Crucially, schedules whose hour is still UPCOMING today are left
+        # unseeded, so a restart before that hour still fires them (the bug:
+        # the old blanket seed marked every schedule "done today" and skipped
+        # any run scheduled after the restart time).
+        now = tz_now()
+        if _last_run_key is None:
+            _last_run_key = _period_run_key(now, "daily")
+        _seed_elapsed_schedules(now)
+
         # Only start a new thread if one isn't already running
         if _scheduler_thread and _scheduler_thread.is_alive():
             return
-        # Seed last_run for all known schedules so we don't immediately
-        # trigger on startup
-        today = tz_now().strftime("%Y-%m-%d")
-        if _last_run_key is None:
-            _last_run_key = today
-        for entry in get_active_schedules():
-            _last_run_keys.setdefault(entry["key"], today)
         _scheduler_stop.clear()
         _scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True)
         _scheduler_thread.start()
