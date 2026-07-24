@@ -106,6 +106,7 @@ IMPORTANT — Proxmox-specific rules you MUST follow:
 - **Snapshot integrity**: ZFS scrub already validates ALL data including snapshots via checksums. A successful scrub with 0 errors confirms snapshot chain integrity. Do NOT recommend separate checksum verification — scrub covers this.
 - **ZDB deep diagnostics**: If a pool is DEGRADED, FAULTED, or has data errors, the data may include a "zdb_diagnostics" section with low-level pool internals (block stats, vdev tree, disk labels). Use this data to provide detailed root-cause analysis: which vdev failed, txg state, block allocation issues. If zdb_diagnostics is absent, the pools are healthy — do NOT recommend running zdb manually.
 - **Fragmentation on SSD/NVMe is NORMAL**: ZFS fragmentation percentage reflects free-space fragmentation, not file fragmentation. On SSD/NVMe pools (which is the vast majority of Proxmox installations), high fragmentation (even 50–90%) has NO measurable performance impact because SSDs have no seek time. Do NOT flag fragmentation as an issue unless the pool is demonstrably on spinning rust (HDDs) AND fragmentation exceeds 50%. Never recommend "defragmentation" — ZFS cannot defragment in-place; the only remedy is send/recv to a fresh pool, which is almost always unnecessary. When in doubt, assume SSD/NVMe and ignore fragmentation entirely.
+- **SMART status "N/A", "Unknown" or "smartctl fehlt"**: Only "FAILED" is a fault. "PASSED" is healthy. "N/A"/"Unknown" mean SMART data is unavailable for that drive (virtual disk, controller/HBA that needs a device type smartctl couldn't reach, or a passthrough layer) and "smartctl fehlt" means smartmontools is not installed on the host. Treat all of these as INFORMATIONAL, not a defect — do NOT tag section 5 [WARN] just because some drives show no data. Mention them briefly as "no SMART data available" and, for "smartctl fehlt", suggest installing smartmontools.
 
 Be concise but thorough. Focus on actionable insights. Avoid false positives.
 Write the entire report in English.
@@ -171,6 +172,7 @@ WICHTIG — Proxmox-spezifische Regeln, die du UNBEDINGT beachten musst:
 - **Snapshot-Integrität**: ZFS Scrub validiert bereits ALLE Daten inklusive Snapshots per Checksumme. Ein erfolgreicher Scrub mit 0 Fehlern bestätigt die Integrität der Snapshot-Kette. Empfehle KEINE separate Checksummen-Prüfung — Scrub deckt dies ab.
 - **ZDB-Tiefendiagnose**: Falls ein Pool DEGRADED, FAULTED oder Datenfehler hat, können die Daten eine "zdb_diagnostics"-Sektion enthalten mit Low-Level Pool-Internals (Block-Statistiken, vdev-Baum, Disk-Labels). Nutze diese Daten für eine detaillierte Ursachenanalyse: welches vdev ausgefallen ist, txg-Status, Block-Allokationsprobleme. Falls zdb_diagnostics fehlt, sind die Pools gesund — empfehle NICHT, zdb manuell auszuführen.
 - **Fragmentierung auf SSD/NVMe ist NORMAL**: Der ZFS-Fragmentierungs-Prozentsatz bezieht sich auf die Fragmentierung des freien Speichers, nicht auf Datei-Fragmentierung. Auf SSD/NVMe-Pools (der absolute Großteil aller Proxmox-Installationen) hat hohe Fragmentierung (auch 50–90 %) KEINEN messbaren Performance-Einfluss, da SSDs keine Suchzeit haben. Melde Fragmentierung NICHT als Problem, außer der Pool läuft nachweislich auf rotierenden HDDs UND die Fragmentierung übersteigt 50 %. Empfehle NIEMALS "Defragmentierung" — ZFS kann nicht in-place defragmentieren; die einzige Abhilfe wäre send/recv auf einen neuen Pool, was fast nie nötig ist. Im Zweifel: SSD/NVMe annehmen und Fragmentierung ignorieren.
+- **SMART-Status "N/A", "Unknown" oder "smartctl fehlt"**: Nur "FAILED" ist ein Defekt. "PASSED" ist gesund. "N/A"/"Unknown" bedeuten, dass für dieses Laufwerk keine SMART-Daten verfügbar sind (virtuelle Disk, Controller/HBA, den smartctl ohne passenden Gerätetyp nicht erreicht, oder eine Passthrough-Schicht); "smartctl fehlt" heißt, smartmontools ist auf dem Host nicht installiert. Behandle all das als INFORMATIV, nicht als Mangel — tagge Abschnitt 5 NICHT [WARN], nur weil einzelne Laufwerke keine Daten liefern. Erwähne sie kurz als "keine SMART-Daten verfügbar" und empfiehl bei "smartctl fehlt" die Installation von smartmontools.
 
 Sei prägnant aber gründlich. Fokus auf umsetzbare Erkenntnisse. Vermeide Fehlalarme.
 Schreibe den gesamten Bericht auf Deutsch.
@@ -762,8 +764,8 @@ def _compute_section_statuses(data):
                 st = str(d.get("status", "")).upper()
                 if "FAIL" in st:
                     smart = worsen(smart, "crit")
-                elif st and "PASS" not in st:
-                    smart = worsen(smart, "warn")
+                # PASSED -> ok; N/A / Unknown / "smartctl fehlt" are informational
+                # (missing SMART data, not a fault) and must not raise a warning.
 
         ra = h.get("retention_analysis") or {}
         snap_issue = False
