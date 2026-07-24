@@ -6458,6 +6458,16 @@ async function viewAI() {
     notifCard.appendChild(notifBody);
     container.appendChild(notifCard);
 
+    // Save bar right under the schedule/notification cards. The only other
+    // save button lives at the top (in the provider card) and scrolls out of
+    // view here -- so a user who toggles a schedule down here never saw it and
+    // the change was silently lost (the schedules never ran, while "test now"
+    // still worked because it fires immediately, independent of saved state).
+    const schedSaveBar = h("div", { style: "margin-top:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap" });
+    schedSaveBar.appendChild(h("button", { className: "btn btn-primary", id: "ai-save-btn2" }, t("ai_save_config")));
+    schedSaveBar.appendChild(h("span", { style: "font-size:12px;color:var(--text-secondary)" }, t("ai_sched_save_hint")));
+    container.appendChild(schedSaveBar);
+
     // (the three cards above already added themselves to the container)
 
     // ---- Card 2d: Generate now ----
@@ -6620,10 +6630,12 @@ async function viewAI() {
     });
 
     // Save config
-    document.getElementById("ai-save-btn").addEventListener("click", async () => {
-        await _saveAIConfig();
-        toast(t("ai_config_saved"), "success");
-    });
+    for (const id of ["ai-save-btn", "ai-save-btn2"]) {
+        document.getElementById(id).addEventListener("click", async () => {
+            await _saveAIConfig();
+            toast(t("ai_config_saved"), "success");
+        });
+    }
 
     // Reset system prompt to default
     document.getElementById("ai-prompt-reset").addEventListener("click", () => {

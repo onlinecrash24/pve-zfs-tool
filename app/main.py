@@ -1208,7 +1208,23 @@ def api_snapshot_tags_set():
 # API: Notifications
 # ---------------------------------------------------------------------------
 
-from app.notifications import mask_secret as _mask_secret, resolve_masked as _resolve_masked
+from app.notifications import (mask_secret as _mask_secret,
+                               resolve_masked as _resolve_masked,
+                               is_masked as _is_masked)
+
+
+def _masked_secret_error(what):
+    """The effective secret is still a masked placeholder ("ab...yz").
+
+    That means the *stored* value is itself a mask -- the UI can't show the
+    difference (masking a mask returns the same string), and sending it to the
+    provider just yields a confusing 401. Say what's actually wrong instead.
+    """
+    return jsonify({
+        "success": False,
+        "detail": (f"The stored {what} is only a masked placeholder, not a real "
+                   f"secret. Enter the full {what} again and save, then test."),
+    })
 
 
 @app.route("/api/notifications/config", methods=["GET"])
@@ -1254,6 +1270,8 @@ def api_test_telegram():
     # Allow masked token: resolve to stored value
     token = _resolve_masked(data.get("bot_token", ""),
                             load_notify_config().get("telegram", {}).get("bot_token", ""))
+    if _is_masked(token):
+        return _masked_secret_error("bot token")
     result = test_telegram(token, data.get("chat_id", ""))
     return jsonify(result)
 
@@ -1264,6 +1282,8 @@ def api_test_gotify():
     # Allow masked token: resolve to stored value
     token = _resolve_masked(data.get("token", ""),
                             load_notify_config().get("gotify", {}).get("token", ""))
+    if _is_masked(token):
+        return _masked_secret_error("app token")
     result = test_gotify(data.get("url", ""), token)
     return jsonify(result)
 
@@ -1274,6 +1294,8 @@ def api_test_matrix():
     # Allow masked token: resolve to stored value
     token = _resolve_masked(data.get("access_token", ""),
                             load_notify_config().get("matrix", {}).get("access_token", ""))
+    if _is_masked(token):
+        return _masked_secret_error("access token")
     result = test_matrix(
         data.get("homeserver", ""),
         token,
@@ -1289,6 +1311,8 @@ def api_test_email():
     data["smtp_password"] = _resolve_masked(
         data.get("smtp_password", ""),
         load_notify_config().get("email", {}).get("smtp_password", ""))
+    if _is_masked(data["smtp_password"]):
+        return _masked_secret_error("SMTP password")
     result = test_email(data)
     return jsonify(result)
 
