@@ -37,6 +37,16 @@ GAP_MIN_DELTAS = 3
 # a genuinely stalled replication, matching the replication monitor's WARN.
 REPLICA_STALE_FACTOR = 2
 
+# A snapshot at (or before) a dataset's own creation is a base / received
+# snapshot -- e.g. the held replication-base snapshot a migration leaves behind,
+# whose creation travels with the send stream and predates the local dataset.
+# The empty stretch between such a base snapshot and the first regularly
+# scheduled snapshot is the dataset's cold-start / pre-existence period on this
+# host, not a snapshot outage, so that "gap" must not be reported. The small
+# tolerance absorbs source/destination clock skew (a received snapshot's
+# creation is source time; the local dataset creation is the receive time).
+LEADING_GAP_TOLERANCE = 3600  # 1 hour
+
 
 def format_age(seconds):
     """Format seconds into a human-readable age string."""
@@ -55,7 +65,8 @@ def format_age(seconds):
         return f"{days}d {hours}h"
 
 
-def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None):
+def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None,
+                      dataset_creation=None):
     """Analyze snapshot health from get_snapshot_ages() output.
 
     Args:
@@ -69,8 +80,14 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
             excluded from the count-mismatch comparison (counted per label in
             ``excluded_datasets`` -- every present disabled dataset, not just
             the mismatching ones). Stale detection still applies but with
-            REPLICA_STALE_FACTOR x the threshold (replication lag); gap
-            detection is unchanged.
+            REPLICA_STALE_FACTOR x the threshold (replication lag).
+        dataset_creation: optional {dataset: creation_epoch} (from
+            get_dataset_creations()). Used to suppress a dataset's cold-start
+            gap: when the snapshot before a hole is at/before the dataset's
+            creation it is a base / received snapshot (e.g. a held
+            replication-base snapshot), so the emptiness is the pre-existence
+            period on this host, not an outage. Without it, gap detection
+            behaves as before (every hole reported).
 
     Returns:
         dict with: per_label, missing_labels, manual_snapshots, datasets_analyzed
@@ -79,6 +96,8 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
         retention_cfg = {}
     if autosnap_disabled is None:
         autosnap_disabled = set()
+    if dataset_creation is None:
+        dataset_creation = {}
 
     now_epoch = int(time.time())
     snap_ages = snap_age_data.get("datasets", {})
@@ -162,18 +181,29 @@ def analyze_snapshots(snap_age_data, retention_cfg=None, autosnap_disabled=None)
             if len(deltas) >= GAP_MIN_DELTAS:
                 cadence = sorted(deltas)[len(deltas) // 2]   # robust median-ish
                 gap_threshold = cadence * GAP_FACTOR
+                ds_creation = dataset_creation.get(ds)
                 if gap_threshold > 0:
                     for idx, delta in enumerate(deltas):
-                        if delta > gap_threshold:
-                            lg["gaps"].append({
-                                "dataset": ds,
-                                "gap_hours": round(delta / 3600, 1),
-                                "from_epoch": timestamps[idx],
-                                "to_epoch": timestamps[idx + 1],
-                                "from_age": format_age(now_epoch - timestamps[idx]),
-                                "to_age": format_age(now_epoch - timestamps[idx + 1]),
-                                "threshold_hours": round(gap_threshold / 3600, 1),
-                            })
+                        if delta <= gap_threshold:
+                            continue
+                        # Skip a dataset's cold-start gap: when the snapshot
+                        # before the hole is at/before the dataset's creation it
+                        # is a base / received snapshot (e.g. a held
+                        # replication-base snapshot), so the emptiness is the
+                        # period before regular snapshotting began here, not an
+                        # outage. Migrated / replicated disks are the usual cause.
+                        if (ds_creation is not None
+                                and timestamps[idx] <= ds_creation + LEADING_GAP_TOLERANCE):
+                            continue
+                        lg["gaps"].append({
+                            "dataset": ds,
+                            "gap_hours": round(delta / 3600, 1),
+                            "from_epoch": timestamps[idx],
+                            "to_epoch": timestamps[idx + 1],
+                            "from_age": format_age(now_epoch - timestamps[idx]),
+                            "to_age": format_age(now_epoch - timestamps[idx + 1]),
+                            "threshold_hours": round(gap_threshold / 3600, 1),
+                        })
 
     # Build summary
     for label, lg in label_global.items():

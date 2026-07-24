@@ -1156,12 +1156,13 @@ def api_snapshot_check():
     if err:
         return err, code
     from app.snapshot_analysis import analyze_snapshots
-    from app.zfs_commands import get_autosnap_disabled_datasets
+    from app.zfs_commands import get_autosnap_disabled_datasets, get_dataset_creations
     snap_age_data = get_snapshot_ages(host)   # respects the per-host tag selection
     auto_snap = get_auto_snapshot_status(host)
     retention_cfg = auto_snap.get("retention_policy", {})
     analysis = analyze_snapshots(snap_age_data, retention_cfg,
-                                 autosnap_disabled=get_autosnap_disabled_datasets(host))
+                                 autosnap_disabled=get_autosnap_disabled_datasets(host),
+                                 dataset_creation=get_dataset_creations(host))
     analysis["retention_policy"] = retention_cfg
     return jsonify(analysis)
 

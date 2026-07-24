@@ -783,6 +783,28 @@ def get_autosnap_disabled_datasets(host):
     return disabled
 
 
+def get_dataset_creations(host):
+    """Map of dataset -> creation epoch for all filesystems and volumes.
+
+    Used by retention gap analysis to suppress a dataset's cold-start gap: a
+    snapshot at/before the dataset's own creation is a base / received snapshot
+    (e.g. the held replication-base snapshot a migration leaves behind), so the
+    empty stretch before regular snapshotting is not an outage. One bulk
+    command, cached."""
+    result = run_command(host, "zfs list -Hpo name,creation -t filesystem,volume",
+                         cache_ttl=_TTL_MED)
+    creations = {}
+    if result.get("success"):
+        for line in result["stdout"].splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                try:
+                    creations[parts[0].strip()] = int(parts[1])
+                except (ValueError, IndexError):
+                    continue
+    return creations
+
+
 def discover_snapshot_tags(host):
     """Tag -> snapshot count across all snapshots on the host (for the
     Snapshot Check tag-selection UI). Reuses the cached snapshot listing."""
