@@ -276,7 +276,13 @@ def reverse_sync_async(target_host: Dict[str, Any],
             "-o BatchMode=yes -o StrictHostKeyChecking=yes "
             f"-o ConnectTimeout=20 -p {_port}"
         )
+        # `set -o pipefail` so a failed `zfs send` (source snapshot gone, send
+        # error) is not masked by the receiver exiting 0 -- otherwise a broken
+        # resend would be reported as a successful DR restore. Guarded with
+        # 2>/dev/null so a non-bash /bin/sh just ignores it (no worse than
+        # before); Proxmox's root shell is bash, where it takes effect.
         cmd = (
+            f"set -o pipefail 2>/dev/null; "
             f"zfs send -R {shlex.quote(full_snap)} | "
             f"ssh {ssh_opts} {shlex.quote(_user + '@' + _addr)} "
             f"'zfs recv {recv_flag} {shlex.quote(_src_ds)}' "

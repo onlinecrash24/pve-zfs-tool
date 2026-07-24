@@ -418,9 +418,23 @@ def destroy_snapshot(host, full_name, recursive=False):
         cmd += " -r"
     cmd += f" {full_name}"
     result = run_command(host, cmd)
-    # If snapshot has dependent clones (e.g. restore clones), retry with -R
+    # The snapshot may be held by dependent clones. Only auto-remove the tool's
+    # OWN restore clones (named <pool>/restore-*, see restore_file_from_snapshot);
+    # NEVER blindly `zfs destroy -R`, which would also destroy user clones --
+    # live datasets/VMs built from this snapshot -- without confirmation.
     if not result["success"] and "dependent clones" in result.get("stderr", ""):
-        result = run_command(host, f"zfs destroy -R {full_name}")
+        clones_res = run_command(host, f"zfs get -H -o value clones {full_name}")
+        raw = clones_res.get("stdout", "").strip() if clones_res.get("success") else ""
+        clones = [c for c in raw.split(",") if c and c != "-"]
+        foreign = [c for c in clones if "/restore-" not in c]
+        if foreign:
+            return {"success": False, "stderr":
+                    "Snapshot has dependent clone(s) that are NOT tool restore "
+                    "clones: " + ", ".join(foreign) + ". Refusing to destroy them "
+                    "automatically -- remove or `zfs promote` them first."}
+        if clones:
+            # all dependents are our own restore clones -> safe to remove
+            result = run_command(host, f"zfs destroy -R {full_name}")
     if result.get("success"):
         _invalidate(host)
     return result
