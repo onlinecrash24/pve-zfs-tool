@@ -1579,6 +1579,64 @@ def get_zfs_events(host, limit=30):
     return result
 
 
+# --- SMART detection helpers (pure; unit-tested in tests/test_smart_detect.py) --
+
+def _smart_base_disk(dev_path, pkname, lsblk_ok):
+    """Resolve a /dev node to its whole-disk device.
+
+    dev_path : the resolved /dev/... path (may be a partition or a whole disk)
+    pkname   : output of `lsblk -no PKNAME <dev_path>` (parent kernel name, or "")
+    lsblk_ok : whether that lsblk call succeeded
+
+    When lsblk works its answer is authoritative: a non-empty PKNAME is the
+    parent disk of a partition; an empty PKNAME means dev_path is already a whole
+    disk -- this is what fixes whole-NVMe vdevs like /dev/nvme0n1, which must NOT
+    be truncated to /dev/nvme0n. Only when lsblk is unavailable do we fall back
+    to a conservative suffix strip that understands nvme/mmc 'pN' partition names.
+    """
+    if lsblk_ok:
+        pk = (pkname or "").strip()
+        return f"/dev/{pk}" if pk else dev_path
+    # lsblk unavailable: best-effort strip of a partition suffix
+    m = re.match(r'^(/dev/(?:nvme\d+n\d+|mmcblk\d+))p\d+$', dev_path)
+    if m:
+        return m.group(1)
+    if re.match(r'^/dev/sd[a-z]+\d+$', dev_path):
+        return re.sub(r'\d+$', '', dev_path)
+    return dev_path
+
+
+def _smart_device_types(base_disk):
+    """smartctl -d device-type candidates to try, in order.
+
+    Empty string first = let smartctl auto-detect. NVMe namespaces get -d nvme;
+    everything else tries the SAT/auto/SCSI bridge types that Hetzner HBA- and
+    USB-attached disks commonly need before `smartctl -H` will report health.
+    """
+    if re.match(r'^/dev/nvme\d+', base_disk or ""):
+        return ["", "-d nvme"]
+    return ["", "-d sat", "-d auto", "-d scsi"]
+
+
+def _classify_smart_output(out):
+    """Classify one `smartctl -H ... 2>&1` output.
+
+    Returns 'PASSED' / 'FAILED' when a health verdict is present, 'NOTOOL' when
+    smartctl itself is missing, or None when this attempt yielded no verdict
+    (the caller then tries the next device type). Handles both the ATA line
+    ("... test result: PASSED") and the SCSI line ("SMART Health Status: OK").
+    """
+    text = out or ""
+    low = text.lower()
+    if "command not found" in low or "smartctl: not found" in low:
+        return "NOTOOL"
+    if "FAILED" in text:
+        return "FAILED"
+    if "PASSED" in text or re.search(r"health status:\s*ok", low):
+        return "PASSED"
+    return None
+
+
 def get_smart_status(host, pool_name=None):
     """Get SMART status of all disks across all pools, grouped by pool."""
     if pool_name is not None:
@@ -1647,6 +1705,11 @@ def get_smart_status(host, pool_name=None):
     result_pools = {}  # {pool_name: [{disk, dev, status}, ...]}
     seen_base_disks = {}  # base_disk -> smart result (cache to avoid duplicate queries)
 
+    # smartctl presence check once per host; if it's missing, every disk is
+    # reported as such instead of a misleading per-disk "Unknown".
+    have = run_command(host, "command -v smartctl >/dev/null 2>&1 && echo yes")
+    smartctl_present = bool(have.get("success")) and "yes" in have.get("stdout", "")
+
     for pname, disk_ids in pools_disks.items():
         pool_disks = []
         for disk_id in disk_ids:
@@ -1660,29 +1723,40 @@ def get_smart_status(host, pool_name=None):
                 else:
                     dev_path = f"/dev/{disk_id}"
 
-            # Strip partition to get base disk
+            # Resolve a partition to its whole disk (lsblk is authoritative).
             strip = run_command(host, f"lsblk -no PKNAME {dev_path} 2>/dev/null | head -1")
-            if strip["success"] and strip["stdout"].strip():
-                base_disk = f"/dev/{strip['stdout'].strip()}"
-            else:
-                base = re.sub(r'p?\d+$', '', dev_path)
-                base_disk = base if base != dev_path or not dev_path[-1].isdigit() else dev_path
+            base_disk = _smart_base_disk(
+                dev_path, strip.get("stdout", ""), bool(strip.get("success")))
 
-            # Query SMART (cached per base disk)
+            # Query SMART (cached per base disk), trying device-type fallbacks
+            # (-d sat/auto/scsi/nvme) that many HBA/USB/NVMe disks need before
+            # `smartctl -H` will report a PASSED/FAILED health line.
             if base_disk not in seen_base_disks:
-                smart = run_command(host, f"smartctl -H {base_disk} 2>&1 | grep -iE 'overall-health|result|PASSED|FAILED'",
-                                    cache_ttl=_TTL_SMART)
-                health_line = smart.get("stdout", "").strip()
-                if not health_line:
-                    smart2 = run_command(host, f"smartctl -H {base_disk} 2>&1", cache_ttl=_TTL_SMART)
-                    out = smart2.get("stdout", "")
-                    if "PASSED" in out:
-                        health_line = "PASSED"
-                    elif "FAILED" in out:
-                        health_line = "FAILED"
+                if not smartctl_present:
+                    seen_base_disks[base_disk] = "smartctl fehlt"
+                else:
+                    verdict = None
+                    saw_output = False
+                    for dtype in _smart_device_types(base_disk):
+                        cmd = (f"smartctl -H {dtype} {base_disk} 2>&1" if dtype
+                               else f"smartctl -H {base_disk} 2>&1")
+                        r = run_command(host, cmd, cache_ttl=_TTL_SMART)
+                        out = r.get("stdout", "")
+                        if out.strip():
+                            saw_output = True
+                        verdict = _classify_smart_output(out)
+                        if verdict in ("PASSED", "FAILED", "NOTOOL"):
+                            break
+                    if verdict == "NOTOOL":
+                        seen_base_disks[base_disk] = "smartctl fehlt"
+                    elif verdict in ("PASSED", "FAILED"):
+                        seen_base_disks[base_disk] = verdict
+                    elif saw_output:
+                        # smartctl ran but gave no verdict -> no SMART data
+                        # (virtual disk, unsupported bridge). Informational.
+                        seen_base_disks[base_disk] = "N/A"
                     else:
-                        health_line = "Unknown"
-                seen_base_disks[base_disk] = health_line
+                        seen_base_disks[base_disk] = "Unknown"
 
             pool_disks.append({
                 "id": disk_id,
