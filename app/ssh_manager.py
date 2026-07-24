@@ -1,6 +1,7 @@
 import paramiko
 import os
 import json
+import base64
 import hashlib
 import shlex
 import shutil
@@ -49,6 +50,15 @@ def save_hosts(hosts):
         os.replace(tmp, HOSTS_FILE)
 
 
+def _sha256_fingerprint(key_bytes):
+    """Standard OpenSSH SHA256 host-key fingerprint: base64 of the FULL 32-byte
+    sha256 digest, padding stripped -- exactly what `ssh` / `ssh-keyscan` print,
+    so a user can verify it out of band. (The old code truncated to the first
+    16 bytes as colon-hex, which matched nothing.)"""
+    return "SHA256:" + base64.b64encode(
+        hashlib.sha256(key_bytes).digest()).decode("ascii").rstrip("=")
+
+
 def get_host_fingerprint(address, port=22, timeout=6):
     """Fetch SSH host key fingerprint from a remote host (TOFU step 1).
 
@@ -69,12 +79,10 @@ def get_host_fingerprint(address, port=22, timeout=6):
         transport.handshake_timeout = timeout
         transport.start_client(timeout=timeout)
         key = transport.get_remote_server_key()
-        fp = hashlib.sha256(key.asbytes()).hexdigest()
-        fp_display = ":".join(fp[i:i+2] for i in range(0, 32, 2))  # first 16 bytes
         return {
             "success": True,
             "key_type": key.get_name(),
-            "fingerprint": f"SHA256:{fp_display}",
+            "fingerprint": _sha256_fingerprint(key.asbytes()),
             "raw_key": key,
         }
     except Exception as e:

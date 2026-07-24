@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import shlex
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +39,11 @@ from app.replication import (
 )
 
 log = logging.getLogger(__name__)
+
+# Serialize the transition-check + notify so the replication-health endpoint
+# (auto-refreshed, multiple tabs) and the sampler can't both fire on the same
+# state change -> duplicate replication_lag notifications.
+_alert_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +284,13 @@ def _state_value(snap: Dict[str, Any], status: Optional[str] = None) -> Dict[str
 
 
 def _maybe_alert(snap: Dict[str, Any]) -> None:
+    # Serialize the check-then-set so two concurrent health snapshots can't both
+    # see the same transition and notify twice.
+    with _alert_lock:
+        _maybe_alert_locked(snap)
+
+
+def _maybe_alert_locked(snap: Dict[str, Any]) -> None:
     key = _state_key(snap["host_address"], snap["config_path"])
     prev = _load_state(key)
     prev_status = (prev.get("value") or {}).get("status")

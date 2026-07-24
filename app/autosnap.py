@@ -224,9 +224,22 @@ def set_retention(host: Dict[str, Any], changes: List[Dict[str, Any]]) -> Dict[s
             all_ok = False
             continue
 
+        # If a keep change is requested but this level's cron command has no
+        # --keep= token to update, the rewrite would silently change nothing --
+        # report that as a failure instead of a misleading "success".
+        if keep is not None and not any(
+                _is_command_line(ln, label) and _KEEP_RE.search(ln)
+                for ln in content.split("\n")):
+            results.append({"label": label, "success": False,
+                            "error": "no --keep= option in this level's cron command; "
+                                     "cannot set retention count"})
+            all_ok = False
+            continue
+
         new_content = update_level_content(content, label, keep=keep, enabled=enabled)
         if new_content == content:
-            # Nothing changed (e.g. no --keep token to update); treat as success.
+            # Unchanged for a legitimate reason (value already set, or an
+            # enabled-only change that was already in that state).
             results.append({"label": label, "success": True, "unchanged": True})
             continue
 

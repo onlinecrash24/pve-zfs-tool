@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import secrets
+import threading
 import functools
 import hashlib
 import hmac
@@ -104,8 +105,38 @@ if ADMIN_USER == "admin" and ADMIN_PASSWORD == "password":
 
 # Rate limiting for login attempts
 _login_attempts = {}  # IP -> {"count": int, "last": float}
+_login_lock = threading.Lock()   # guards the check-then-increment on _login_attempts
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+
+
+def _login_gate(ip, now):
+    """(allowed, remaining_seconds) for this IP, decided under the lock so a
+    concurrent burst can't read a stale counter and slip past the lockout."""
+    with _login_lock:
+        info = _login_attempts.get(ip)
+        if (info and info["count"] >= MAX_LOGIN_ATTEMPTS
+                and (now - info["last"]) < LOGIN_LOCKOUT_SECONDS):
+            return False, int(LOGIN_LOCKOUT_SECONDS - (now - info["last"]))
+        return True, 0
+
+
+def _login_record_failure(ip, now):
+    """Atomically increment the failed-attempt counter (resetting it if the
+    lockout window elapsed). Returns the new count."""
+    with _login_lock:
+        info = _login_attempts.get(ip, {"count": 0, "last": 0})
+        if (now - info["last"]) >= LOGIN_LOCKOUT_SECONDS:
+            info = {"count": 0, "last": now}
+        info["count"] += 1
+        info["last"] = now
+        _login_attempts[ip] = info
+        return info["count"]
+
+
+def _login_reset(ip):
+    with _login_lock:
+        _login_attempts.pop(ip, None)
 
 
 # ---------------------------------------------------------------------------
@@ -164,16 +195,13 @@ def login_page():
 def api_login():
     client_ip = request.remote_addr or "unknown"
 
-    # Rate limiting
+    # Rate limiting — the lockout decision and the failure increment below are
+    # each taken under _login_lock, so concurrent attempts from one IP can't
+    # interleave their read-modify-write and undercount past the 5-try limit.
     now = time.time()
-    info = _login_attempts.get(client_ip, {"count": 0, "last": 0})
-    if info["count"] >= MAX_LOGIN_ATTEMPTS and (now - info["last"]) < LOGIN_LOCKOUT_SECONDS:
-        remaining = int(LOGIN_LOCKOUT_SECONDS - (now - info["last"]))
+    allowed, remaining = _login_gate(client_ip, now)
+    if not allowed:
         return jsonify({"success": False, "error": f"Too many attempts. Try again in {remaining}s"}), 429
-
-    # Reset counter if lockout period has passed
-    if (now - info["last"]) >= LOGIN_LOCKOUT_SECONDS:
-        info = {"count": 0, "last": now}
 
     data = request.json or {}
     username = data.get("username", "")
@@ -185,7 +213,7 @@ def api_login():
 
     if user_ok and pass_ok:
         # Reset attempts on successful login
-        _login_attempts.pop(client_ip, None)
+        _login_reset(client_ip)
         # Rotate session ID to prevent session fixation attacks
         session.clear()
         session["authenticated"] = True
@@ -196,13 +224,11 @@ def api_login():
                   user=username, ip=client_ip)
         return jsonify({"success": True, "csrf_token": session["csrf_token"]})
 
-    # Track failed attempt
-    info["count"] += 1
-    info["last"] = now
-    _login_attempts[client_ip] = info
+    # Track failed attempt (atomic increment under the lock)
+    attempts = _login_record_failure(client_ip, now)
     audit_log("login.failure", target=username or "?", success=False,
               user="?", ip=client_ip,
-              details={"attempts": info["count"]})
+              details={"attempts": attempts})
     return jsonify({"success": False, "error": "Invalid credentials"}), 401
 
 
