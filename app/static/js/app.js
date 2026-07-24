@@ -3599,9 +3599,19 @@ function _sectorColor(v, critical) {
 }
 function _formatHours(hrs) {
     if (hrs == null || isNaN(hrs)) return "—";
-    if (hrs < 48) return `${hrs} h`;
-    const days = hrs / 24;
-    return days < 365 ? `${days.toFixed(0)} d` : `${(days / 365).toFixed(1)} a`;
+    if (hrs < 48) return `${hrs} ${t("dur_h")}`;
+    const days = Math.round(hrs / 24);
+    if (days < 365) return `${days} ${t("dur_d")}`;
+    const years = Math.floor(days / 365);
+    const months = Math.round((days % 365) / 30.44);
+    return months > 0
+        ? `${years} ${t("dur_y")} ${months} ${t("dur_mo")}`
+        : `${years} ${t("dur_y")}`;
+}
+// Exact power-on for the tooltip: "11380 h · 474 d".
+function _powerOnTitle(hrs) {
+    if (hrs == null || isNaN(hrs)) return "";
+    return `${hrs.toLocaleString()} ${t("dur_h")} · ${Math.round(hrs / 24).toLocaleString()} ${t("dur_d")}`;
 }
 
 async function renderDisksCard(container, hours) {
@@ -3681,16 +3691,23 @@ async function renderDisksCard(container, hours) {
         chartWrap.innerHTML = _svgLineChart(pts, { yZero: false, color: "#58a6ff", height: 120, yFmt: v => v.toFixed(0) + "°" });
         box.appendChild(chartWrap);
 
-        const stat = (label, value, style) => h("div", {}, [
+        const stat = (label, value, style, title) => h("div", title ? { title } : {}, [
             h("div", { className: "stat-label", style: "font-size:10px" }, label),
             h("div", { style: "font-weight:600;font-size:13px;" + (style || "") }, value),
         ]);
-        box.appendChild(h("div", { style: "display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px" }, [
-            stat(t("disk_wear"), d.wear_pct != null ? d.wear_pct + "%" : "—", ampelColor(d.wear_pct, 80, 50, false)),
-            stat(t("disk_realloc"), d.realloc_sectors != null ? String(d.realloc_sectors) : "—", _sectorColor(d.realloc_sectors, false)),
-            stat(t("disk_pending"), d.pending_sectors != null ? String(d.pending_sectors) : "—", _sectorColor(d.pending_sectors, true)),
-            stat(t("disk_power_on"), _formatHours(d.power_on_hours), ""),
-        ]));
+        // Show only the indicators that apply to this disk type: wear is an
+        // SSD/NVMe concept; reallocated/pending sectors are HDD attributes.
+        // Power-on is always shown. Any attribute the drive actually reports
+        // (value present) is shown even if unusual for its type.
+        const stats = [];
+        if (d.wear_pct != null)
+            stats.push(stat(t("disk_wear"), d.wear_pct + "%", ampelColor(d.wear_pct, 80, 50, false)));
+        if (d.realloc_sectors != null)
+            stats.push(stat(t("disk_realloc"), String(d.realloc_sectors), _sectorColor(d.realloc_sectors, false)));
+        if (d.pending_sectors != null)
+            stats.push(stat(t("disk_pending"), String(d.pending_sectors), _sectorColor(d.pending_sectors, true)));
+        stats.push(stat(t("disk_power_on"), _formatHours(d.power_on_hours), "", _powerOnTitle(d.power_on_hours)));
+        box.appendChild(h("div", { style: `display:grid;grid-template-columns:repeat(${stats.length},1fr);gap:8px;margin-top:8px` }, stats));
 
         grid.appendChild(box);
     });
