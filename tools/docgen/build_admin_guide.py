@@ -557,10 +557,29 @@ CONTENT = [
      "echo <base64-inhalt> | base64 -d > <ziel>",
      "chmod +x <ziel>   # nur falls im Archiv als ausführbar markiert"]),
 ("cmd", "Alle Configs wiederherstellen", "Ein-Klick-Wiederherstellung ALLER wiederherstellbaren "
-    "Konfigurationsdateien außer Gast-Configs (eigener Button) und Info-Ausgaben — Netzwerk, "
-    "Storage/fstab, APT, Firewall, Jobs/Cron, User, SSH, Sonstiges. Node-Name wird einmal für "
-    "den ganzen Stapel aufgelöst.",
-    ["# je Datei wie \"Einzelne Datei wiederherstellen\", Kategorie ∉ {guests, info}"]),
+    "Konfigurationsdateien außer Gast-Configs (eigener Button), Info-Ausgaben und Cluster "
+    "(corosync) — Netzwerk, Storage/fstab/exports/samba, APT, Firewall, Jobs/Cron, User, SSH "
+    "(inkl. sshd_config), System (systemd-Units, sysctl, modprobe, Zeitzone), Mail (postfix, "
+    "aliases), Sonstiges. Node-Name wird einmal für den ganzen Stapel aufgelöst.",
+    ["# je Datei wie \"Einzelne Datei wiederherstellen\", Kategorie ∉ {guests, info, cluster}"]),
+("warn", "corosync.conf ist bewusst NICHT im Sammel-Restore: auf einem frisch installierten "
+         "Knoten lässt es pve-cluster ein Cluster erwarten — ohne Quorum wird /etc/pve dann "
+         "read-only und der Host ist nicht mehr konfigurierbar. Es bleibt als eigene Kategorie "
+         "„Cluster“ einzeln wiederherstellbar, für einen gezielten Cluster-Wiederaufbau."),
+("cmd", "ZFS-Pools prüfen / importieren", "Ein frisch installierter Host hat nur seinen neuen "
+    "rpool — die Daten-Pools liegen noch auf den Platten, sind aber nicht importiert, sodass "
+    "eine wiederhergestellte storage.cfg auf nicht vorhandenen Storage zeigt. Die Ansicht "
+    "listet importierte und importierbare Pools und importiert einzeln mit -f (ein neu "
+    "aufgesetzter Host gilt für ZFS als anderes System).",
+    ["zpool list -H -o name   # was ist bereits importiert?",
+     "zpool import   # was liegt importierbar auf den Platten? (Exit != 0 heisst hier nur \"nichts da\")",
+     "zpool import -f <pool>   # gezielter Import"]),
+("note", "Was ein Config-Restore NICHT zurückbringt (bewusst): Linux-/PAM-Benutzer und das "
+         "Root-Passwort (/etc/passwd, shadow, group) — PVE-Benutzer im Realm @pam müssen neu "
+         "angelegt werden; private SSH-Host-Keys (die sshd_config selbst schon); /etc/pve/priv "
+         "nur bei Opt-in-Backup; postfix sasl_passwd und samba *.tdb werden nie gesichert; der "
+         "Aktiv-Zustand von systemd-Units (Symlinks) — Unit-Dateien kommen zurück, Aktivierung "
+         "per systemctl enable nachziehen."),
 ("cmd", "Alle Gast-Configs auf einmal wiederherstellen", "Bulk-Variante der Einzel-Wiederherstellung, überspringt vorhandene Configs ohne Überschreiben-Option.",
     ["# je gefundener .../<qemu-server|lxc>/<vmid>.conf: wie \"Einzelne Datei wiederherstellen\""]),
 ("cmd", "Pakete nachinstallieren", "In sich abgeschlossener Hintergrund-Task: (1) stellt "
@@ -618,7 +637,12 @@ CONTENT = [
      "cat /root/.ssh/authorized_keys > $STAGE/root/.ssh/authorized_keys   # nur Public Keys",
      "cp -a /etc/cron.d /etc/cron.{hourly,daily,weekly,monthly}/zfs-auto-snapshot $STAGE/  # Retention",
      "cp -a /etc/bashclub $STAGE/   # Replikations-Config",
-     "cp -a /etc/modprobe.d/zfs.conf $STAGE/   # ARC-Limit",
+     "cp -a /etc/modprobe.d $STAGE/   # ARC-Limit + weitere Modul-Optionen (kvm, vfio-pci)",
+     "cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.d $STAGE/   # NUR Config, keine Host-Keys",
+     "cp -a /etc/systemd/system /etc/sysctl.d /etc/sysctl.conf /etc/timezone $STAGE/   # System",
+     "tar -C /etc/postfix --exclude='sasl_passwd*' -cf - . | tar -C $STAGE/etc/postfix -xf -   # Mail-Relay",
+     "tar -C /etc/samba --exclude='*.tdb' -cf - . | tar -C $STAGE/etc/samba -xf -   # SMB (ohne Secrets)",
+     "cp -a --parents /etc/aliases /etc/exports $STAGE/   # Mail-Aliase + NFS-Freigaben",
      "pveversion -v; dpkg --get-selections; apt-mark showmanual; ip -d address show; "
      "ip route show; zpool status; zpool list; zfs list; pvecm status   # Befehls-Snapshots",
      "zpool get -H -o name,property,value,source all   # Pool-Eigenschaften (mit Quelle)",

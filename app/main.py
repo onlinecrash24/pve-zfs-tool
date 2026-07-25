@@ -2258,6 +2258,36 @@ def api_dr_restore_category():
     return jsonify(res)
 
 
+@app.route("/api/dr/pool-import-status", methods=["GET"])
+@login_required
+def api_dr_pool_import_status():
+    """Which pools are imported on the restore target, and which are still
+    sitting on disk un-imported (a restored storage.cfg needs them imported)."""
+    from app.dr import list_pool_import_status
+    target = _resolve_target(request.args.to_dict())
+    if not target:
+        return jsonify({"error": "host not found"}), 404
+    return jsonify(list_pool_import_status(target))
+
+
+@app.route("/api/dr/import-pool", methods=["POST"])
+@login_required
+def api_dr_import_pool():
+    """Import one pool on the restore target by name."""
+    from app.dr import import_pool
+    data = request.get_json(silent=True) or {}
+    target = _resolve_target(data)
+    if not target:
+        return jsonify({"success": False, "error": "host not found"}), 404
+    pool = (data.get("pool") or "").strip()
+    res = import_pool(target, pool, force=bool(data.get("force")))
+    audit_log("dr.import_pool", target=pool, host=target.get("address"),
+              success=res.get("success", False),
+              details={"pool": pool, "force": bool(data.get("force")),
+                       "exit_code": res.get("exit_code")})
+    return jsonify(res)
+
+
 @app.route("/api/dr/zfs-properties", methods=["GET"])
 @login_required
 def api_dr_zfs_properties():

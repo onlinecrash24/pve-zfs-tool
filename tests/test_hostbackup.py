@@ -186,12 +186,15 @@ def test_script_captures_zfs_properties():
 
 def test_script_captures_zfs_tool_ancillary_configs():
     # so all ZFS-tool features survive a restore: snapshot retention (cron),
-    # replication config, ARC limit.
+    # replication config, ARC limit. The ARC limit lives in
+    # /etc/modprobe.d/zfs.conf -- captured via the whole modprobe.d directory
+    # (widened so other module options, e.g. vfio-pci for passthrough, come
+    # back too).
     s = hb._build_backup_script(include_priv=False, dest="/tmp/x.tar.gz")
     assert "/etc/cron.d" in s
     assert "/etc/cron.hourly/zfs-auto-snapshot" in s
     assert "/etc/bashclub" in s
-    assert "/etc/modprobe.d/zfs.conf" in s
+    assert "/etc/modprobe.d" in s
 
 
 def test_script_captures_nic_naming_artifacts():

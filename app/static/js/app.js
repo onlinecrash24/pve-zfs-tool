@@ -5831,6 +5831,72 @@ async function viewConfigRestore() {
             zp.appendChild(zpb);
             body.appendChild(zp);
         }
+
+        // Pool import: a freshly installed host only has its new rpool -- the
+        // data pools still sit on the disks un-imported, so a restored
+        // storage.cfg would point at storage that does not exist yet.
+        const pi = h("div", { className: "card", style: "margin-top:16px" });
+        pi.appendChild(h("div", { className: "card-header" }, t("cr_poolimport_title")));
+        const pib = h("div", { className: "card-body" });
+        pib.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("cr_poolimport_intro")));
+        const piStatus = h("div", { style: "font-size:12px" });
+        const piList = h("div", { style: "margin-top:8px" });
+        const piBtn = h("button", { className: "btn btn-sm" }, t("cr_poolimport_check"));
+        piBtn.onclick = async () => {
+            piBtn.disabled = true;
+            piStatus.textContent = t("cr_poolimport_checking");
+            piList.innerHTML = "";
+            try {
+                const r = await API.get("/api/dr/pool-import-status?" +
+                    new URLSearchParams(_crTarget()).toString());
+                const imported = r.imported || [], avail = r.importable || [];
+                piStatus.textContent = t("cr_poolimport_imported") + ": " +
+                    (imported.length ? imported.join(", ") : "—");
+                if (!avail.length) {
+                    piList.appendChild(h("p", { style: "color:var(--success);font-size:12px" },
+                        "✓ " + t("cr_poolimport_none")));
+                } else {
+                    avail.forEach(p => {
+                        const row = h("div", { style: "display:flex;align-items:center;gap:8px;margin-top:6px" });
+                        row.appendChild(h("code", {}, p.name));
+                        row.appendChild(h("span", { className: "badge badge-stopped" }, p.state || "?"));
+                        const ib = h("button", { className: "btn btn-warning btn-sm" }, t("cr_poolimport_do"));
+                        ib.onclick = async () => {
+                            if (!confirm(t("cr_poolimport_confirm").replace("{p}", p.name).replace("{h}", _crAddr()))) return;
+                            ib.disabled = true;
+                            try {
+                                const res = await API.post("/api/dr/import-pool", Object.assign(_crTarget(), {
+                                    pool: p.name, force: true,
+                                }));
+                                if (res.success) { toast(t("cr_poolimport_ok").replace("{p}", p.name), "success"); piBtn.onclick(); }
+                                else {
+                                    ib.disabled = false;
+                                    openModal(t("cr_poolimport_failed"),
+                                        `<pre class="output" style="font-size:11px">${escapeHtml(res.output || res.error || "")}</pre>`);
+                                }
+                            } catch (e) { ib.disabled = false; toast(e.message || t("failed"), "error"); }
+                        };
+                        row.appendChild(ib);
+                        piList.appendChild(row);
+                    });
+                }
+            } catch (e) { piStatus.textContent = e.message || t("failed"); }
+            finally { piBtn.disabled = false; }
+        };
+        pib.appendChild(piBtn);
+        pib.appendChild(h("div", { style: "margin-top:8px" }, [piStatus, piList]));
+        pi.appendChild(pib);
+        body.appendChild(pi);
+
+        // What a config restore can NOT bring back (deliberate: secrets).
+        const lim = h("div", { className: "card", style: "margin-top:16px" });
+        lim.appendChild(h("div", { className: "card-header" }, t("cr_limits_title")));
+        const limb = h("div", { className: "card-body" });
+        limb.appendChild(h("ul", { style: "font-size:12px;margin:0;padding-left:18px;color:var(--text-secondary)" },
+            [t("cr_limits_pam"), t("cr_limits_hostkeys"), t("cr_limits_priv"),
+             t("cr_limits_units"), t("cr_limits_cluster")].map(s => h("li", { style: "margin-bottom:4px" }, s))));
+        lim.appendChild(limb);
+        body.appendChild(lim);
     }
 
     async function loadBackups() {

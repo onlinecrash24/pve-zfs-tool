@@ -130,10 +130,49 @@ done
 [ -d /etc/cron.d ] && cp -a --parents /etc/cron.d "$STAGE" 2>/dev/null || true
 for f in /etc/cron.hourly/zfs-auto-snapshot /etc/cron.daily/zfs-auto-snapshot \
          /etc/cron.weekly/zfs-auto-snapshot /etc/cron.monthly/zfs-auto-snapshot \
-         /etc/modprobe.d/zfs.conf /etc/fstab /etc/vzdump.conf; do
+         /etc/fstab /etc/vzdump.conf; do
   [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
 done
 [ -d /etc/bashclub ] && cp -a --parents /etc/bashclub "$STAGE" 2>/dev/null || true
+# Whole modprobe.d, not just zfs.conf: other module options (e.g. kvm,
+# vfio-pci for passthrough) are just as load-bearing after a rebuild.
+[ -d /etc/modprobe.d ] && cp -a --parents /etc/modprobe.d "$STAGE" 2>/dev/null || true
+
+# sshd CONFIG only -- a fresh install listens on the default port with default
+# settings, so a custom Port/PermitRootLogin/AllowUsers would silently not come
+# back and this tool (which connects over SSH) could not reach the host.
+# Host PRIVATE keys are deliberately NOT captured (secret sprawl; the DR
+# "refresh host key" option handles a reinstalled host instead).
+for f in /etc/ssh/sshd_config; do
+  [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
+done
+[ -d /etc/ssh/sshd_config.d ] && cp -a --parents /etc/ssh/sshd_config.d "$STAGE" 2>/dev/null || true
+
+# Custom systemd units/timers, kernel tuning, timezone -- host behaviour that a
+# fresh install does not reproduce. (Symlinks that encode the enabled state are
+# archived but not restored, so re-enable units manually after a restore.)
+[ -d /etc/systemd/system ] && cp -a --parents /etc/systemd/system "$STAGE" 2>/dev/null || true
+[ -d /etc/sysctl.d ] && cp -a --parents /etc/sysctl.d "$STAGE" 2>/dev/null || true
+for f in /etc/sysctl.conf /etc/timezone; do
+  [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
+done
+
+# Mail relay for PVE's own notification mails, and host-served file shares.
+# Secrets are excluded on purpose: postfix sasl_passwd* holds the SMTP relay
+# password in cleartext, and samba's *.tdb hold account secrets.
+if [ -d /etc/postfix ]; then
+  mkdir -p "$STAGE/etc/postfix"
+  tar -C /etc/postfix --exclude='sasl_passwd*' --exclude='./sasl_passwd*' \
+      -cf - . 2>/dev/null | tar -C "$STAGE/etc/postfix" -xf - 2>/dev/null || true
+fi
+if [ -d /etc/samba ]; then
+  mkdir -p "$STAGE/etc/samba"
+  tar -C /etc/samba --exclude='*.tdb' --exclude='./*.tdb' \
+      -cf - . 2>/dev/null | tar -C "$STAGE/etc/samba" -xf - 2>/dev/null || true
+fi
+for f in /etc/aliases /etc/exports; do
+  [ -e "$f" ] && cp -a --parents "$f" "$STAGE" 2>/dev/null || true
+done
 
 # Network + base config files
 for f in /etc/network/interfaces /etc/hosts /etc/resolv.conf /etc/hostname; do
