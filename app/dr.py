@@ -474,7 +474,13 @@ def _rel(member: str) -> str:
 
 
 def _categorize(rel: str) -> str:
-    if rel == "root/.ssh/authorized_keys":
+    # Cluster membership is its own category so the bulk "restore all configs"
+    # never touches it: dropping corosync.conf onto a freshly installed node
+    # makes pve-cluster expect a cluster, and without quorum /etc/pve turns
+    # read-only -- the host can then no longer be configured at all.
+    if rel in ("etc/pve/corosync.conf", "etc/corosync/corosync.conf"):
+        return "cluster"
+    if rel == "root/.ssh/authorized_keys" or rel.startswith("etc/ssh/"):
         return "ssh"
     if re.search(r"/(qemu-server|lxc)/\d+\.conf$", rel):
         return "guests"
@@ -482,8 +488,15 @@ def _categorize(rel: str) -> str:
             or rel.startswith("etc/udev/") or rel.startswith("etc/systemd/network/")
             or rel.startswith("lib/systemd/network/")):
         return "network"
-    if rel in ("etc/pve/storage.cfg", "etc/fstab"):
+    if (rel in ("etc/pve/storage.cfg", "etc/fstab", "etc/exports")
+            or rel.startswith("etc/samba/")):
         return "storage"
+    if rel.startswith("etc/postfix/") or rel == "etc/aliases":
+        return "mail"
+    if (rel.startswith("etc/systemd/system/") or rel.startswith("etc/sysctl.d/")
+            or rel.startswith("etc/modprobe.d/")
+            or rel in ("etc/sysctl.conf", "etc/timezone")):
+        return "system"
     if rel.startswith("etc/apt/") or rel.startswith("usr/share/keyrings/"):
         return "apt"
     if rel.startswith("etc/pve/firewall/") or rel.endswith("host.fw"):
@@ -652,8 +665,11 @@ def restore_all_guest_configs(host: Dict[str, Any], backup_file: str,
 
 
 # Categories that "Restore all configs" does NOT touch: guests have their own
-# dedicated button, and info-only captures aren't restorable anyway.
-_NON_CONFIG_CATEGORIES = {"guests", "info"}
+# dedicated button, info-only captures aren't restorable anyway, and "cluster"
+# (corosync.conf) is excluded by design -- restoring it onto a fresh node makes
+# pve-cluster expect a cluster and, without quorum, /etc/pve goes read-only.
+# It stays available as a deliberate single-file / per-category restore.
+_NON_CONFIG_CATEGORIES = {"guests", "info", "cluster"}
 
 
 def _restorable_members(backup_file: str, predicate) -> List[Any]:
@@ -723,6 +739,69 @@ def restore_all_configs(host: Dict[str, Any], backup_file: str,
     except (tarfile.TarError, OSError) as e:
         return {"success": False, "error": str(e)[:200], "results": []}
     return _restore_member_list(host, backup_file, members, force)
+
+
+# Pool import ---------------------------------------------------------------
+#
+# A freshly installed host only has its new rpool: the data pools still sit on
+# their disks but are NOT imported, so a restored storage.cfg points at storage
+# that does not exist yet. `zpool import` (no arguments) lists what is available
+# on the disks; anything not already in `zpool list` can be imported by name.
+
+_POOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]*$")
+
+
+def parse_importable_pools(stdout: str) -> List[Dict[str, str]]:
+    """Parse `zpool import` (no args) output into [{name, state, id}].
+
+    Pure function so the parsing is unit tested without a host.
+    """
+    pools: List[Dict[str, str]] = []
+    cur: Optional[Dict[str, str]] = None
+    for line in (stdout or "").splitlines():
+        m = re.match(r"^\s*pool:\s+(\S+)\s*$", line)
+        if m:
+            cur = {"name": m.group(1), "state": "", "id": ""}
+            pools.append(cur)
+            continue
+        if cur is None:
+            continue
+        m = re.match(r"^\s*state:\s+(.+?)\s*$", line)
+        if m:
+            cur["state"] = m.group(1)
+            continue
+        m = re.match(r"^\s*id:\s+(\d+)\s*$", line)
+        if m:
+            cur["id"] = m.group(1)
+    return pools
+
+
+def list_pool_import_status(host: Dict[str, Any]) -> Dict[str, Any]:
+    """Which pools are already imported, and which are importable from disk."""
+    cur = run_command(host, "zpool list -H -o name 2>/dev/null", timeout=20)
+    imported = [ln.strip() for ln in (cur.get("stdout") or "").splitlines() if ln.strip()]
+    # `zpool import` exits non-zero ("no pools available") when there is nothing
+    # to import, so the exit status is not an error signal here.
+    av = run_command(host, "zpool import 2>&1", timeout=60)
+    importable = [p for p in parse_importable_pools(av.get("stdout") or "")
+                  if p["name"] not in imported]
+    return {"success": True, "imported": imported, "importable": importable}
+
+
+def import_pool(host: Dict[str, Any], pool_name: str, force: bool = False) -> Dict[str, Any]:
+    """Import one pool by name. ``force`` adds -f, needed when the pool was last
+    used by another system (a rebuilt host counts as one)."""
+    if not _POOL_NAME_RE.match(pool_name or ""):
+        return {"success": False, "error": "invalid pool name"}
+    flag = "-f " if force else ""
+    r = run_command(host, f"zpool import {flag}{shlex.quote(pool_name)} 2>&1; echo __exit=$?",
+                    timeout=180)
+    out = (r.get("stdout") or "")
+    m = re.search(r"__exit=(\d+)\s*$", out.strip())
+    code = int(m.group(1)) if m else None
+    ok = code == 0
+    return {"success": ok, "exit_code": code, "pool": pool_name,
+            "output": re.sub(r"__exit=\d+\s*$", "", out).strip()[:1000]}
 
 
 def reboot_target(host: Dict[str, Any]) -> Dict[str, Any]:
