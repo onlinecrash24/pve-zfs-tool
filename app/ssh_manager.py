@@ -1,6 +1,7 @@
 import paramiko
 import os
 import json
+import base64
 import hashlib
 import shlex
 import shutil
@@ -23,7 +24,7 @@ HOSTS_FILE = os.path.join(DATA_DIR, "hosts.json")
 SSH_KEY = "/root/.ssh/id_ed25519"
 KNOWN_HOSTS = os.path.join(DATA_DIR, "known_hosts")
 
-_lock = threading.Lock()
+_lock = threading.RLock()   # reentrant: guards the whole read-modify-write of hosts.json
 
 
 def _ensure_data_dir():
@@ -39,10 +40,23 @@ def load_hosts():
 
 
 def save_hosts(hosts):
+    """Persist hosts.json atomically (temp file + os.replace) so a concurrent
+    reader never observes a truncated/partial file."""
     _ensure_data_dir()
     with _lock:
-        with open(HOSTS_FILE, "w") as f:
+        tmp = f"{HOSTS_FILE}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(hosts, f, indent=2)
+        os.replace(tmp, HOSTS_FILE)
+
+
+def _sha256_fingerprint(key_bytes):
+    """Standard OpenSSH SHA256 host-key fingerprint: base64 of the FULL 32-byte
+    sha256 digest, padding stripped -- exactly what `ssh` / `ssh-keyscan` print,
+    so a user can verify it out of band. (The old code truncated to the first
+    16 bytes as colon-hex, which matched nothing.)"""
+    return "SHA256:" + base64.b64encode(
+        hashlib.sha256(key_bytes).digest()).decode("ascii").rstrip("=")
 
 
 def get_host_fingerprint(address, port=22, timeout=6):
@@ -65,12 +79,10 @@ def get_host_fingerprint(address, port=22, timeout=6):
         transport.handshake_timeout = timeout
         transport.start_client(timeout=timeout)
         key = transport.get_remote_server_key()
-        fp = hashlib.sha256(key.asbytes()).hexdigest()
-        fp_display = ":".join(fp[i:i+2] for i in range(0, 32, 2))  # first 16 bytes
         return {
             "success": True,
             "key_type": key.get_name(),
-            "fingerprint": f"SHA256:{fp_display}",
+            "fingerprint": _sha256_fingerprint(key.asbytes()),
             "raw_key": key,
         }
     except Exception as e:
@@ -89,12 +101,12 @@ def get_host_fingerprint(address, port=22, timeout=6):
 
 
 def add_host(name, address, port=22, user="root"):
-    hosts = load_hosts()
-    for h in hosts:
-        if h["address"] == address:
-            return False, "Host already exists"
+    if any(h["address"] == address for h in load_hosts()):
+        return False, "Host already exists"
 
-    # Fetch and store host key on first add (Trust On First Use)
+    # Fetch and store host key on first add (Trust On First Use).
+    # Network I/O stays OUTSIDE the lock; only the list read+append+save below
+    # is serialized.
     fp_result = get_host_fingerprint(address, port)
     if fp_result.get("success") and fp_result.get("raw_key"):
         _ensure_data_dir()
@@ -109,20 +121,24 @@ def add_host(name, address, port=22, user="root"):
         host_keys.save(KNOWN_HOSTS)
         log.info("Stored host key for %s (%s)", address, fp_result.get("fingerprint", "?"))
 
-    hosts.append({
-        "name": name,
-        "address": address,
-        "port": int(port),
-        "user": user,
-    })
-    save_hosts(hosts)
+    with _lock:
+        hosts = load_hosts()
+        if any(h["address"] == address for h in hosts):
+            return False, "Host already exists"
+        hosts.append({
+            "name": name,
+            "address": address,
+            "port": int(port),
+            "user": user,
+        })
+        save_hosts(hosts)
     return True, "Host added"
 
 
 def remove_host(address):
-    hosts = load_hosts()
-    hosts = [h for h in hosts if h["address"] != address]
-    save_hosts(hosts)
+    with _lock:
+        hosts = [h for h in load_hosts() if h["address"] != address]
+        save_hosts(hosts)
     return True, "Host removed"
 
 
@@ -131,12 +147,13 @@ def set_host_standby(address, standby):
     field/param name kept as "standby" for brevity) -- e.g. a backup server
     that is powered off most of the time: the monitor suppresses its offline
     notifications and the dashboard shows it neutrally instead of alarming."""
-    hosts = load_hosts()
-    for h in hosts:
-        if h["address"] == address:
-            h["standby"] = bool(standby)
-            save_hosts(hosts)
-            return True, "Host updated"
+    with _lock:
+        hosts = load_hosts()
+        for h in hosts:
+            if h["address"] == address:
+                h["standby"] = bool(standby)
+                save_hosts(hosts)
+                return True, "Host updated"
     return False, "Host not found"
 
 
@@ -655,6 +672,13 @@ def rotate_ssh_keys():
 
     all_verified = True
     for h, res in zip(hosts, results):
+        # Close the still-open pooled connection that authenticated with the OLD
+        # key (opened while appending the new key). invalidate_all() only clears
+        # the result cache, not the thread-local SSH pool, so without this
+        # test_connection would reuse the old-key session and "verify" nothing --
+        # then we'd remove the old key and lock ourselves out. _drop forces a
+        # fresh connect that actually exercises the NEW key.
+        _drop(h)
         ok = test_connection(h)
         res["verify"] = ok
         if ok and old_pub:

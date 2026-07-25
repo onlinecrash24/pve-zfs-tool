@@ -24,6 +24,7 @@ import shlex
 from typing import Any, Dict, Optional
 
 from app.ssh_manager import run_command
+from app.cache import invalidate_host as _invalidate_cache
 
 ARC_CONF_PATH = "/etc/modprobe.d/zfs.conf"
 SYS_ARC_MAX = "/sys/module/zfs/parameters/zfs_arc_max"
@@ -277,6 +278,13 @@ def set_arc_limit(host: Dict[str, Any], arc_max: Optional[int],
         runtime_applied = "__RT_OK__" in (rr.get("stdout") or "")
         if not runtime_applied:
             runtime_err = (rr.get("stderr") or rr.get("stdout") or "").strip()[:200]
+
+    # The ARC size just changed; drop cached reads (get_arc_stats is cached 15s)
+    # so the UI reflects the new value immediately instead of up to 15s later.
+    try:
+        _invalidate_cache(host["address"])
+    except Exception:
+        pass
 
     return {
         "success": True,

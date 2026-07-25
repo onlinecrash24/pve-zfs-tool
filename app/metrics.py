@@ -90,10 +90,33 @@ def sample_host(host):
 # Match the pool summary line in `zpool status` — it repeats READ/WRITE/CKSUM
 # totals at the vdev level. Shape:
 #   <name>   <state>   <read>   <write>   <cksum>
+# The counters are captured as raw tokens (not \d+) because zpool status
+# abbreviates large counts with SI suffixes (e.g. "1.2K", "15M"); _parse_count
+# converts them. Matching only \d+ silently dropped the whole line for a pool
+# with high error counts -- exactly when the alert matters most.
 _POOL_LINE_RE = re.compile(
     r"^\s*(\S+)\s+(ONLINE|DEGRADED|FAULTED|OFFLINE|UNAVAIL|REMOVED|SUSPENDED)"
-    r"\s+(\d+)\s+(\d+)\s+(\d+)"
+    r"\s+(\S+)\s+(\S+)\s+(\S+)"
 )
+
+_COUNT_SUFFIX = {"K": 1_000, "M": 1_000_000, "G": 1_000_000_000,
+                 "T": 1_000_000_000_000, "P": 1_000_000_000_000_000}
+
+
+def _parse_count(token):
+    """Parse a zpool error counter that may carry an SI suffix (1.2K, 15M)."""
+    token = (token or "").strip()
+    if token in ("", "-"):
+        return 0
+    mult = 1
+    suf = token[-1:].upper()
+    if suf in _COUNT_SUFFIX:
+        mult = _COUNT_SUFFIX[suf]
+        token = token[:-1]
+    try:
+        return int(round(float(token) * mult))
+    except ValueError:
+        return 0
 
 
 def parse_pool_errors(status_stdout, pool_name):
@@ -107,9 +130,9 @@ def parse_pool_errors(status_stdout, pool_name):
     for line in status_stdout.splitlines():
         m = _POOL_LINE_RE.match(line)
         if m and m.group(1) == pool_name:
-            return {"read": int(m.group(3)),
-                    "write": int(m.group(4)),
-                    "cksum": int(m.group(5))}
+            return {"read": _parse_count(m.group(3)),
+                    "write": _parse_count(m.group(4)),
+                    "cksum": _parse_count(m.group(5))}
     return None
 
 

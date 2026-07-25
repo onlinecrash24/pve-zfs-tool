@@ -17,7 +17,7 @@ AI_CONFIG_FILE = os.path.join(DATA_DIR, "ai_config.json")
 AI_REPORTS_FILE = os.path.join(DATA_DIR, "ai_reports.json")
 
 log = logging.getLogger(__name__)
-_lock = threading.Lock()
+_lock = threading.RLock()   # reentrant: guards the whole read-modify-write of the JSON stores
 _scheduler_start_lock = threading.Lock()
 _scheduler_thread = None
 _scheduler_stop = threading.Event()
@@ -25,7 +25,7 @@ _last_run_key = None  # Legacy: single-schedule last-run (kept for backwards com
 _last_run_keys = {}   # Per-schedule last-run: {schedule_key: run_key}
 
 # Cache for latest collected data (used by chat)
-_latest_data = None
+_latest_data = {}   # {host_address_or_None: collected_data} — keyed so chat can't answer from another host's cache
 
 DEFAULT_CONFIG = {
     "provider": "openai",
@@ -198,6 +198,19 @@ def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
+def _atomic_write_json(path, obj):
+    """Write JSON so a concurrent reader never sees a partial file: write to a
+    temp file in the same directory, then os.replace() (atomic on POSIX and
+    Windows). Prevents the truncating-open race that could blank the store."""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 # ---------------------------------------------------------------------------
 # Config management
 # ---------------------------------------------------------------------------
@@ -223,10 +236,8 @@ def load_config():
 
 
 def save_config(config):
-    _ensure_data_dir()
     with _lock:
-        with open(AI_CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=2)
+        _atomic_write_json(AI_CONFIG_FILE, config)
 
 
 def load_config_masked():
@@ -243,18 +254,22 @@ def load_config_masked():
 
 
 def save_config_unmasked(new_config):
-    """Save config, preserving existing API keys if masked values are sent back."""
-    existing = load_config()
-    for provider in ("openai", "anthropic", "custom"):
-        new_key = new_config.get(provider, {}).get("api_key", "")
-        if new_key and "..." in new_key:
-            # Masked key sent back – preserve existing
-            new_config[provider]["api_key"] = existing.get(provider, {}).get("api_key", "")
-    # Clear system_prompt if it matches a default (so language switch works)
-    sp = new_config.get("system_prompt", "").strip()
-    if sp == DEFAULT_SYSTEM_PROMPT_EN.strip() or sp == DEFAULT_SYSTEM_PROMPT_DE.strip():
-        new_config["system_prompt"] = ""
-    save_config(new_config)
+    """Save config, preserving existing API keys if masked values are sent back.
+
+    The read (load_config) and write happen under one lock so two concurrent
+    saves can't lose an update."""
+    with _lock:
+        existing = load_config()
+        for provider in ("openai", "anthropic", "custom"):
+            new_key = new_config.get(provider, {}).get("api_key", "")
+            if new_key and "..." in new_key:
+                # Masked key sent back – preserve existing
+                new_config[provider]["api_key"] = existing.get(provider, {}).get("api_key", "")
+        # Clear system_prompt if it matches a default (so language switch works)
+        sp = new_config.get("system_prompt", "").strip()
+        if sp == DEFAULT_SYSTEM_PROMPT_EN.strip() or sp == DEFAULT_SYSTEM_PROMPT_DE.strip():
+            new_config["system_prompt"] = ""
+        save_config(new_config)
 
 
 def list_ollama_models(base_url=None):
@@ -287,20 +302,21 @@ def load_reports():
 
 
 def _save_reports(reports):
-    _ensure_data_dir()
     with _lock:
-        with open(AI_REPORTS_FILE, "w") as f:
-            json.dump(reports, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(AI_REPORTS_FILE, reports)
 
 
 def _add_report(report):
     config = load_config()
     max_reports = config.get("max_reports", 50)
-    reports = load_reports()
-    reports.insert(0, report)
-    if len(reports) > max_reports:
-        reports = reports[:max_reports]
-    _save_reports(reports)
+    # Hold the lock across read+insert+write so two concurrent report
+    # completions (scheduler thread + UI async thread) can't lose one.
+    with _lock:
+        reports = load_reports()
+        reports.insert(0, report)
+        if len(reports) > max_reports:
+            reports = reports[:max_reports]
+        _save_reports(reports)
 
 
 # format_age is now in snapshot_analysis.py but keep alias for backwards compat
@@ -501,7 +517,7 @@ def collect_host_data(host_address=None):
 
         data["hosts"].append(host_data)
 
-    _latest_data = data
+    _latest_data[host_address] = data
     return data
 
 
@@ -1073,14 +1089,18 @@ def chat(question, host_address=None, lang_override=None):
     else:
         system_prompt += "\n\nThe user is asking a follow-up question about their ZFS infrastructure. Answer based on the data provided."
 
-    # Use cached data or collect fresh for the specified host
-    if _latest_data is None:
+    # Use cached data for THIS host (keyed by host_address) -- never whatever
+    # was collected last for some other host -- and collect on demand if absent.
+    data = _latest_data.get(host_address)
+    if data is None:
         try:
-            collect_host_data(host_address)
+            data = collect_host_data(host_address)
         except Exception as e:
             return {"success": False, "error": f"Data collection failed: {e}"}
+        if data is None:
+            return {"success": False, "error": "Host not found or no data collected"}
 
-    data_json = json.dumps(_latest_data, indent=2, ensure_ascii=False, default=str)
+    data_json = json.dumps(data, indent=2, ensure_ascii=False, default=str)
     if len(data_json) > 25000:
         data_json = data_json[:25000] + "\n... (truncated)"
 

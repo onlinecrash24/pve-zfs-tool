@@ -276,7 +276,40 @@ def reverse_sync_async(target_host: Dict[str, Any],
             "-o BatchMode=yes -o StrictHostKeyChecking=yes "
             f"-o ConnectTimeout=20 -p {_port}"
         )
+        # Safety guard for `recv -F`: -F rolls the destination back to match the
+        # stream. If the destination dataset still holds its own snapshots the
+        # source is intact (steady state), not a disaster -- forcing would
+        # destroy live data. Refuse here, server-side, so a direct API call with
+        # force=True cannot bypass the UI's check_reverse_target preflight. Uses
+        # the same SSH path as the transfer; if the source is unreachable the
+        # send below just fails harmlessly.
+        if _force:
+            progress("Checking destination for existing snapshots …")
+            check = (
+                f"ssh {ssh_opts} {shlex.quote(_user + '@' + _addr)} "
+                f"'zfs list -H -t snapshot -o name -r -d 1 {shlex.quote(_src_ds)} "
+                f"2>/dev/null | head -5'"
+            )
+            cr = run_command(_host, check, timeout=60)
+            dest_snaps = [ln.strip() for ln in (cr.get("stdout") or "").splitlines() if ln.strip()]
+            if dest_snaps:
+                progress("Aborted: destination still has snapshots", ok=False)
+                return {
+                    "success": False,
+                    "error": (f"Refusing forced reverse-sync: destination {_src_ds} "
+                              f"still has {len(dest_snaps)} snapshot(s) -- the source "
+                              "looks intact, forcing would destroy live data. Remove "
+                              "the destination dataset first if this really is a rebuild."),
+                    "snapshot": full_snap,
+                    "source_dataset": _src_ds,
+                }
+        # `set -o pipefail` so a failed `zfs send` (source snapshot gone, send
+        # error) is not masked by the receiver exiting 0 -- otherwise a broken
+        # resend would be reported as a successful DR restore. Guarded with
+        # 2>/dev/null so a non-bash /bin/sh just ignores it (no worse than
+        # before); Proxmox's root shell is bash, where it takes effect.
         cmd = (
+            f"set -o pipefail 2>/dev/null; "
             f"zfs send -R {shlex.quote(full_snap)} | "
             f"ssh {ssh_opts} {shlex.quote(_user + '@' + _addr)} "
             f"'zfs recv {recv_flag} {shlex.quote(_src_ds)}' "

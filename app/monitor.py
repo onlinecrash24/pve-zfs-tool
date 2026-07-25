@@ -20,12 +20,19 @@ Events produced (must match keys in notifications.DEFAULT_CONFIG.events):
 
 import json
 import logging
+import threading
 import time
 
 from app.database import get_conn
 from app.notifications import send_notification
 
 log = logging.getLogger(__name__)
+
+# Serialize the whole alert pass: the metrics sampler thread and request threads
+# (e.g. POST /api/metrics/sample-now) must not both run the check-then-set-then-
+# notify sequence on the same monitor_state row concurrently, or a transition
+# fires twice (duplicate notification, lost cooldown timestamp).
+_alert_lock = threading.Lock()
 
 # Health values we consider "bad"
 BAD_HEALTH = {"DEGRADED", "FAULTED", "UNAVAIL", "REMOVED", "SUSPENDED"}
@@ -433,6 +440,14 @@ def check_auto_snapshots(host):
 # ---------------------------------------------------------------------------
 
 def run_checks(host, pools, reachable, pools_status=None, pools_valid=False):
+    """Serialize alert processing under _alert_lock so the sampler thread and a
+    concurrent request thread can't both observe the same state transition and
+    fire duplicate notifications."""
+    with _alert_lock:
+        _run_checks(host, pools, reachable, pools_status, pools_valid)
+
+
+def _run_checks(host, pools, reachable, pools_status=None, pools_valid=False):
     """Run all checks for one host. Never raises.
 
     ``pools_valid`` must only be True when the pool listing itself succeeded
