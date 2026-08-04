@@ -256,7 +256,13 @@ def get_pool_history(host, pool_name, limit=50):
         limit = validate_limit(limit, default=50, maximum=10000)
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    result = run_command(host, f"zpool history {pool_name} | tail -n {limit}")
+    # `zpool history` always emits the pool's COMPLETE history and only then
+    # gets tailed -- on a pool with years of auto-snapshots that is hundreds of
+    # thousands of entries, so it can take a while. Hence the raised timeout
+    # (the 30s default aborted it with no explanation) and the cache, which
+    # makes a second look instant.
+    result = run_command(host, f"zpool history {pool_name} | tail -n {limit}",
+                         timeout=120, cache_ttl=_TTL_MED)
     return result
 
 
