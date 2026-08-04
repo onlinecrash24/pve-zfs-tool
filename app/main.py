@@ -2258,6 +2258,135 @@ def api_dr_restore_category():
     return jsonify(res)
 
 
+# ---------------------------------------------------------------------------
+# Guest migration between two non-clustered hosts (near-live, ZFS send/recv)
+# ---------------------------------------------------------------------------
+
+def _migrate_hosts(data):
+    """(source, target) as registered hosts. Migration never uses ad-hoc
+    password targets -- both ends must be known, keyed hosts."""
+    src = _find_host((data.get("source") or "").strip())
+    tgt = _find_host((data.get("target") or "").strip())
+    return src, tgt
+
+
+@app.route("/api/migrate/guests")
+@login_required
+def api_migrate_guests():
+    """VMs + CTs on a host, for the migration source picker."""
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    from app.zfs_commands import get_pve_vms, get_pve_cts
+    out = list(get_pve_vms(host) or []) + list(get_pve_cts(host) or [])
+    out.sort(key=lambda g: int(g["vmid"]) if str(g.get("vmid", "")).isdigit() else 0)
+    return jsonify({"guests": out})
+
+
+@app.route("/api/migrate/preflight", methods=["POST"])
+@login_required
+def api_migrate_preflight():
+    """Everything that must hold before a migration may start."""
+    from app.migrate import preflight
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    if src["address"] == tgt["address"]:
+        return jsonify({"success": False, "error": "source and target are the same host"}), 400
+    return jsonify(preflight(src, tgt,
+                             (data.get("vmid") or "").strip(),
+                             (data.get("gtype") or "qemu").strip(),
+                             (data.get("target_root") or "").strip(),
+                             new_vmid=(data.get("new_vmid") or None)))
+
+
+@app.route("/api/migrate/precopy", methods=["POST"])
+@login_required
+def api_migrate_precopy():
+    """Start a pre-copy (guest keeps running). Repeatable to shrink the delta."""
+    from app.migrate import precopy_async
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    plan = data.get("plan") or []
+    if not plan:
+        return jsonify({"success": False, "error": "empty migration plan"}), 400
+    task_id = precopy_async(src, tgt, plan, bool(data.get("pull", True)))
+    audit_log("migrate.precopy", target=str(data.get("vmid")),
+              host=src["address"], success=True,
+              details={"task_id": task_id, "to": tgt["address"],
+                       "disks": len(plan)})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/migrate/cutover", methods=["POST"])
+@login_required
+def api_migrate_cutover():
+    """Stop the guest, send the final delta, move the config, start on target."""
+    from app.migrate import cutover_async
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    plan = data.get("plan") or []
+    if not plan:
+        return jsonify({"success": False, "error": "empty migration plan"}), 400
+    task_id = cutover_async(
+        src, tgt, (data.get("vmid") or "").strip(),
+        (data.get("gtype") or "qemu").strip(), plan,
+        bool(data.get("pull", True)),
+        new_vmid=(data.get("new_vmid") or None),
+        storage_map=(data.get("storage_map") or {}),
+        bridge_map=(data.get("bridge_map") or {}),
+        start_on_target=bool(data.get("start_on_target", True)),
+        shutdown_timeout=int(data.get("shutdown_timeout") or 120))
+    audit_log("migrate.cutover", target=str(data.get("vmid")),
+              host=src["address"], success=True,
+              details={"task_id": task_id, "to": tgt["address"],
+                       "new_vmid": data.get("new_vmid"),
+                       "start_on_target": bool(data.get("start_on_target", True))})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/migrate/rollback", methods=["POST"])
+@login_required
+def api_migrate_rollback():
+    """Undo a cutover: remove the guest on the target, unlock + start the source."""
+    from app.migrate import rollback
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    res = rollback(src, tgt, (data.get("vmid") or "").strip(),
+                   (data.get("gtype") or "qemu").strip(),
+                   target_vmid=(data.get("new_vmid") or None),
+                   start_source=bool(data.get("start_source", True)))
+    audit_log("migrate.rollback", target=str(data.get("vmid")),
+              host=src["address"], success=res.get("success", False),
+              details={"from": tgt["address"], "steps": res.get("steps")})
+    return jsonify(res)
+
+
+@app.route("/api/migrate/cleanup-source", methods=["POST"])
+@login_required
+def api_migrate_cleanup_source():
+    """Remove the migrated guest + its datasets from the source (explicit)."""
+    from app.migrate import cleanup_source
+    data = request.get_json(silent=True) or {}
+    src = _find_host((data.get("source") or "").strip())
+    if not src:
+        return jsonify({"success": False, "error": "source host not found"}), 404
+    res = cleanup_source(src, (data.get("vmid") or "").strip(),
+                         (data.get("gtype") or "qemu").strip(),
+                         data.get("datasets") or [])
+    audit_log("migrate.cleanup_source", target=str(data.get("vmid")),
+              host=src["address"], success=res.get("success", False),
+              details={"datasets": data.get("datasets")})
+    return jsonify(res)
+
+
 @app.route("/api/dr/pool-import-status", methods=["GET"])
 @login_required
 def api_dr_pool_import_status():

@@ -146,6 +146,7 @@ async function renderView() {
         replication: viewReplication,
         dr: viewDR,
         "config-restore": viewConfigRestore,
+        migrate: viewMigrate,
         guests: viewGuests,
         health: viewHealth,
         metrics: viewMetrics,
@@ -5406,6 +5407,264 @@ async function viewDR() {
 
 // -- Config Restore (from a host-config backup onto a fresh PVE) -----------
 const _CR_CATS = ["guests", "network", "storage", "apt", "access", "ssh", "firewall", "jobs", "other", "info"];
+
+// Near-live guest migration between two non-clustered hosts. Four numbered
+// steps mirroring the PVE Config Restore layout: check -> pre-copy -> cutover
+// -> finish/rollback. The pre-copy runs while the guest is up; only the cutover
+// has downtime.
+async function viewMigrate() {
+    setContent(loading());
+    let hosts;
+    try { hosts = await API.get("/api/hosts"); }
+    catch (e) { setContent(h("p", { className: "muted" }, e.message || "")); return; }
+
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("mig_title")),
+        h("p", {}, t("mig_subtitle")),
+    ]));
+    if (hosts.length < 2) {
+        container.appendChild(h("div", { className: "card" },
+            h("div", { className: "card-body" }, t("mig_need_two_hosts"))));
+        setContent(container); return;
+    }
+
+    const opts = () => hosts.map(hh => h("option", { value: hh.address },
+        (hh.name || hh.address) + " (" + hh.address + ")"));
+    const lbl = txt => h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, txt);
+
+    const srcSel = h("select", { className: "form-input" }, opts());
+    const guestSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+    const tgtSel = h("select", { className: "form-input" }, opts());
+    if (tgtSel.options.length > 1) tgtSel.selectedIndex = 1;
+    const rootInp = h("input", { type: "text", className: "form-input", placeholder: "rpool/data" });
+    const newVmidInp = h("input", { type: "text", className: "form-input", placeholder: t("mig_same_vmid"), style: "max-width:140px" });
+
+    let pf = null;                 // last preflight result (plan + direction)
+    const checksBox = h("div", { style: "margin-top:12px" });
+
+    const _guest = () => {
+        const o = guestSel.options[guestSel.selectedIndex];
+        return o && o.value ? JSON.parse(o.value) : null;
+    };
+    const _base = () => {
+        const g = _guest();
+        return {
+            source: srcSel.value, target: tgtSel.value,
+            vmid: g ? g.vmid : "", gtype: g ? g.type : "qemu",
+            target_root: rootInp.value.trim(),
+            new_vmid: newVmidInp.value.trim() || null,
+        };
+    };
+
+    async function loadGuests() {
+        guestSel.innerHTML = "";
+        guestSel.appendChild(h("option", { value: "" }, t("loading")));
+        try {
+            const r = await API.get("/api/migrate/guests?host=" + encodeURIComponent(srcSel.value));
+            guestSel.innerHTML = "";
+            const gs = r.guests || [];
+            if (!gs.length) { guestSel.appendChild(h("option", { value: "" }, t("mig_no_guests"))); return; }
+            gs.forEach(g => guestSel.appendChild(h("option", { value: JSON.stringify(g) },
+                `${g.vmid} — ${g.name || "?"} (${g.type === "lxc" ? "CT" : "VM"}, ${g.status})`)));
+        } catch (e) { guestSel.innerHTML = ""; guestSel.appendChild(h("option", { value: "" }, e.message || t("failed"))); }
+    }
+    srcSel.onchange = loadGuests;
+    await loadGuests();
+
+    // --- 1. selection + preflight -----------------------------------------
+    const card1 = h("div", { className: "card" });
+    card1.appendChild(h("div", { className: "card-header" }, t("mig_step1")));
+    const b1 = h("div", { className: "card-body" });
+    b1.appendChild(h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px" }, [
+        h("div", {}, [lbl(t("mig_source")), srcSel]),
+        h("div", {}, [lbl(t("mig_guest")), guestSel]),
+        h("div", {}, [lbl(t("mig_target")), tgtSel]),
+        h("div", {}, [lbl(t("mig_target_root")), rootInp]),
+        h("div", {}, [lbl(t("mig_new_vmid")), newVmidInp]),
+    ]));
+    const checkBtn = h("button", { className: "btn btn-primary btn-sm", style: "margin-top:12px" }, t("mig_check"));
+    checkBtn.onclick = async () => {
+        const g = _guest();
+        if (!g) { toast(t("mig_no_guest_selected"), "error"); return; }
+        if (!rootInp.value.trim()) { toast(t("mig_need_root"), "error"); return; }
+        checkBtn.disabled = true;
+        checksBox.innerHTML = "";
+        checksBox.appendChild(h("p", { className: "muted" }, t("mig_checking")));
+        try {
+            pf = await API.post("/api/migrate/preflight", _base());
+        } catch (e) { checksBox.innerHTML = ""; checksBox.appendChild(h("p", { style: "color:var(--danger)" }, e.message || t("failed"))); checkBtn.disabled = false; return; }
+        checkBtn.disabled = false;
+        checksBox.innerHTML = "";
+        if (!pf.success && pf.error) {
+            checksBox.appendChild(h("p", { style: "color:var(--danger)" }, pf.error));
+            return;
+        }
+        (pf.checks || []).forEach(c => {
+            const color = c.level === "ok" ? "var(--success)" : (c.level === "warn" ? "var(--warning)" : "var(--danger)");
+            const mark = c.level === "ok" ? "✓" : (c.level === "warn" ? "⚠" : "✗");
+            checksBox.appendChild(h("div", { style: "display:flex;gap:8px;font-size:12px;margin-bottom:4px" }, [
+                h("span", { style: "color:" + color + ";font-weight:700" }, mark),
+                h("span", { style: "min-width:120px;font-family:monospace" }, t("mig_chk_" + c.id) || c.id),
+                h("span", { className: "muted" }, c.detail || ""),
+            ]));
+        });
+        if ((pf.plan || []).length) {
+            const rows = pf.plan.map(p =>
+                `<tr><td style="font-family:monospace">${escapeHtml(p.source_dataset)}</td>` +
+                `<td style="font-family:monospace">${escapeHtml(p.target_dataset)}</td>` +
+                `<td>${escapeHtml(p.used || "")}</td>` +
+                `<td>${p.mode === "incremental" ? "⏩ " + escapeHtml(t("mig_incremental")) + " (" + escapeHtml(p.common_snapshot) + ")" : escapeHtml(t("mig_full"))}</td></tr>`).join("");
+            const tbl = h("div", { style: "overflow-x:auto;margin-top:10px" });
+            tbl.innerHTML = `<table class="data-table" style="width:100%;font-size:12px"><thead><tr>` +
+                `<th>${escapeHtml(t("mig_src_ds"))}</th><th>${escapeHtml(t("mig_tgt_ds"))}</th>` +
+                `<th>${escapeHtml(t("mig_size"))}</th><th>${escapeHtml(t("mig_mode"))}</th></tr></thead><tbody>${rows}</tbody></table>`;
+            checksBox.appendChild(tbl);
+        }
+        buildMaps();
+    };
+    b1.appendChild(checkBtn);
+    b1.appendChild(checksBox);
+    card1.appendChild(b1);
+    container.appendChild(card1);
+
+    // --- 2. pre-copy -------------------------------------------------------
+    const card2 = h("div", { className: "card", style: "margin-top:16px" });
+    card2.appendChild(h("div", { className: "card-header" }, t("mig_step2")));
+    const b2 = h("div", { className: "card-body" });
+    b2.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("mig_precopy_intro")));
+    const preBtn = h("button", { className: "btn btn-primary btn-sm" }, t("mig_precopy_start"));
+    const preStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    preBtn.onclick = async () => {
+        if (!pf || !pf.can_precopy) { toast(t("mig_run_check_first"), "error"); return; }
+        preBtn.disabled = true; preStatus.textContent = t("mig_starting");
+        try {
+            const r = await API.post("/api/migrate/precopy",
+                Object.assign(_base(), { plan: pf.plan, pull: pf.pull }));
+            pollReplicationTask(r.task_id, {
+                onTick: rec => { preStatus.textContent = rec.progress || t("mig_running"); },
+                onDone: rec => {
+                    preBtn.disabled = false;
+                    const ok = rec.result && rec.result.success;
+                    preStatus.textContent = (ok ? "✓ " : "✗ ") + (rec.progress || "");
+                    toast(ok ? t("mig_precopy_ok") : t("mig_precopy_failed"), ok ? "success" : "error");
+                    if (ok) checkBtn.onclick();     // refresh: next run is incremental
+                },
+                onError: msg => { preBtn.disabled = false; preStatus.textContent = "✗ " + msg; toast(msg, "error"); },
+            });
+        } catch (e) { preBtn.disabled = false; preStatus.textContent = ""; toast(e.message || t("failed"), "error"); }
+    };
+    b2.appendChild(preBtn);
+    b2.appendChild(preStatus);
+    card2.appendChild(b2);
+    container.appendChild(card2);
+
+    // --- 3. cutover --------------------------------------------------------
+    const card3 = h("div", { className: "card", style: "margin-top:16px" });
+    card3.appendChild(h("div", { className: "card-header" }, t("mig_step3")));
+    const b3 = h("div", { className: "card-body" });
+    b3.appendChild(h("div", {
+        style: "color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;font-size:12px;margin-bottom:10px",
+    }, t("mig_cutover_warn")));
+    const mapsBox = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:10px" });
+    const storFrom = h("input", { type: "text", className: "form-input", placeholder: "local-zfs" });
+    const storTo = h("input", { type: "text", className: "form-input", placeholder: "local-zfs" });
+    const bridgeInputs = {};
+    function buildMaps() {
+        mapsBox.innerHTML = "";
+        mapsBox.appendChild(h("div", {}, [lbl(t("mig_storage_from")), storFrom]));
+        mapsBox.appendChild(h("div", {}, [lbl(t("mig_storage_to")), storTo]));
+        Object.keys(bridgeInputs).forEach(k => delete bridgeInputs[k]);
+        ((pf && pf.bridges) || []).forEach(br => {
+            const inp = h("input", { type: "text", className: "form-input", value: br });
+            bridgeInputs[br] = inp;
+            mapsBox.appendChild(h("div", {}, [lbl(t("mig_bridge_map").replace("{b}", br)), inp]));
+        });
+    }
+    buildMaps();
+    const startCb = h("input", { type: "checkbox", checked: true });
+    const cutBtn = h("button", { className: "btn btn-warning btn-sm" }, t("mig_cutover_start"));
+    const cutStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    cutBtn.onclick = async () => {
+        if (!pf || !pf.can_cutover) { toast(t("mig_run_check_first"), "error"); return; }
+        const g = _guest();
+        if (!confirm(t("mig_cutover_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", tgtSel.value))) return;
+        const smap = {}, bmap = {};
+        if (storFrom.value.trim() && storTo.value.trim() && storFrom.value.trim() !== storTo.value.trim())
+            smap[storFrom.value.trim()] = storTo.value.trim();
+        Object.entries(bridgeInputs).forEach(([from, inp]) => {
+            if (inp.value.trim() && inp.value.trim() !== from) bmap[from] = inp.value.trim();
+        });
+        cutBtn.disabled = true; cutStatus.textContent = t("mig_starting");
+        try {
+            const r = await API.post("/api/migrate/cutover", Object.assign(_base(), {
+                plan: pf.plan, pull: pf.pull, storage_map: smap, bridge_map: bmap,
+                start_on_target: startCb.checked,
+            }));
+            pollReplicationTask(r.task_id, {
+                onTick: rec => { cutStatus.textContent = rec.progress || t("mig_running"); },
+                onDone: rec => {
+                    cutBtn.disabled = false;
+                    const res = rec.result || {};
+                    cutStatus.textContent = (res.success ? "✓ " : "✗ ") + (rec.progress || "");
+                    toast(res.success ? t("mig_cutover_ok") : (res.error || t("mig_cutover_failed")),
+                        res.success ? "success" : "error");
+                },
+                onError: msg => { cutBtn.disabled = false; cutStatus.textContent = "✗ " + msg; toast(msg, "error"); },
+            });
+        } catch (e) { cutBtn.disabled = false; cutStatus.textContent = ""; toast(e.message || t("failed"), "error"); }
+    };
+    b3.appendChild(mapsBox);
+    b3.appendChild(h("label", { style: "display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px" },
+        [startCb, h("span", {}, t("mig_start_on_target"))]));
+    b3.appendChild(cutBtn);
+    b3.appendChild(cutStatus);
+    card3.appendChild(b3);
+    container.appendChild(card3);
+
+    // --- 4. finish / rollback ---------------------------------------------
+    const card4 = h("div", { className: "card", style: "margin-top:16px" });
+    card4.appendChild(h("div", { className: "card-header" }, t("mig_step4")));
+    const b4 = h("div", { className: "card-body" });
+    b4.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("mig_finish_intro")));
+    const rbBtn = h("button", { className: "btn btn-sm" }, t("mig_rollback"));
+    const cleanBtn = h("button", { className: "btn btn-danger btn-sm", style: "margin-left:8px" }, t("mig_cleanup"));
+    const finStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    rbBtn.onclick = async () => {
+        const g = _guest();
+        if (!confirm(t("mig_rollback_confirm").replace("{g}", g ? g.vmid : "?"))) return;
+        rbBtn.disabled = true; finStatus.textContent = t("mig_running");
+        try {
+            const r = await API.post("/api/migrate/rollback", _base());
+            finStatus.textContent = (r.success ? "✓ " : "✗ ") +
+                (r.steps || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
+            toast(r.success ? t("mig_rollback_ok") : t("mig_rollback_failed"), r.success ? "success" : "error");
+        } catch (e) { finStatus.textContent = "✗ " + (e.message || ""); }
+        finally { rbBtn.disabled = false; }
+    };
+    cleanBtn.onclick = async () => {
+        const g = _guest();
+        if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
+        if (!confirm(t("mig_cleanup_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", srcSel.value))) return;
+        cleanBtn.disabled = true; finStatus.textContent = t("mig_running");
+        try {
+            const r = await API.post("/api/migrate/cleanup-source", Object.assign(_base(), {
+                datasets: pf.plan.map(p => p.source_dataset),
+            }));
+            finStatus.textContent = (r.success ? "✓ " : "✗ ") +
+                (r.results || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
+            toast(r.success ? t("mig_cleanup_ok") : t("mig_cleanup_failed"), r.success ? "success" : "error");
+        } catch (e) { finStatus.textContent = "✗ " + (e.message || ""); }
+        finally { cleanBtn.disabled = false; }
+    };
+    b4.appendChild(h("div", {}, [rbBtn, cleanBtn]));
+    b4.appendChild(finStatus);
+    card4.appendChild(b4);
+    container.appendChild(card4);
+
+    setContent(container);
+}
+
 
 async function viewConfigRestore() {
     setContent(loading());
