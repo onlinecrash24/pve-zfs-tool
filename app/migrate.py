@@ -854,6 +854,101 @@ def rollback(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
             "source_started": started}
 
 
+# Migration snapshots -------------------------------------------------------
+#
+# Every transfer round snapshots the source and ships it, so the name also
+# exists on the target. They are REQUIRED while a migration is in flight (an
+# incremental send needs a common base) but nothing needs them afterwards --
+# and they would otherwise show up in the snapshot check as "manual" snapshots,
+# i.e. the tool reporting its own leftovers as forgotten clutter.
+
+def is_migration_snapshot(name: str) -> bool:
+    return bool(_SNAP_NAME_RE.match((name or "").strip()))
+
+
+def select_snapshots_to_delete(snaps: List[Dict[str, Any]],
+                               keep_latest: bool = False) -> List[Dict[str, Any]]:
+    """Which of the collected migration snapshots to destroy.
+
+    ``keep_latest`` spares the newest one per dataset -- on the target that is
+    the common base a later migration *back* would send incrementally from, so
+    dropping it would force a full copy.
+    """
+    if not keep_latest:
+        return list(snaps or [])
+    newest: Dict[str, Dict[str, Any]] = {}
+    for s in snaps or []:
+        ds = s.get("dataset", "")
+        # names are migrate-YYYYmmdd-HHMMSS, so lexicographic == chronological
+        if ds not in newest or s.get("snapshot", "") > newest[ds].get("snapshot", ""):
+            newest[ds] = s
+    keep = {(s.get("dataset"), s.get("snapshot")) for s in newest.values()}
+    return [s for s in (snaps or [])
+            if (s.get("dataset"), s.get("snapshot")) not in keep]
+
+
+def list_migration_snapshots(host: Dict[str, Any],
+                             datasets: List[str]) -> List[Dict[str, Any]]:
+    """Leftover ``migrate-*`` snapshots of the given datasets on one host."""
+    out: List[Dict[str, Any]] = []
+    for ds in datasets or []:
+        if not _DS_RE.match(ds or ""):
+            continue
+        r = run_command(host, f"zfs list -H -o name,used -t snapshot -d 1 "
+                              f"{shlex.quote(ds)} -s creation 2>/dev/null", timeout=20)
+        for ln in (r.get("stdout") or "").splitlines():
+            parts = ln.split("\t")
+            if len(parts) < 2 or "@" not in parts[0]:
+                continue
+            dsname, snap = parts[0].split("@", 1)
+            if is_migration_snapshot(snap):
+                out.append({"dataset": dsname, "snapshot": snap,
+                            "full": parts[0], "used": parts[1]})
+    return out
+
+
+def migration_snapshot_overview(source: Dict[str, Any], target: Dict[str, Any],
+                                plan: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Leftover migration snapshots on both sides, for review before deleting."""
+    src_ds = [p.get("source_dataset", "") for p in plan or []]
+    tgt_ds = [p.get("target_dataset", "") for p in plan or []]
+    return {"success": True,
+            "source": list_migration_snapshots(source, src_ds),
+            "target": list_migration_snapshots(target, tgt_ds)}
+
+
+def cleanup_migration_snapshots(source: Dict[str, Any], target: Dict[str, Any],
+                                plan: List[Dict[str, Any]],
+                                keep_latest_on_target: bool = True) -> Dict[str, Any]:
+    """Destroy the leftover migration snapshots on both hosts.
+
+    Refuses while a migration task is still running -- deleting the base of an
+    in-flight incremental send would break it.
+    """
+    from app.tasks import running_tasks
+    busy = running_tasks("guest-migration")
+    if busy:
+        return {"success": False, "error": "a migration is still running -- "
+                                           "clean up once it has finished",
+                "running": [b.get("name") for b in busy]}
+
+    ov = migration_snapshot_overview(source, target, plan)
+    todo = [("source", source, s) for s in select_snapshots_to_delete(ov["source"])]
+    todo += [("target", target, s) for s in
+             select_snapshots_to_delete(ov["target"], keep_latest=keep_latest_on_target)]
+
+    results = []
+    for side, host, s in todo:
+        r = run_command(host, f"zfs destroy {shlex.quote(s['full'])} 2>&1", timeout=120)
+        results.append({"side": side, "snapshot": s["full"],
+                        "success": bool(r.get("success")),
+                        "output": (r.get("stdout") or "").strip()[:200]})
+    return {"success": all(x["success"] for x in results) if results else True,
+            "deleted": sum(1 for x in results if x["success"]),
+            "kept_on_target": keep_latest_on_target,
+            "results": results}
+
+
 def cleanup_source(source: Dict[str, Any], vmid: str, gtype: str,
                    datasets: List[str]) -> Dict[str, Any]:
     """Remove the migrated guest from the source -- explicit, never automatic.

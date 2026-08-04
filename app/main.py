@@ -2471,6 +2471,38 @@ def api_migrate_rollback():
     return jsonify(res)
 
 
+@app.route("/api/migrate/snapshots", methods=["POST"])
+@login_required
+def api_migrate_snapshots():
+    """Leftover migrate-* snapshots on both hosts, for review before deleting."""
+    from app.migrate import migration_snapshot_overview
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    return jsonify(migration_snapshot_overview(src, tgt, data.get("plan") or []))
+
+
+@app.route("/api/migrate/cleanup-snapshots", methods=["POST"])
+@login_required
+def api_migrate_cleanup_snapshots():
+    """Destroy the leftover migration snapshots on both hosts."""
+    from app.migrate import cleanup_migration_snapshots
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    res = cleanup_migration_snapshots(
+        src, tgt, data.get("plan") or [],
+        keep_latest_on_target=bool(data.get("keep_latest_on_target", True)))
+    audit_log("migrate.cleanup_snapshots", target=str(data.get("vmid")),
+              host=src["address"], success=res.get("success", False),
+              details={"deleted": res.get("deleted"),
+                       "kept_on_target": res.get("kept_on_target"),
+                       "target_host": tgt["address"]})
+    return jsonify(res)
+
+
 @app.route("/api/migrate/cleanup-source", methods=["POST"])
 @login_required
 def api_migrate_cleanup_source():

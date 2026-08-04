@@ -5786,6 +5786,53 @@ async function viewMigrate() {
     };
     b4.appendChild(h("div", {}, [rbBtn, cleanBtn]));
     b4.appendChild(finStatus);
+
+    // Leftover migrate-* snapshots: needed as the incremental base during the
+    // migration, pure clutter afterwards (and the snapshot check would report
+    // them as forgotten "manual" snapshots).
+    const snapBox = h("div", { style: "margin-top:14px;border-top:1px solid var(--border);padding-top:12px" });
+    snapBox.appendChild(h("div", { style: "font-size:12px;font-weight:600;margin-bottom:4px" }, t("mig_snaps_title")));
+    snapBox.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("mig_snaps_intro")));
+    const keepCb = h("input", { type: "checkbox", checked: true });
+    const snapList = h("div", { style: "font-size:12px;margin-top:6px" });
+    const snapBtn = h("button", { className: "btn btn-sm" }, t("mig_snaps_show"));
+    const snapDel = h("button", { className: "btn btn-danger btn-sm", style: "margin-left:8px;display:none" }, t("mig_snaps_delete"));
+    snapBtn.onclick = async () => {
+        if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
+        snapBtn.disabled = true; snapList.textContent = t("mig_running");
+        try {
+            const r = await API.post("/api/migrate/snapshots", Object.assign(_base(), { plan: pf.plan }));
+            snapList.innerHTML = "";
+            const all = [...(r.source || []).map(s => [t("mig_side_source"), s]),
+                         ...(r.target || []).map(s => [t("mig_side_target"), s])];
+            if (!all.length) {
+                snapList.appendChild(h("div", { style: "color:var(--success)" }, "✓ " + t("mig_snaps_none")));
+                snapDel.style.display = "none";
+            } else {
+                all.forEach(([side, s]) => snapList.appendChild(
+                    h("div", { style: "font-family:monospace" }, `${side}: ${s.full}  (${s.used})`)));
+                snapDel.style.display = "";
+            }
+        } catch (e) { snapList.textContent = "✗ " + (e.message || ""); }
+        finally { snapBtn.disabled = false; }
+    };
+    snapDel.onclick = async () => {
+        if (!confirm(t("mig_snaps_confirm"))) return;
+        snapDel.disabled = true;
+        try {
+            const r = await API.post("/api/migrate/cleanup-snapshots", Object.assign(_base(), {
+                plan: pf.plan, keep_latest_on_target: keepCb.checked,
+            }));
+            if (r.success) { toast(t("mig_snaps_ok").replace("{n}", String(r.deleted || 0)), "success"); snapBtn.onclick(); }
+            else { openModal(t("mig_snaps_failed"), `<pre class="output" style="font-size:11px">${escapeHtml(r.error || JSON.stringify(r.results || [], null, 2))}</pre>`); }
+        } catch (e) { toast(e.message || t("failed"), "error"); }
+        finally { snapDel.disabled = false; }
+    };
+    snapBox.appendChild(h("label", { style: "display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px" },
+        [keepCb, h("span", {}, t("mig_snaps_keep_latest"))]));
+    snapBox.appendChild(h("div", {}, [snapBtn, snapDel]));
+    snapBox.appendChild(snapList);
+    b4.appendChild(snapBox);
     card4.appendChild(b4);
     container.appendChild(card4);
 

@@ -311,6 +311,51 @@ def test_incremental_flag_only_with_base():
     assert " -i " not in _pull_cmd(None)
 
 
+# --- leftover migration snapshots -----------------------------------------
+
+def _snaps(ds, *names):
+    return [{"dataset": ds, "snapshot": n, "full": f"{ds}@{n}", "used": "1M"}
+            for n in names]
+
+
+def test_recognises_only_migration_snapshots():
+    assert m.is_migration_snapshot("migrate-20260804-101319")
+    assert not m.is_migration_snapshot("zfs-auto-snap_daily-2026-08-04-0425")
+    assert not m.is_migration_snapshot("migrate-nope")
+    assert not m.is_migration_snapshot("")
+
+
+def test_delete_all_when_not_keeping():
+    s = _snaps("rpool/data/subvol-253-disk-0", "migrate-20260804-101319",
+               "migrate-20260804-120000")
+    assert len(m.select_snapshots_to_delete(s)) == 2
+
+
+def test_keep_latest_spares_the_newest_per_dataset():
+    s = (_snaps("a/x", "migrate-20260804-101319", "migrate-20260804-120000")
+         + _snaps("a/y", "migrate-20260804-090000"))
+    todo = m.select_snapshots_to_delete(s, keep_latest=True)
+    names = {(x["dataset"], x["snapshot"]) for x in todo}
+    assert ("a/x", "migrate-20260804-101319") in names   # older one goes
+    assert ("a/x", "migrate-20260804-120000") not in names  # newest survives
+    assert ("a/y", "migrate-20260804-090000") not in names  # only one -> survives
+
+
+def test_select_handles_empty():
+    assert m.select_snapshots_to_delete([]) == []
+    assert m.select_snapshots_to_delete(None, keep_latest=True) == []
+
+
+def test_cleanup_refuses_while_a_migration_runs(monkeypatch):
+    import app.tasks as tasks
+    monkeypatch.setattr(tasks, "running_tasks",
+                        lambda prefix="": [{"name": "guest-migration-precopy"}])
+    res = m.cleanup_migration_snapshots({}, {}, [{"source_dataset": "a/x",
+                                                  "target_dataset": "b/x"}])
+    assert res["success"] is False
+    assert "still running" in res["error"]
+
+
 def test_exit_marker_parsing():
     assert m.parse_exit_marker("blah\n__exit=0") == 0
     assert m.parse_exit_marker("boom\n__exit=1\n") == 1
