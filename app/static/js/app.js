@@ -5496,15 +5496,21 @@ async function viewMigrate() {
     // cross-datastore case correct by default.
     let _storages = [];
     function syncStorageSel() {
+        // The storage follows from the dataset, so only offer the ones that
+        // actually write into it: exactly one -> show it read-only, several
+        // (same pool, different content/node restrictions) -> let the user
+        // choose, none -> empty, and the preflight offers to create one.
+        const matches = _storages.filter(s => s.pool === rootSel.value);
         storSel.innerHTML = "";
-        if (!_storages.length) {
+        if (!matches.length) {
             storSel.appendChild(h("option", { value: "" }, t("mig_no_storages")));
+            storSel.disabled = true;
             return;
         }
-        _storages.forEach(s => storSel.appendChild(h("option", { value: s.storage },
+        matches.forEach(s => storSel.appendChild(h("option", { value: s.storage },
             s.storage + "  (" + s.pool + ")")));
-        const match = _storages.find(s => s.pool === rootSel.value);
-        if (match) storSel.value = match.storage;
+        storSel.value = matches[0].storage;
+        storSel.disabled = matches.length === 1;
     }
     async function loadTargetStorages() {
         storSel.innerHTML = "";
