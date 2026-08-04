@@ -2327,6 +2327,28 @@ def api_migrate_target_storages():
     return jsonify({"storages": read_zfs_storages(host)})
 
 
+@app.route("/api/migrate/create-storage", methods=["POST"])
+@login_required
+def api_migrate_create_storage():
+    """Register an existing ZFS dataset on the target as a PVE storage.
+
+    Creating a dataset and defining a PVE storage are separate steps; without
+    the storage entry Proxmox cannot address disks there, which is what the
+    preflight's storage check reports."""
+    from app.migrate import create_zfs_storage
+    data = request.get_json(silent=True) or {}
+    tgt = _find_host((data.get("target") or "").strip())
+    if not tgt:
+        return jsonify({"success": False, "error": "target host not found"}), 404
+    res = create_zfs_storage(tgt, (data.get("storage_id") or "").strip(),
+                             (data.get("dataset") or "").strip())
+    audit_log("migrate.create_storage", target=data.get("storage_id"),
+              host=tgt["address"], success=res.get("success", False),
+              details={"dataset": data.get("dataset"), "node": res.get("node"),
+                       "exit_code": res.get("exit_code")})
+    return jsonify(res)
+
+
 @app.route("/api/migrate/setup-ssh", methods=["POST"])
 @login_required
 def api_migrate_setup_ssh():

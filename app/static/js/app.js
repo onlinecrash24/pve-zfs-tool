@@ -5582,6 +5582,43 @@ async function viewMigrate() {
                 };
                 row.appendChild(fixBtn);
             }
+            // No storage on the target writes into the chosen dataset -- offer to
+            // register it. Only when nothing matches: if a matching storage
+            // exists the fix is to pick it, not to create another one.
+            if (c.id === "storage" && !c.ok && !((pf.storage_suggestions || []).length)) {
+                const idInp = h("input", {
+                    type: "text", className: "form-input",
+                    value: pf.storage_id_suggestion || "",
+                    style: "max-width:150px;height:26px;font-size:12px",
+                });
+                const mkBtn = h("button", { className: "btn btn-sm" }, t("mig_create_storage"));
+                mkBtn.onclick = async () => {
+                    const sid = idInp.value.trim();
+                    if (!sid) { toast(t("mig_create_storage_need_id"), "error"); return; }
+                    if (!confirm(t("mig_create_storage_confirm")
+                        .replace("{i}", sid).replace("{d}", rootSel.value).replace("{h}", tgtSel.value))) return;
+                    mkBtn.disabled = true; mkBtn.textContent = t("mig_create_storage_running");
+                    try {
+                        const r = await API.post("/api/migrate/create-storage", {
+                            target: tgtSel.value, storage_id: sid, dataset: rootSel.value,
+                        });
+                        if (r.success) {
+                            toast(t("mig_create_storage_ok").replace("{i}", sid), "success");
+                            await loadTargetStorages();
+                            checkBtn.onclick();
+                        } else {
+                            mkBtn.disabled = false; mkBtn.textContent = t("mig_create_storage");
+                            openModal(t("mig_create_storage_failed"),
+                                `<pre class="output" style="font-size:11px">${escapeHtml(r.output || r.error || "")}</pre>`);
+                        }
+                    } catch (e) {
+                        mkBtn.disabled = false; mkBtn.textContent = t("mig_create_storage");
+                        toast(e.message || t("failed"), "error");
+                    }
+                };
+                row.appendChild(idInp);
+                row.appendChild(mkBtn);
+            }
             checksBox.appendChild(row);
         });
         if ((pf.plan || []).length) {

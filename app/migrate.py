@@ -192,6 +192,70 @@ def usable_guest_storages(storages: List[Dict[str, Any]],
     return out
 
 
+# PVE storage IDs: start with a letter, then lowercase alphanumerics and .-_
+_STORAGE_ID_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
+
+
+def suggest_storage_id(dataset: str, existing=()) -> str:
+    """A PVE storage ID proposal for a dataset: ``rpool/data2`` -> ``data2``.
+
+    Sanitised to what PVE accepts and made unique against the existing IDs.
+    """
+    leaf = (dataset or "").rstrip("/").rsplit("/", 1)[-1].lower()
+    base = re.sub(r"[^a-z0-9._-]", "-", leaf).strip("-.")
+    if not base or not base[0].isalpha():
+        base = ("zfs-" + base).strip("-") if base else "zfs-storage"
+    base = base[:56]
+    ex = set(existing or ())
+    cand, n = base, 2
+    while cand in ex:
+        cand = f"{base}-{n}"
+        n += 1
+    return cand
+
+
+def build_pvesm_add(storage_id: str, dataset: str, node: str = "",
+                    content: str = "images,rootdir") -> str:
+    """The ``pvesm add zfspool`` command line.
+
+    ``--nodes`` pins the storage to the host that actually holds the dataset:
+    storage.cfg is cluster-wide, and advertising a pool that only exists on one
+    node makes the others report it as unavailable.
+    """
+    cmd = (f"pvesm add zfspool {shlex.quote(storage_id)} "
+           f"--pool {shlex.quote(dataset)} --content {shlex.quote(content)}")
+    if node:
+        cmd += f" --nodes {shlex.quote(node)}"
+    return cmd + " 2>&1; echo __exit=$?"
+
+
+def create_zfs_storage(host: Dict[str, Any], storage_id: str, dataset: str,
+                       content: str = "images,rootdir") -> Dict[str, Any]:
+    """Register an existing ZFS dataset as a PVE storage on ``host``.
+
+    Creating a dataset (zfs create) and defining a PVE storage are two separate
+    things -- without the storage entry Proxmox cannot address disks in that
+    dataset at all, which is exactly what the migration preflight flags.
+    """
+    if not _STORAGE_ID_RE.match(storage_id or ""):
+        return {"success": False, "error": "invalid storage ID (a-z, 0-9, . - _, "
+                                           "must start with a letter)"}
+    if not _DS_RE.match(dataset or ""):
+        return {"success": False, "error": "invalid dataset"}
+    if not dataset_exists(host, dataset):
+        return {"success": False, "error": f"dataset {dataset} does not exist on the host"}
+    node = ""
+    hr = run_command(host, "hostname", timeout=10)
+    if hr.get("success"):
+        node = (hr.get("stdout") or "").strip().split(".")[0]
+    r = run_command(host, build_pvesm_add(storage_id, dataset, node, content), timeout=60)
+    out = r.get("stdout") or ""
+    code = parse_exit_marker(out)
+    return {"success": code == 0, "exit_code": code, "storage": storage_id,
+            "dataset": dataset, "node": node,
+            "output": re.sub(r"__exit=\d+\s*$", "", out).strip()[:800]}
+
+
 def read_zfs_storages(host: Dict[str, Any]) -> List[Dict[str, Any]]:
     """ZFS storages defined on the host that can hold guest disks."""
     r = run_command(host, "cat /etc/pve/storage.cfg 2>/dev/null", timeout=15)
@@ -561,6 +625,10 @@ def preflight(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
             "source_storages": config_storage_ids(text, gtype),
             "target_storages": storages,
             "storage_suggestions": suggestions,
+            # Proposed ID for "register this dataset as a PVE storage", offered
+            # when nothing on the target writes into the chosen dataset yet.
+            "storage_id_suggestion": suggest_storage_id(
+                target_root, [s.get("storage", "") for s in storages]),
             "target_storage": target_storage,
             "pull": pull, "push": push,
             "can_precopy": not errors, "can_cutover": not errors}

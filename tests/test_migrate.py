@@ -191,6 +191,48 @@ def test_storage_match_no_storage_writes_there():
     assert not ok and sugg == [] and "create one" in detail
 
 
+def test_suggest_storage_id_from_dataset():
+    assert m.suggest_storage_id("rpool/data2") == "data2"
+    assert m.suggest_storage_id("tank/guests") == "guests"
+
+
+def test_suggest_storage_id_is_unique():
+    assert m.suggest_storage_id("rpool/data", ["data"]) == "data-2"
+    assert m.suggest_storage_id("rpool/data", ["data", "data-2"]) == "data-3"
+
+
+def test_suggest_storage_id_sanitises():
+    # PVE ids must start with a letter and use a restricted charset
+    assert m.suggest_storage_id("rpool/2fast") .startswith("zfs-")
+    assert m.suggest_storage_id("rpool/My_Data") == "my_data"
+    assert m._STORAGE_ID_RE.match(m.suggest_storage_id("rpool/2fast"))
+
+
+def test_pvesm_add_pins_to_the_node():
+    cmd = m.build_pvesm_add("data2", "rpool/data2", "pve250")
+    assert cmd.startswith("pvesm add zfspool data2 ")
+    assert "--pool rpool/data2" in cmd
+    assert "--content images,rootdir" in cmd
+    assert "--nodes pve250" in cmd          # storage.cfg is cluster-wide
+    assert cmd.rstrip().endswith("echo __exit=$?")
+
+
+def test_pvesm_add_without_node():
+    assert "--nodes" not in m.build_pvesm_add("data2", "rpool/data2", "")
+
+
+def test_create_storage_rejects_bad_input(monkeypatch):
+    monkeypatch.setattr(m, "run_command", lambda *a, **k: {"success": True, "stdout": ""})
+    assert m.create_zfs_storage({}, "1bad", "rpool/data2")["success"] is False
+    assert m.create_zfs_storage({}, "ok", "rpool/../etc")["success"] is False
+
+
+def test_create_storage_refuses_missing_dataset(monkeypatch):
+    monkeypatch.setattr(m, "dataset_exists", lambda h, d: False)
+    res = m.create_zfs_storage({}, "data2", "rpool/data2")
+    assert res["success"] is False and "does not exist" in res["error"]
+
+
 def test_config_storage_ids():
     assert m.config_storage_ids(LXC_CFG, "lxc") == ["local-zfs"]
     assert m.config_storage_ids(QEMU_CFG, "qemu") == ["local-zfs"]
