@@ -20,7 +20,7 @@ import threading
 import time
 import traceback
 import uuid
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 _TASKS: Dict[str, Dict[str, Any]] = {}
 _TASKS_LOCK = threading.Lock()
@@ -89,6 +89,19 @@ def start_task(name: str, fn: Callable, *args, prefix: str = "task", **kwargs) -
 
     threading.Thread(target=_runner, daemon=True, name=f"{prefix}-{name}-{tid}").start()
     return tid
+
+
+def running_tasks(name_prefix: str = "") -> List[Dict[str, Any]]:
+    """Tasks currently in flight, optionally filtered by name prefix.
+
+    Lets a destructive action refuse while a related job is still running --
+    e.g. deleting migration snapshots mid-transfer would destroy the very
+    snapshot the incremental send is based on.
+    """
+    with _TASKS_LOCK:
+        return [dict(r) for r in _TASKS.values()
+                if r.get("status") == "running"
+                and str(r.get("name", "")).startswith(name_prefix)]
 
 
 def get_task(task_id: str) -> Optional[Dict[str, Any]]:

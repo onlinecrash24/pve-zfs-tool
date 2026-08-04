@@ -146,6 +146,7 @@ async function renderView() {
         replication: viewReplication,
         dr: viewDR,
         "config-restore": viewConfigRestore,
+        migrate: viewMigrate,
         guests: viewGuests,
         health: viewHealth,
         metrics: viewMetrics,
@@ -5406,6 +5407,444 @@ async function viewDR() {
 
 // -- Config Restore (from a host-config backup onto a fresh PVE) -----------
 const _CR_CATS = ["guests", "network", "storage", "apt", "access", "ssh", "firewall", "jobs", "other", "info"];
+
+// Near-live guest migration between two non-clustered hosts. Four numbered
+// steps mirroring the PVE Config Restore layout: check -> pre-copy -> cutover
+// -> finish/rollback. The pre-copy runs while the guest is up; only the cutover
+// has downtime.
+async function viewMigrate() {
+    setContent(loading());
+    let hosts;
+    try { hosts = await API.get("/api/hosts"); }
+    catch (e) { setContent(h("p", { className: "muted" }, e.message || "")); return; }
+
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("mig_title")),
+        h("p", {}, t("mig_subtitle")),
+    ]));
+    if (hosts.length < 2) {
+        container.appendChild(h("div", { className: "card" },
+            h("div", { className: "card-body" }, t("mig_need_two_hosts"))));
+        setContent(container); return;
+    }
+
+    const opts = () => hosts.map(hh => h("option", { value: hh.address },
+        (hh.name || hh.address) + " (" + hh.address + ")"));
+    const lbl = txt => h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" }, txt);
+
+    const srcSel = h("select", { className: "form-input" }, opts());
+    const guestSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+    const tgtSel = h("select", { className: "form-input" }, opts());
+    if (tgtSel.options.length > 1) tgtSel.selectedIndex = 1;
+    const rootSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+    const storSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+    const newVmidInp = h("input", { type: "text", className: "form-input", placeholder: t("mig_same_vmid"), style: "max-width:140px" });
+
+    let pf = null;                 // last preflight result (plan + direction)
+    const checksBox = h("div", { style: "margin-top:12px" });
+
+    const _guest = () => {
+        const o = guestSel.options[guestSel.selectedIndex];
+        return o && o.value ? JSON.parse(o.value) : null;
+    };
+    const _base = () => {
+        const g = _guest();
+        return {
+            source: srcSel.value, target: tgtSel.value,
+            vmid: g ? g.vmid : "", gtype: g ? g.type : "qemu",
+            target_root: rootSel.value,
+            target_storage: storSel.value,
+            new_vmid: newVmidInp.value.trim() || null,
+        };
+    };
+
+    async function loadGuests() {
+        guestSel.innerHTML = "";
+        guestSel.appendChild(h("option", { value: "" }, t("loading")));
+        try {
+            const r = await API.get("/api/migrate/guests?host=" + encodeURIComponent(srcSel.value));
+            guestSel.innerHTML = "";
+            const gs = r.guests || [];
+            if (!gs.length) { guestSel.appendChild(h("option", { value: "" }, t("mig_no_guests"))); return; }
+            gs.forEach(g => guestSel.appendChild(h("option", { value: JSON.stringify(g) },
+                `${g.vmid} — ${g.name || "?"} (${g.type === "lxc" ? "CT" : "VM"}, ${g.status})`)));
+        } catch (e) { guestSel.innerHTML = ""; guestSel.appendChild(h("option", { value: "" }, e.message || t("failed"))); }
+    }
+    // Target datasets: only filesystems that can actually hold guest disks
+    // (see candidate_target_roots) -- <pool>/data comes first, so the common
+    // case is preselected and the field can't be mistyped.
+    async function loadTargetDatasets() {
+        rootSel.innerHTML = "";
+        rootSel.appendChild(h("option", { value: "" }, t("loading")));
+        try {
+            const r = await API.get("/api/migrate/target-datasets?host=" + encodeURIComponent(tgtSel.value));
+            rootSel.innerHTML = "";
+            const ds = r.datasets || [];
+            if (!ds.length) { rootSel.appendChild(h("option", { value: "" }, t("mig_no_datasets"))); return; }
+            ds.forEach(d => rootSel.appendChild(h("option", { value: d.name },
+                d.name + (d.avail ? "  (" + d.avail + " " + t("mig_free") + ")" : ""))));
+        } catch (e) {
+            rootSel.innerHTML = "";
+            rootSel.appendChild(h("option", { value: "" }, e.message || t("failed")));
+        }
+    }
+    // Target storage: the disks land in the chosen dataset, but the guest config
+    // keeps pointing at a storage ID -- if they disagree PVE can't find the
+    // disks and the guest fails to start long after the migration "succeeded".
+    // Preselecting the storage whose pool IS the chosen dataset makes the
+    // cross-datastore case correct by default.
+    let _storages = [];
+    function syncStorageSel() {
+        // The storage follows from the dataset, so only offer the ones that
+        // actually write into it: exactly one -> show it read-only, several
+        // (same pool, different content/node restrictions) -> let the user
+        // choose, none -> empty, and the preflight offers to create one.
+        const matches = _storages.filter(s => s.pool === rootSel.value);
+        storSel.innerHTML = "";
+        if (!matches.length) {
+            storSel.appendChild(h("option", { value: "" }, t("mig_no_storages")));
+            storSel.disabled = true;
+            return;
+        }
+        matches.forEach(s => storSel.appendChild(h("option", { value: s.storage },
+            s.storage + "  (" + s.pool + ")")));
+        storSel.value = matches[0].storage;
+        storSel.disabled = matches.length === 1;
+    }
+    async function loadTargetStorages() {
+        storSel.innerHTML = "";
+        storSel.appendChild(h("option", { value: "" }, t("loading")));
+        try {
+            const r = await API.get("/api/migrate/target-storages?host=" + encodeURIComponent(tgtSel.value));
+            _storages = r.storages || [];
+        } catch (e) { _storages = []; }
+        syncStorageSel();
+    }
+    srcSel.onchange = loadGuests;
+    tgtSel.onchange = async () => { await loadTargetDatasets(); await loadTargetStorages(); };
+    rootSel.onchange = syncStorageSel;
+    await loadGuests();
+    await loadTargetDatasets();
+    await loadTargetStorages();
+
+    // --- 1. selection + preflight -----------------------------------------
+    const card1 = h("div", { className: "card" });
+    card1.appendChild(h("div", { className: "card-header" }, t("mig_step1")));
+    const b1 = h("div", { className: "card-body" });
+    b1.appendChild(h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px" }, [
+        h("div", {}, [lbl(t("mig_source")), srcSel]),
+        h("div", {}, [lbl(t("mig_guest")), guestSel]),
+        h("div", {}, [lbl(t("mig_target")), tgtSel]),
+        h("div", {}, [lbl(t("mig_target_root")), rootSel]),
+        h("div", {}, [lbl(t("mig_target_storage")), storSel]),
+        h("div", {}, [lbl(t("mig_new_vmid")), newVmidInp]),
+    ]));
+    const checkBtn = h("button", { className: "btn btn-primary btn-sm", style: "margin-top:12px" }, t("mig_check"));
+    checkBtn.onclick = async () => {
+        const g = _guest();
+        if (!g) { toast(t("mig_no_guest_selected"), "error"); return; }
+        if (!rootSel.value) { toast(t("mig_need_root"), "error"); return; }
+        checkBtn.disabled = true;
+        checksBox.innerHTML = "";
+        checksBox.appendChild(h("p", { className: "muted" }, t("mig_checking")));
+        try {
+            pf = await API.post("/api/migrate/preflight", _base());
+        } catch (e) { checksBox.innerHTML = ""; checksBox.appendChild(h("p", { style: "color:var(--danger)" }, e.message || t("failed"))); checkBtn.disabled = false; return; }
+        checkBtn.disabled = false;
+        checksBox.innerHTML = "";
+        if (!pf.success && pf.error) {
+            checksBox.appendChild(h("p", { style: "color:var(--danger)" }, pf.error));
+            return;
+        }
+        (pf.checks || []).forEach(c => {
+            const color = c.level === "ok" ? "var(--success)" : (c.level === "warn" ? "var(--warning)" : "var(--danger)");
+            const mark = c.level === "ok" ? "✓" : (c.level === "warn" ? "⚠" : "✗");
+            const row = h("div", { style: "display:flex;gap:8px;font-size:12px;margin-bottom:4px;align-items:center;flex-wrap:wrap" }, [
+                h("span", { style: "color:" + color + ";font-weight:700" }, mark),
+                h("span", { style: "min-width:120px;font-family:monospace" }, t("mig_chk_" + c.id)),
+                h("span", { className: "muted" }, c.detail || ""),
+            ]);
+            // Missing host-to-host SSH is the one failed check we can fix from
+            // here: bootstrap the target->source trust (same mechanism the
+            // replication setup uses), then re-run the preflight.
+            if (c.id === "ssh" && !c.ok) {
+                const fixBtn = h("button", { className: "btn btn-sm" }, t("mig_setup_ssh"));
+                fixBtn.onclick = async () => {
+                    if (!confirm(t("mig_setup_ssh_confirm").replace("{t}", tgtSel.value).replace("{s}", srcSel.value))) return;
+                    fixBtn.disabled = true; fixBtn.textContent = t("mig_setup_ssh_running");
+                    try {
+                        const r = await API.post("/api/migrate/setup-ssh", _base());
+                        if (r.success) { toast(t("mig_setup_ssh_ok"), "success"); checkBtn.onclick(); }
+                        else {
+                            fixBtn.disabled = false; fixBtn.textContent = t("mig_setup_ssh");
+                            openModal(t("mig_setup_ssh_failed"),
+                                `<pre class="output" style="font-size:11px">${escapeHtml(r.error || JSON.stringify(r, null, 2))}</pre>`);
+                        }
+                    } catch (e) {
+                        fixBtn.disabled = false; fixBtn.textContent = t("mig_setup_ssh");
+                        toast(e.message || t("failed"), "error");
+                    }
+                };
+                row.appendChild(fixBtn);
+            }
+            // No storage on the target writes into the chosen dataset -- offer to
+            // register it. Only when nothing matches: if a matching storage
+            // exists the fix is to pick it, not to create another one.
+            if (c.id === "storage" && !c.ok && !((pf.storage_suggestions || []).length)) {
+                const idInp = h("input", {
+                    type: "text", className: "form-input",
+                    value: pf.storage_id_suggestion || "",
+                    style: "max-width:150px;height:26px;font-size:12px",
+                });
+                const mkBtn = h("button", { className: "btn btn-sm" }, t("mig_create_storage"));
+                mkBtn.onclick = async () => {
+                    const sid = idInp.value.trim();
+                    if (!sid) { toast(t("mig_create_storage_need_id"), "error"); return; }
+                    if (!confirm(t("mig_create_storage_confirm")
+                        .replace("{i}", sid).replace("{d}", rootSel.value).replace("{h}", tgtSel.value))) return;
+                    mkBtn.disabled = true; mkBtn.textContent = t("mig_create_storage_running");
+                    try {
+                        const r = await API.post("/api/migrate/create-storage", {
+                            target: tgtSel.value, storage_id: sid, dataset: rootSel.value,
+                        });
+                        if (r.success) {
+                            toast(t("mig_create_storage_ok").replace("{i}", sid), "success");
+                            await loadTargetStorages();
+                            checkBtn.onclick();
+                        } else {
+                            mkBtn.disabled = false; mkBtn.textContent = t("mig_create_storage");
+                            openModal(t("mig_create_storage_failed"),
+                                `<pre class="output" style="font-size:11px">${escapeHtml(r.output || r.error || "")}</pre>`);
+                        }
+                    } catch (e) {
+                        mkBtn.disabled = false; mkBtn.textContent = t("mig_create_storage");
+                        toast(e.message || t("failed"), "error");
+                    }
+                };
+                row.appendChild(idInp);
+                row.appendChild(mkBtn);
+            }
+            checksBox.appendChild(row);
+        });
+        if ((pf.plan || []).length) {
+            const rows = pf.plan.map(p =>
+                `<tr><td style="font-family:monospace">${escapeHtml(p.source_dataset)}</td>` +
+                `<td style="font-family:monospace">${escapeHtml(p.target_dataset)}</td>` +
+                `<td>${escapeHtml(p.used || "")}</td>` +
+                `<td>${p.mode === "incremental" ? "⏩ " + escapeHtml(t("mig_incremental")) + " (" + escapeHtml(p.common_snapshot) + ")" : escapeHtml(t("mig_full"))}</td></tr>`).join("");
+            const tbl = h("div", { style: "overflow-x:auto;margin-top:10px" });
+            tbl.innerHTML = `<table class="data-table" style="width:100%;font-size:12px"><thead><tr>` +
+                `<th>${escapeHtml(t("mig_src_ds"))}</th><th>${escapeHtml(t("mig_tgt_ds"))}</th>` +
+                `<th>${escapeHtml(t("mig_size"))}</th><th>${escapeHtml(t("mig_mode"))}</th></tr></thead><tbody>${rows}</tbody></table>`;
+            checksBox.appendChild(tbl);
+        }
+        buildMaps();
+    };
+    b1.appendChild(checkBtn);
+    b1.appendChild(checksBox);
+    card1.appendChild(b1);
+    container.appendChild(card1);
+
+    // --- 2. pre-copy -------------------------------------------------------
+    const card2 = h("div", { className: "card", style: "margin-top:16px" });
+    card2.appendChild(h("div", { className: "card-header" }, t("mig_step2")));
+    const b2 = h("div", { className: "card-body" });
+    b2.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("mig_precopy_intro")));
+    const preBtn = h("button", { className: "btn btn-primary btn-sm" }, t("mig_precopy_start"));
+    const preStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    preBtn.onclick = async () => {
+        if (!pf || !pf.can_precopy) { toast(t("mig_run_check_first"), "error"); return; }
+        preBtn.disabled = true; preStatus.textContent = t("mig_starting");
+        try {
+            const r = await API.post("/api/migrate/precopy",
+                Object.assign(_base(), { plan: pf.plan, pull: pf.pull }));
+            pollReplicationTask(r.task_id, {
+                onTick: rec => { preStatus.textContent = rec.progress || t("mig_running"); },
+                onDone: rec => {
+                    preBtn.disabled = false;
+                    const ok = rec.result && rec.result.success;
+                    preStatus.textContent = (ok ? "✓ " : "✗ ") + (rec.progress || "");
+                    toast(ok ? t("mig_precopy_ok") : t("mig_precopy_failed"), ok ? "success" : "error");
+                    if (ok) checkBtn.onclick();     // refresh: next run is incremental
+                },
+                onError: msg => { preBtn.disabled = false; preStatus.textContent = "✗ " + msg; toast(msg, "error"); },
+            });
+        } catch (e) { preBtn.disabled = false; preStatus.textContent = ""; toast(e.message || t("failed"), "error"); }
+    };
+    b2.appendChild(preBtn);
+    b2.appendChild(preStatus);
+    card2.appendChild(b2);
+    container.appendChild(card2);
+
+    // --- 3. cutover --------------------------------------------------------
+    const card3 = h("div", { className: "card", style: "margin-top:16px" });
+    card3.appendChild(h("div", { className: "card-header" }, t("mig_step3")));
+    const b3 = h("div", { className: "card-body" });
+    b3.appendChild(h("div", {
+        style: "color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;font-size:12px;margin-bottom:10px",
+    }, t("mig_cutover_warn")));
+    const mapsBox = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:10px" });
+    const storeInfo = h("div", { style: "font-size:12px;margin-bottom:10px" });
+    const bridgeInputs = {};
+    function buildMaps() {
+        // The storage rewrite is derived, not typed: the source IDs come from
+        // the guest config, the destination is the storage picked in step 1.
+        storeInfo.innerHTML = "";
+        const from = (pf && pf.source_storages) || [];
+        const to = storSel.value;
+        if (from.length && to) {
+            from.forEach(f => storeInfo.appendChild(h("div", { className: "muted" },
+                f === to ? `${t("mig_storage_keep")}: ${f}` : `${t("mig_storage_rewrite")}: ${f} → ${to}`)));
+        }
+        mapsBox.innerHTML = "";
+        Object.keys(bridgeInputs).forEach(k => delete bridgeInputs[k]);
+        // One picker per bridge the guest uses, filled with the bridges that
+        // actually exist on the target (the preflight already looked them up).
+        // Same-named bridge is preselected, so the common case needs no action.
+        const tgtBr = (pf && pf.target_bridges) || [];
+        ((pf && pf.bridges) || []).forEach(br => {
+            const sel = h("select", { className: "form-input" },
+                (tgtBr.length ? tgtBr : [br]).map(b => h("option", { value: b }, b)));
+            if (tgtBr.includes(br)) sel.value = br;
+            bridgeInputs[br] = sel;
+            mapsBox.appendChild(h("div", {}, [lbl(t("mig_bridge_map").replace("{b}", br)), sel]));
+        });
+    }
+    buildMaps();
+    const startCb = h("input", { type: "checkbox", checked: true });
+    const cutBtn = h("button", { className: "btn btn-warning btn-sm" }, t("mig_cutover_start"));
+    const cutStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    cutBtn.onclick = async () => {
+        if (!pf || !pf.can_cutover) { toast(t("mig_run_check_first"), "error"); return; }
+        const g = _guest();
+        if (!confirm(t("mig_cutover_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", tgtSel.value))) return;
+        // Every storage the guest currently uses is rewritten to the one picked
+        // in step 1 (which the preflight verified writes into the target dataset).
+        const smap = {}, bmap = {};
+        const to = storSel.value;
+        ((pf && pf.source_storages) || []).forEach(f => { if (to && f !== to) smap[f] = to; });
+        Object.entries(bridgeInputs).forEach(([from, inp]) => {
+            if (inp.value.trim() && inp.value.trim() !== from) bmap[from] = inp.value.trim();
+        });
+        cutBtn.disabled = true; cutStatus.textContent = t("mig_starting");
+        try {
+            const r = await API.post("/api/migrate/cutover", Object.assign(_base(), {
+                plan: pf.plan, pull: pf.pull, storage_map: smap, bridge_map: bmap,
+                start_on_target: startCb.checked,
+            }));
+            pollReplicationTask(r.task_id, {
+                onTick: rec => { cutStatus.textContent = rec.progress || t("mig_running"); },
+                onDone: rec => {
+                    cutBtn.disabled = false;
+                    const res = rec.result || {};
+                    cutStatus.textContent = (res.success ? "✓ " : "✗ ") + (rec.progress || "");
+                    toast(res.success ? t("mig_cutover_ok") : (res.error || t("mig_cutover_failed")),
+                        res.success ? "success" : "error");
+                },
+                onError: msg => { cutBtn.disabled = false; cutStatus.textContent = "✗ " + msg; toast(msg, "error"); },
+            });
+        } catch (e) { cutBtn.disabled = false; cutStatus.textContent = ""; toast(e.message || t("failed"), "error"); }
+    };
+    b3.appendChild(storeInfo);
+    b3.appendChild(mapsBox);
+    b3.appendChild(h("label", { style: "display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px" },
+        [startCb, h("span", {}, t("mig_start_on_target"))]));
+    b3.appendChild(cutBtn);
+    b3.appendChild(cutStatus);
+    card3.appendChild(b3);
+    container.appendChild(card3);
+
+    // --- 4. finish / rollback ---------------------------------------------
+    const card4 = h("div", { className: "card", style: "margin-top:16px" });
+    card4.appendChild(h("div", { className: "card-header" }, t("mig_step4")));
+    const b4 = h("div", { className: "card-body" });
+    b4.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("mig_finish_intro")));
+    const rbBtn = h("button", { className: "btn btn-sm" }, t("mig_rollback"));
+    const cleanBtn = h("button", { className: "btn btn-danger btn-sm", style: "margin-left:8px" }, t("mig_cleanup"));
+    const finStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    rbBtn.onclick = async () => {
+        const g = _guest();
+        if (!confirm(t("mig_rollback_confirm").replace("{g}", g ? g.vmid : "?"))) return;
+        rbBtn.disabled = true; finStatus.textContent = t("mig_running");
+        try {
+            const r = await API.post("/api/migrate/rollback", _base());
+            finStatus.textContent = (r.success ? "✓ " : "✗ ") +
+                (r.steps || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
+            toast(r.success ? t("mig_rollback_ok") : t("mig_rollback_failed"), r.success ? "success" : "error");
+        } catch (e) { finStatus.textContent = "✗ " + (e.message || ""); }
+        finally { rbBtn.disabled = false; }
+    };
+    cleanBtn.onclick = async () => {
+        const g = _guest();
+        if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
+        if (!confirm(t("mig_cleanup_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", srcSel.value))) return;
+        cleanBtn.disabled = true; finStatus.textContent = t("mig_running");
+        try {
+            const r = await API.post("/api/migrate/cleanup-source", Object.assign(_base(), {
+                datasets: pf.plan.map(p => p.source_dataset),
+            }));
+            finStatus.textContent = (r.success ? "✓ " : "✗ ") +
+                (r.results || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
+            toast(r.success ? t("mig_cleanup_ok") : t("mig_cleanup_failed"), r.success ? "success" : "error");
+        } catch (e) { finStatus.textContent = "✗ " + (e.message || ""); }
+        finally { cleanBtn.disabled = false; }
+    };
+    b4.appendChild(h("div", {}, [rbBtn, cleanBtn]));
+    b4.appendChild(finStatus);
+
+    // Leftover migrate-* snapshots: needed as the incremental base during the
+    // migration, pure clutter afterwards (and the snapshot check would report
+    // them as forgotten "manual" snapshots).
+    const snapBox = h("div", { style: "margin-top:14px;border-top:1px solid var(--border);padding-top:12px" });
+    snapBox.appendChild(h("div", { style: "font-size:12px;font-weight:600;margin-bottom:4px" }, t("mig_snaps_title")));
+    snapBox.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("mig_snaps_intro")));
+    const keepCb = h("input", { type: "checkbox", checked: true });
+    const snapList = h("div", { style: "font-size:12px;margin-top:6px" });
+    const snapBtn = h("button", { className: "btn btn-sm" }, t("mig_snaps_show"));
+    const snapDel = h("button", { className: "btn btn-danger btn-sm", style: "margin-left:8px;display:none" }, t("mig_snaps_delete"));
+    snapBtn.onclick = async () => {
+        if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
+        snapBtn.disabled = true; snapList.textContent = t("mig_running");
+        try {
+            const r = await API.post("/api/migrate/snapshots", Object.assign(_base(), { plan: pf.plan }));
+            snapList.innerHTML = "";
+            const all = [...(r.source || []).map(s => [t("mig_side_source"), s]),
+                         ...(r.target || []).map(s => [t("mig_side_target"), s])];
+            if (!all.length) {
+                snapList.appendChild(h("div", { style: "color:var(--success)" }, "✓ " + t("mig_snaps_none")));
+                snapDel.style.display = "none";
+            } else {
+                all.forEach(([side, s]) => snapList.appendChild(
+                    h("div", { style: "font-family:monospace" }, `${side}: ${s.full}  (${s.used})`)));
+                snapDel.style.display = "";
+            }
+        } catch (e) { snapList.textContent = "✗ " + (e.message || ""); }
+        finally { snapBtn.disabled = false; }
+    };
+    snapDel.onclick = async () => {
+        if (!confirm(t("mig_snaps_confirm"))) return;
+        snapDel.disabled = true;
+        try {
+            const r = await API.post("/api/migrate/cleanup-snapshots", Object.assign(_base(), {
+                plan: pf.plan, keep_latest_on_target: keepCb.checked,
+            }));
+            if (r.success) { toast(t("mig_snaps_ok").replace("{n}", String(r.deleted || 0)), "success"); snapBtn.onclick(); }
+            else { openModal(t("mig_snaps_failed"), `<pre class="output" style="font-size:11px">${escapeHtml(r.error || JSON.stringify(r.results || [], null, 2))}</pre>`); }
+        } catch (e) { toast(e.message || t("failed"), "error"); }
+        finally { snapDel.disabled = false; }
+    };
+    snapBox.appendChild(h("label", { style: "display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px" },
+        [keepCb, h("span", {}, t("mig_snaps_keep_latest"))]));
+    snapBox.appendChild(h("div", {}, [snapBtn, snapDel]));
+    snapBox.appendChild(snapList);
+    b4.appendChild(snapBox);
+    card4.appendChild(b4);
+    container.appendChild(card4);
+
+    setContent(container);
+}
+
 
 async function viewConfigRestore() {
     setContent(loading());

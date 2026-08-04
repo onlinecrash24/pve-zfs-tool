@@ -273,6 +273,38 @@ def _require_host():
 # Pages
 # ---------------------------------------------------------------------------
 
+_ASSET_VER = {"v": "", "ts": 0.0}
+
+
+def asset_version():
+    """Cache-busting token derived from the static files themselves.
+
+    The templates used to carry a hardcoded ``?v=0.9.168`` that nobody bumped,
+    so after a deploy browsers kept serving the OLD app.js/i18n.js against the
+    NEW backend -- new UI elements silently missing and new i18n keys showing up
+    as raw key names. Deriving the token from the files' mtime means every
+    deploy invalidates the cache on its own. Re-read at most once a minute.
+    """
+    now = time.time()
+    if _ASSET_VER["v"] and (now - _ASSET_VER["ts"]) < 60:
+        return _ASSET_VER["v"]
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    latest = 0.0
+    for rel in ("css/style.css", "js/i18n.js", "js/app.js"):
+        try:
+            latest = max(latest, os.path.getmtime(os.path.join(base, rel)))
+        except OSError:
+            pass
+    _ASSET_VER["v"] = format(int(latest), "x") if latest else "dev"
+    _ASSET_VER["ts"] = now
+    return _ASSET_VER["v"]
+
+
+@app.context_processor
+def _inject_asset_version():
+    return {"asset_v": asset_version()}
+
+
 @app.route("/")
 def index():
     lang = (os.environ.get("DEFAULT_LANG", "en") or "en").strip().lower()
@@ -2255,6 +2287,237 @@ def api_dr_restore_category():
               host=target.get("address"), success=res.get("success", False),
               details={"file": data.get("file"), "restored": res.get("restored"),
                        "skipped": res.get("skipped"), "failed": res.get("failed")})
+    return jsonify(res)
+
+
+# ---------------------------------------------------------------------------
+# Guest migration between two non-clustered hosts (near-live, ZFS send/recv)
+# ---------------------------------------------------------------------------
+
+def _migrate_hosts(data):
+    """(source, target) as registered hosts. Migration never uses ad-hoc
+    password targets -- both ends must be known, keyed hosts."""
+    src = _find_host((data.get("source") or "").strip())
+    tgt = _find_host((data.get("target") or "").strip())
+    return src, tgt
+
+
+@app.route("/api/migrate/guests")
+@login_required
+def api_migrate_guests():
+    """VMs + CTs on a host, for the migration source picker."""
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    from app.zfs_commands import get_pve_vms, get_pve_cts
+    out = list(get_pve_vms(host) or []) + list(get_pve_cts(host) or [])
+    out.sort(key=lambda g: int(g["vmid"]) if str(g.get("vmid", "")).isdigit() else 0)
+    return jsonify({"guests": out})
+
+
+@app.route("/api/migrate/target-storages")
+@login_required
+def api_migrate_target_storages():
+    """ZFS storages on the target that can hold guest disks. The guest config
+    keeps pointing at a storage ID, so it has to match where the disks land."""
+    from app.migrate import read_zfs_storages
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify({"storages": read_zfs_storages(host)})
+
+
+@app.route("/api/migrate/create-storage", methods=["POST"])
+@login_required
+def api_migrate_create_storage():
+    """Register an existing ZFS dataset on the target as a PVE storage.
+
+    Creating a dataset and defining a PVE storage are separate steps; without
+    the storage entry Proxmox cannot address disks there, which is what the
+    preflight's storage check reports."""
+    from app.migrate import create_zfs_storage
+    data = request.get_json(silent=True) or {}
+    tgt = _find_host((data.get("target") or "").strip())
+    if not tgt:
+        return jsonify({"success": False, "error": "target host not found"}), 404
+    res = create_zfs_storage(tgt, (data.get("storage_id") or "").strip(),
+                             (data.get("dataset") or "").strip())
+    audit_log("migrate.create_storage", target=data.get("storage_id"),
+              host=tgt["address"], success=res.get("success", False),
+              details={"dataset": data.get("dataset"), "node": res.get("node"),
+                       "exit_code": res.get("exit_code")})
+    return jsonify(res)
+
+
+@app.route("/api/migrate/setup-ssh", methods=["POST"])
+@login_required
+def api_migrate_setup_ssh():
+    """Bootstrap SSH from the target to the source -- the pull direction the
+    transfer prefers (and the one bashclub-zsync uses). Generates the target's
+    key if needed, trusts the source's host key and installs the pubkey there.
+    Reuses the replication bootstrap so both features share one mechanism."""
+    from app.replication import bootstrap_ssh
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    if src["address"] == tgt["address"]:
+        return jsonify({"success": False, "error": "source and target are the same host"}), 400
+    res = bootstrap_ssh(tgt, src)
+    audit_log("migrate.setup_ssh", target=src["address"], host=tgt["address"],
+              success=res.get("success", False),
+              details={"direction": "target->source",
+                       "keygen": res.get("key_generated"),
+                       "authorized_keys": res.get("authorized_keys_updated")})
+    return jsonify(res)
+
+
+@app.route("/api/migrate/target-datasets")
+@login_required
+def api_migrate_target_datasets():
+    """Datasets on the target that can hold migrated guest disks."""
+    from app.migrate import candidate_target_roots
+    from app.zfs_commands import get_datasets
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify({"datasets": candidate_target_roots(get_datasets(host))})
+
+
+@app.route("/api/migrate/preflight", methods=["POST"])
+@login_required
+def api_migrate_preflight():
+    """Everything that must hold before a migration may start."""
+    from app.migrate import preflight
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    if src["address"] == tgt["address"]:
+        return jsonify({"success": False, "error": "source and target are the same host"}), 400
+    return jsonify(preflight(src, tgt,
+                             (data.get("vmid") or "").strip(),
+                             (data.get("gtype") or "qemu").strip(),
+                             (data.get("target_root") or "").strip(),
+                             new_vmid=(data.get("new_vmid") or None),
+                             target_storage=(data.get("target_storage") or "").strip()))
+
+
+@app.route("/api/migrate/precopy", methods=["POST"])
+@login_required
+def api_migrate_precopy():
+    """Start a pre-copy (guest keeps running). Repeatable to shrink the delta."""
+    from app.migrate import precopy_async
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    plan = data.get("plan") or []
+    if not plan:
+        return jsonify({"success": False, "error": "empty migration plan"}), 400
+    task_id = precopy_async(src, tgt, plan, bool(data.get("pull", True)))
+    audit_log("migrate.precopy", target=str(data.get("vmid")),
+              host=src["address"], success=True,
+              details={"task_id": task_id, "to": tgt["address"],
+                       "disks": len(plan)})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/migrate/cutover", methods=["POST"])
+@login_required
+def api_migrate_cutover():
+    """Stop the guest, send the final delta, move the config, start on target."""
+    from app.migrate import cutover_async
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    plan = data.get("plan") or []
+    if not plan:
+        return jsonify({"success": False, "error": "empty migration plan"}), 400
+    task_id = cutover_async(
+        src, tgt, (data.get("vmid") or "").strip(),
+        (data.get("gtype") or "qemu").strip(), plan,
+        bool(data.get("pull", True)),
+        new_vmid=(data.get("new_vmid") or None),
+        storage_map=(data.get("storage_map") or {}),
+        bridge_map=(data.get("bridge_map") or {}),
+        start_on_target=bool(data.get("start_on_target", True)),
+        shutdown_timeout=int(data.get("shutdown_timeout") or 120))
+    audit_log("migrate.cutover", target=str(data.get("vmid")),
+              host=src["address"], success=True,
+              details={"task_id": task_id, "to": tgt["address"],
+                       "new_vmid": data.get("new_vmid"),
+                       "start_on_target": bool(data.get("start_on_target", True))})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/migrate/rollback", methods=["POST"])
+@login_required
+def api_migrate_rollback():
+    """Undo a cutover: remove the guest on the target, unlock + start the source."""
+    from app.migrate import rollback
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    res = rollback(src, tgt, (data.get("vmid") or "").strip(),
+                   (data.get("gtype") or "qemu").strip(),
+                   target_vmid=(data.get("new_vmid") or None),
+                   start_source=bool(data.get("start_source", True)))
+    audit_log("migrate.rollback", target=str(data.get("vmid")),
+              host=src["address"], success=res.get("success", False),
+              details={"from": tgt["address"], "steps": res.get("steps")})
+    return jsonify(res)
+
+
+@app.route("/api/migrate/snapshots", methods=["POST"])
+@login_required
+def api_migrate_snapshots():
+    """Leftover migrate-* snapshots on both hosts, for review before deleting."""
+    from app.migrate import migration_snapshot_overview
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    return jsonify(migration_snapshot_overview(src, tgt, data.get("plan") or []))
+
+
+@app.route("/api/migrate/cleanup-snapshots", methods=["POST"])
+@login_required
+def api_migrate_cleanup_snapshots():
+    """Destroy the leftover migration snapshots on both hosts."""
+    from app.migrate import cleanup_migration_snapshots
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    res = cleanup_migration_snapshots(
+        src, tgt, data.get("plan") or [],
+        keep_latest_on_target=bool(data.get("keep_latest_on_target", True)))
+    audit_log("migrate.cleanup_snapshots", target=str(data.get("vmid")),
+              host=src["address"], success=res.get("success", False),
+              details={"deleted": res.get("deleted"),
+                       "kept_on_target": res.get("kept_on_target"),
+                       "target_host": tgt["address"]})
+    return jsonify(res)
+
+
+@app.route("/api/migrate/cleanup-source", methods=["POST"])
+@login_required
+def api_migrate_cleanup_source():
+    """Remove the migrated guest + its datasets from the source (explicit)."""
+    from app.migrate import cleanup_source
+    data = request.get_json(silent=True) or {}
+    src = _find_host((data.get("source") or "").strip())
+    if not src:
+        return jsonify({"success": False, "error": "source host not found"}), 404
+    res = cleanup_source(src, (data.get("vmid") or "").strip(),
+                         (data.get("gtype") or "qemu").strip(),
+                         data.get("datasets") or [])
+    audit_log("migrate.cleanup_source", target=str(data.get("vmid")),
+              host=src["address"], success=res.get("success", False),
+              details={"datasets": data.get("datasets")})
     return jsonify(res)
 
 
