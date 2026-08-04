@@ -125,6 +125,33 @@ def volume_basename(volid_or_dataset: str) -> str:
     return s.rsplit("/", 1)[-1]
 
 
+# A dataset that IS a guest disk -- never a sensible destination root.
+_GUEST_DISK_DS_RE = re.compile(r"/(?:vm|subvol|base|basevol)-\d+-disk-\d+$")
+
+
+def candidate_target_roots(datasets: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Filesystems that can sensibly hold migrated guest disks.
+
+    Drops volumes (zvols are disks, not containers for disks), the guest disks
+    themselves, and the ``<pool>/ROOT`` subtree that holds the PVE root
+    filesystem. ``<pool>/data`` -- where PVE's default local-zfs storage puts
+    guests -- is offered first.
+    """
+    out: List[Dict[str, str]] = []
+    for d in datasets or []:
+        name = (d or {}).get("name", "")
+        if not name or (d.get("type") or "") != "filesystem":
+            continue
+        if _GUEST_DISK_DS_RE.search(name):
+            continue
+        parts = name.split("/")
+        if len(parts) > 1 and parts[1] == "ROOT":
+            continue
+        out.append({"name": name, "avail": d.get("avail", "")})
+    out.sort(key=lambda x: (0 if x["name"].endswith("/data") else 1, x["name"]))
+    return out
+
+
 def rewrite_guest_config(text: str, storage_map: Optional[Dict[str, str]] = None,
                          bridge_map: Optional[Dict[str, str]] = None,
                          old_vmid: Optional[str] = None,

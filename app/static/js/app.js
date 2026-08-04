@@ -5437,7 +5437,7 @@ async function viewMigrate() {
     const guestSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
     const tgtSel = h("select", { className: "form-input" }, opts());
     if (tgtSel.options.length > 1) tgtSel.selectedIndex = 1;
-    const rootInp = h("input", { type: "text", className: "form-input", placeholder: "rpool/data" });
+    const rootSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
     const newVmidInp = h("input", { type: "text", className: "form-input", placeholder: t("mig_same_vmid"), style: "max-width:140px" });
 
     let pf = null;                 // last preflight result (plan + direction)
@@ -5452,7 +5452,7 @@ async function viewMigrate() {
         return {
             source: srcSel.value, target: tgtSel.value,
             vmid: g ? g.vmid : "", gtype: g ? g.type : "qemu",
-            target_root: rootInp.value.trim(),
+            target_root: rootSel.value,
             new_vmid: newVmidInp.value.trim() || null,
         };
     };
@@ -5469,8 +5469,28 @@ async function viewMigrate() {
                 `${g.vmid} — ${g.name || "?"} (${g.type === "lxc" ? "CT" : "VM"}, ${g.status})`)));
         } catch (e) { guestSel.innerHTML = ""; guestSel.appendChild(h("option", { value: "" }, e.message || t("failed"))); }
     }
+    // Target datasets: only filesystems that can actually hold guest disks
+    // (see candidate_target_roots) -- <pool>/data comes first, so the common
+    // case is preselected and the field can't be mistyped.
+    async function loadTargetDatasets() {
+        rootSel.innerHTML = "";
+        rootSel.appendChild(h("option", { value: "" }, t("loading")));
+        try {
+            const r = await API.get("/api/migrate/target-datasets?host=" + encodeURIComponent(tgtSel.value));
+            rootSel.innerHTML = "";
+            const ds = r.datasets || [];
+            if (!ds.length) { rootSel.appendChild(h("option", { value: "" }, t("mig_no_datasets"))); return; }
+            ds.forEach(d => rootSel.appendChild(h("option", { value: d.name },
+                d.name + (d.avail ? "  (" + d.avail + " " + t("mig_free") + ")" : ""))));
+        } catch (e) {
+            rootSel.innerHTML = "";
+            rootSel.appendChild(h("option", { value: "" }, e.message || t("failed")));
+        }
+    }
     srcSel.onchange = loadGuests;
+    tgtSel.onchange = loadTargetDatasets;
     await loadGuests();
+    await loadTargetDatasets();
 
     // --- 1. selection + preflight -----------------------------------------
     const card1 = h("div", { className: "card" });
@@ -5480,14 +5500,14 @@ async function viewMigrate() {
         h("div", {}, [lbl(t("mig_source")), srcSel]),
         h("div", {}, [lbl(t("mig_guest")), guestSel]),
         h("div", {}, [lbl(t("mig_target")), tgtSel]),
-        h("div", {}, [lbl(t("mig_target_root")), rootInp]),
+        h("div", {}, [lbl(t("mig_target_root")), rootSel]),
         h("div", {}, [lbl(t("mig_new_vmid")), newVmidInp]),
     ]));
     const checkBtn = h("button", { className: "btn btn-primary btn-sm", style: "margin-top:12px" }, t("mig_check"));
     checkBtn.onclick = async () => {
         const g = _guest();
         if (!g) { toast(t("mig_no_guest_selected"), "error"); return; }
-        if (!rootInp.value.trim()) { toast(t("mig_need_root"), "error"); return; }
+        if (!rootSel.value) { toast(t("mig_need_root"), "error"); return; }
         checkBtn.disabled = true;
         checksBox.innerHTML = "";
         checksBox.appendChild(h("p", { className: "muted" }, t("mig_checking")));

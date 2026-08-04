@@ -2283,6 +2283,18 @@ def api_migrate_guests():
     return jsonify({"guests": out})
 
 
+@app.route("/api/migrate/target-datasets")
+@login_required
+def api_migrate_target_datasets():
+    """Datasets on the target that can hold migrated guest disks."""
+    from app.migrate import candidate_target_roots
+    from app.zfs_commands import get_datasets
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify({"datasets": candidate_target_roots(get_datasets(host))})
+
+
 @app.route("/api/migrate/preflight", methods=["POST"])
 @login_required
 def api_migrate_preflight():

@@ -76,6 +76,41 @@ def test_volume_basename():
     assert m.volume_basename("rpool/data/subvol-253-disk-1") == "subvol-253-disk-1"
 
 
+# --- target dataset candidates (the picker) --------------------------------
+
+_DATASETS = [
+    {"name": "rpool", "type": "filesystem", "avail": "100G"},
+    {"name": "rpool/ROOT", "type": "filesystem", "avail": "100G"},
+    {"name": "rpool/ROOT/pve-1", "type": "filesystem", "avail": "100G"},
+    {"name": "rpool/data", "type": "filesystem", "avail": "80G"},
+    {"name": "rpool/data/subvol-253-disk-0", "type": "filesystem", "avail": "8G"},
+    {"name": "rpool/data/vm-100-disk-0", "type": "volume", "avail": "-"},
+    {"name": "tank", "type": "filesystem", "avail": "4T"},
+    {"name": "tank/data", "type": "filesystem", "avail": "4T"},
+]
+
+
+def test_candidate_roots_exclude_disks_volumes_and_root():
+    names = [d["name"] for d in m.candidate_target_roots(_DATASETS)]
+    assert "rpool/data/subvol-253-disk-0" not in names   # is a guest disk
+    assert "rpool/data/vm-100-disk-0" not in names       # zvol
+    assert "rpool/ROOT" not in names                     # PVE root filesystem
+    assert "rpool/ROOT/pve-1" not in names
+    assert set(names) == {"rpool", "rpool/data", "tank", "tank/data"}
+
+
+def test_candidate_roots_offer_data_first():
+    names = [d["name"] for d in m.candidate_target_roots(_DATASETS)]
+    assert names[0].endswith("/data")
+
+
+def test_candidate_roots_keep_avail_and_handle_empty():
+    got = m.candidate_target_roots(_DATASETS)
+    assert {"name": "tank/data", "avail": "4T"} in got
+    assert m.candidate_target_roots([]) == []
+    assert m.candidate_target_roots(None) == []
+
+
 # --- config rewrite --------------------------------------------------------
 
 def test_rewrite_storage_and_bridge():
