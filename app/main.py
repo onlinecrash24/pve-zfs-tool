@@ -273,6 +273,38 @@ def _require_host():
 # Pages
 # ---------------------------------------------------------------------------
 
+_ASSET_VER = {"v": "", "ts": 0.0}
+
+
+def asset_version():
+    """Cache-busting token derived from the static files themselves.
+
+    The templates used to carry a hardcoded ``?v=0.9.168`` that nobody bumped,
+    so after a deploy browsers kept serving the OLD app.js/i18n.js against the
+    NEW backend -- new UI elements silently missing and new i18n keys showing up
+    as raw key names. Deriving the token from the files' mtime means every
+    deploy invalidates the cache on its own. Re-read at most once a minute.
+    """
+    now = time.time()
+    if _ASSET_VER["v"] and (now - _ASSET_VER["ts"]) < 60:
+        return _ASSET_VER["v"]
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    latest = 0.0
+    for rel in ("css/style.css", "js/i18n.js", "js/app.js"):
+        try:
+            latest = max(latest, os.path.getmtime(os.path.join(base, rel)))
+        except OSError:
+            pass
+    _ASSET_VER["v"] = format(int(latest), "x") if latest else "dev"
+    _ASSET_VER["ts"] = now
+    return _ASSET_VER["v"]
+
+
+@app.context_processor
+def _inject_asset_version():
+    return {"asset_v": asset_version()}
+
+
 @app.route("/")
 def index():
     lang = (os.environ.get("DEFAULT_LANG", "en") or "en").strip().lower()
