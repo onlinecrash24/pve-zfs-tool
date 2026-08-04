@@ -1264,24 +1264,26 @@ async function viewPools() {
 }
 
 async function showPoolDetail(pool) {
-    const [status, iostat, props] = await Promise.all([
-        API.get(`/api/pools/status?host=${currentHost}&pool=${pool}`),
-        API.get(`/api/pools/iostat?host=${currentHost}&pool=${pool}`),
-        API.get(`/api/pools/props?host=${currentHost}&pool=${pool}`),
-    ]);
-    const propRow = (key, label, hint) => {
-        const val = props[key];
-        const known = val === "on" || val === "off";
-        const on = val === "on";
-        const ctrl = known
-            ? `<button class="btn btn-sm ${on ? "btn-success" : ""}" id="poolprop-${key}" data-cur="${val}">${on ? "on" : "off"}</button>`
-            : `<span style="color:var(--text-secondary)">${escapeHtml(t("no_data"))}</span>`;
-        return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
-            <div><strong>${escapeHtml(label)}</strong>
-            <div style="color:var(--text-secondary);font-size:12px">${escapeHtml(hint)}</div></div>
-            <div>${ctrl}</div></div>`;
-    };
-    openModal(`Pool: ${pool}`, `
+    const rendered = await openModalAsync(`Pool: ${pool}`, async () => {
+        const qs = `host=${encodeURIComponent(currentHost)}&pool=${encodeURIComponent(pool)}`;
+        const [status, iostat, props] = await Promise.all([
+            API.get(`/api/pools/status?${qs}`),
+            API.get(`/api/pools/iostat?${qs}`),
+            API.get(`/api/pools/props?${qs}`),
+        ]);
+        const propRow = (key, label, hint) => {
+            const val = props[key];
+            const known = val === "on" || val === "off";
+            const on = val === "on";
+            const ctrl = known
+                ? `<button class="btn btn-sm ${on ? "btn-success" : ""}" id="poolprop-${key}" data-cur="${val}">${on ? "on" : "off"}</button>`
+                : `<span style="color:var(--text-secondary)">${escapeHtml(t("no_data"))}</span>`;
+            return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+                <div><strong>${escapeHtml(label)}</strong>
+                <div style="color:var(--text-secondary);font-size:12px">${escapeHtml(hint)}</div></div>
+                <div>${ctrl}</div></div>`;
+        };
+        return `
         <h4 style="margin-bottom:8px">${escapeHtml(t("pool_props"))}</h4>
         ${propRow("autotrim", t("prop_autotrim"), t("prop_autotrim_hint"))}
         ${propRow("autoexpand", t("prop_autoexpand"), t("prop_autoexpand_hint"))}
@@ -1289,7 +1291,9 @@ async function showPoolDetail(pool) {
         <pre class="output">${escapeHtml(status.stdout || status.stderr || t("no_data"))}</pre>
         <h4 style="margin:16px 0 8px">${escapeHtml(t("io_stats"))}</h4>
         <pre class="output">${escapeHtml(iostat.stdout || iostat.stderr || t("no_data"))}</pre>
-    `);
+    `;
+    });
+    if (!rendered) return;      // discarded -- the controls below don't exist
     ["autotrim", "autoexpand"].forEach((key) => {
         const btn = document.getElementById(`poolprop-${key}`);
         if (!btn) return;
@@ -1318,8 +1322,13 @@ async function scrubPool(pool) {
 }
 
 async function showPoolHistory(pool) {
-    const r = await API.get(`/api/pools/history?host=${currentHost}&pool=${pool}`);
-    openModal(`${t("history")}: ${pool}`, `<pre class="output">${escapeHtml(r.stdout || r.stderr || t("no_data"))}</pre>`);
+    // zpool history prints the pool's ENTIRE history and only then gets tailed,
+    // so on a long-lived pool this legitimately takes a moment -- say so.
+    await openModalAsync(`${t("history")}: ${pool}`, async () => {
+        const r = await API.get(`/api/pools/history?host=${encodeURIComponent(currentHost)}` +
+            `&pool=${encodeURIComponent(pool)}`);
+        return `<pre class="output">${escapeHtml(r.stdout || r.stderr || t("no_data"))}</pre>`;
+    }, t("history_slow_hint"));
 }
 
 async function checkPoolUpgrade(pool) {
@@ -1460,8 +1469,11 @@ async function viewDatasets() {
 }
 
 async function showDatasetProps(ds) {
-    const r = await API.get(`/api/datasets/properties?host=${currentHost}&dataset=${ds}`);
-    openModal(`${t("properties")}: ${ds}`, `<pre class="output">${escapeHtml(r.stdout || r.stderr || t("no_data"))}</pre>`);
+    await openModalAsync(`${t("properties")}: ${ds}`, async () => {
+        const r = await API.get(`/api/datasets/properties?host=${encodeURIComponent(currentHost)}` +
+            `&dataset=${encodeURIComponent(ds)}`);
+        return `<pre class="output">${escapeHtml(r.stdout || r.stderr || t("no_data"))}</pre>`;
+    });
 }
 
 // Per-dataset com.sun:auto-snapshot control. Distinguishes local overrides
@@ -2359,10 +2371,17 @@ async function guestAction(guest, action) {
 }
 
 async function showGuestSnapshots(guest, pools) {
-    const poolName = pools.length > 0 ? pools[0].name : "rpool";
-    const snaps = await API.get(`/api/pve/guest-snapshots?host=${currentHost}&pool=${poolName}&vmid=${guest.vmid}&type=${guest.type}`);
-
     const guestType = guest.type.toUpperCase();
+    await openModalAsync(`${t("nav_snapshots")}: ${guestType} ${guest.vmid}`,
+                         () => _guestSnapshotsHtml(guest, pools, guestType));
+}
+
+async function _guestSnapshotsHtml(guest, pools, guestType) {
+    const poolName = pools.length > 0 ? pools[0].name : "rpool";
+    const snaps = await API.get(`/api/pve/guest-snapshots?host=${encodeURIComponent(currentHost)}` +
+        `&pool=${encodeURIComponent(poolName)}&vmid=${encodeURIComponent(guest.vmid)}` +
+        `&type=${encodeURIComponent(guest.type)}`);
+
     let html = `<p style="margin-bottom:12px">${escapeHtml(t("snapshots_for", guestType, guest.vmid, guest.name))}</p>`;
     if (snaps.length === 0) {
         html += `<p style="color:var(--text-secondary)">${escapeHtml(t("no_guest_snapshots"))}</p>`;
@@ -2384,7 +2403,7 @@ async function showGuestSnapshots(guest, pools) {
         }
         html += '</tbody></table>';
     }
-    openModal(`${t("nav_snapshots")}: ${guestType} ${guest.vmid}`, html);
+    return html;
 }
 
 async function createGuestSnapshot(guest, pools) {
@@ -7451,7 +7470,12 @@ function escapeAttr(s) {
 // ---------------------------------------------------------------------------
 // Modal
 // ---------------------------------------------------------------------------
+// Bumped on every open/close so a slow loader can tell whether the modal it
+// started filling is still the one on screen (see openModalAsync).
+let _modalSeq = 0;
+
 function openModal(title, bodyHtml, onConfirm) {
+    _modalSeq++;
     const overlay = document.getElementById("modal-overlay");
     document.getElementById("modal-title").textContent = title;
     document.getElementById("modal-body").innerHTML = bodyHtml;
@@ -7465,7 +7489,38 @@ function openModal(title, bodyHtml, onConfirm) {
     overlay.classList.add("active");
 }
 
+// Open a modal for data that still has to be fetched.
+//
+// Without this, an action like "pool history" awaited its request and only THEN
+// opened the modal: nothing happened on screen for as long as the command took
+// (zpool history on a pool with years of auto-snapshots is slow), and when the
+// answer finally arrived the window popped up over whatever page the user had
+// navigated to meanwhile. So: show the frame immediately, fill it afterwards,
+// and drop the result if it no longer belongs to what is on screen.
+//
+// `loader` is an async function returning the body HTML. `hint` is an optional
+// extra line explaining why this one can take a while. Returns whether the body
+// was actually rendered, so callers that wire up controls afterwards can skip
+// that when the result was discarded.
+async function openModalAsync(title, loader, hint) {
+    openModal(title, `<p class="muted">${escapeHtml(t("loading"))}</p>` +
+        (hint ? `<p class="muted" style="font-size:12px">${escapeHtml(hint)}</p>` : ""));
+    const seq = _modalSeq;          // this modal, not a later one
+    const view = currentView;       // and this page
+    let html;
+    try {
+        html = await loader();
+    } catch (e) {
+        html = `<p style="color:var(--danger)">${escapeHtml(e.message || t("failed"))}</p>`;
+    }
+    // Closed, replaced by another modal, or the user moved on -> stay silent.
+    if (_modalSeq !== seq || currentView !== view) return false;
+    document.getElementById("modal-body").innerHTML = html;
+    return true;
+}
+
 function closeModal() {
+    _modalSeq++;
     document.getElementById("modal-overlay").classList.remove("active");
     // Always unmount LXC restore session when modal closes
     if (_restoreSession && !_restoreSession._isZvol) {
