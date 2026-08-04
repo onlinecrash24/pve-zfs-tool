@@ -2283,6 +2283,29 @@ def api_migrate_guests():
     return jsonify({"guests": out})
 
 
+@app.route("/api/migrate/setup-ssh", methods=["POST"])
+@login_required
+def api_migrate_setup_ssh():
+    """Bootstrap SSH from the target to the source -- the pull direction the
+    transfer prefers (and the one bashclub-zsync uses). Generates the target's
+    key if needed, trusts the source's host key and installs the pubkey there.
+    Reuses the replication bootstrap so both features share one mechanism."""
+    from app.replication import bootstrap_ssh
+    data = request.get_json(silent=True) or {}
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    if src["address"] == tgt["address"]:
+        return jsonify({"success": False, "error": "source and target are the same host"}), 400
+    res = bootstrap_ssh(tgt, src)
+    audit_log("migrate.setup_ssh", target=src["address"], host=tgt["address"],
+              success=res.get("success", False),
+              details={"direction": "target->source",
+                       "keygen": res.get("key_generated"),
+                       "authorized_keys": res.get("authorized_keys_updated")})
+    return jsonify(res)
+
+
 @app.route("/api/migrate/target-datasets")
 @login_required
 def api_migrate_target_datasets():

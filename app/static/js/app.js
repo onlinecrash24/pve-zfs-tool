@@ -5523,11 +5523,35 @@ async function viewMigrate() {
         (pf.checks || []).forEach(c => {
             const color = c.level === "ok" ? "var(--success)" : (c.level === "warn" ? "var(--warning)" : "var(--danger)");
             const mark = c.level === "ok" ? "✓" : (c.level === "warn" ? "⚠" : "✗");
-            checksBox.appendChild(h("div", { style: "display:flex;gap:8px;font-size:12px;margin-bottom:4px" }, [
+            const row = h("div", { style: "display:flex;gap:8px;font-size:12px;margin-bottom:4px;align-items:center;flex-wrap:wrap" }, [
                 h("span", { style: "color:" + color + ";font-weight:700" }, mark),
-                h("span", { style: "min-width:120px;font-family:monospace" }, t("mig_chk_" + c.id) || c.id),
+                h("span", { style: "min-width:120px;font-family:monospace" }, t("mig_chk_" + c.id)),
                 h("span", { className: "muted" }, c.detail || ""),
-            ]));
+            ]);
+            // Missing host-to-host SSH is the one failed check we can fix from
+            // here: bootstrap the target->source trust (same mechanism the
+            // replication setup uses), then re-run the preflight.
+            if (c.id === "ssh" && !c.ok) {
+                const fixBtn = h("button", { className: "btn btn-sm" }, t("mig_setup_ssh"));
+                fixBtn.onclick = async () => {
+                    if (!confirm(t("mig_setup_ssh_confirm").replace("{t}", tgtSel.value).replace("{s}", srcSel.value))) return;
+                    fixBtn.disabled = true; fixBtn.textContent = t("mig_setup_ssh_running");
+                    try {
+                        const r = await API.post("/api/migrate/setup-ssh", _base());
+                        if (r.success) { toast(t("mig_setup_ssh_ok"), "success"); checkBtn.onclick(); }
+                        else {
+                            fixBtn.disabled = false; fixBtn.textContent = t("mig_setup_ssh");
+                            openModal(t("mig_setup_ssh_failed"),
+                                `<pre class="output" style="font-size:11px">${escapeHtml(r.error || JSON.stringify(r, null, 2))}</pre>`);
+                        }
+                    } catch (e) {
+                        fixBtn.disabled = false; fixBtn.textContent = t("mig_setup_ssh");
+                        toast(e.message || t("failed"), "error");
+                    }
+                };
+                row.appendChild(fixBtn);
+            }
+            checksBox.appendChild(row);
         });
         if ((pf.plan || []).length) {
             const rows = pf.plan.map(p =>
@@ -5595,10 +5619,16 @@ async function viewMigrate() {
         mapsBox.appendChild(h("div", {}, [lbl(t("mig_storage_from")), storFrom]));
         mapsBox.appendChild(h("div", {}, [lbl(t("mig_storage_to")), storTo]));
         Object.keys(bridgeInputs).forEach(k => delete bridgeInputs[k]);
+        // One picker per bridge the guest uses, filled with the bridges that
+        // actually exist on the target (the preflight already looked them up).
+        // Same-named bridge is preselected, so the common case needs no action.
+        const tgtBr = (pf && pf.target_bridges) || [];
         ((pf && pf.bridges) || []).forEach(br => {
-            const inp = h("input", { type: "text", className: "form-input", value: br });
-            bridgeInputs[br] = inp;
-            mapsBox.appendChild(h("div", {}, [lbl(t("mig_bridge_map").replace("{b}", br)), inp]));
+            const sel = h("select", { className: "form-input" },
+                (tgtBr.length ? tgtBr : [br]).map(b => h("option", { value: b }, b)));
+            if (tgtBr.includes(br)) sel.value = br;
+            bridgeInputs[br] = sel;
+            mapsBox.appendChild(h("div", {}, [lbl(t("mig_bridge_map").replace("{b}", br)), sel]));
         });
     }
     buildMaps();
