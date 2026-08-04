@@ -2283,6 +2283,18 @@ def api_migrate_guests():
     return jsonify({"guests": out})
 
 
+@app.route("/api/migrate/target-storages")
+@login_required
+def api_migrate_target_storages():
+    """ZFS storages on the target that can hold guest disks. The guest config
+    keeps pointing at a storage ID, so it has to match where the disks land."""
+    from app.migrate import read_zfs_storages
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify({"storages": read_zfs_storages(host)})
+
+
 @app.route("/api/migrate/setup-ssh", methods=["POST"])
 @login_required
 def api_migrate_setup_ssh():
@@ -2333,7 +2345,8 @@ def api_migrate_preflight():
                              (data.get("vmid") or "").strip(),
                              (data.get("gtype") or "qemu").strip(),
                              (data.get("target_root") or "").strip(),
-                             new_vmid=(data.get("new_vmid") or None)))
+                             new_vmid=(data.get("new_vmid") or None),
+                             target_storage=(data.get("target_storage") or "").strip()))
 
 
 @app.route("/api/migrate/precopy", methods=["POST"])

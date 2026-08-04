@@ -125,6 +125,85 @@ def volume_basename(volid_or_dataset: str) -> str:
     return s.rsplit("/", 1)[-1]
 
 
+def config_storage_ids(text: str, gtype: str) -> List[str]:
+    """Storage IDs the guest's disks currently live on (``local-zfs:…`` -> ``local-zfs``)."""
+    return sorted({v.split(":", 1)[0] for _, v in parse_guest_config_disks(text, gtype)
+                   if ":" in v})
+
+
+def parse_zfs_storages(text: str) -> List[Dict[str, Any]]:
+    """``zfspool`` entries of a PVE storage.cfg.
+
+    Sections look like::
+
+        zfspool: local-zfs
+                pool rpool/data
+                content images,rootdir
+                nodes pve1,pve2
+
+    Returns ``[{storage, pool, content, nodes}]`` -- ``pool`` is the ZFS dataset
+    the storage writes into, which is what has to match the migration's target
+    dataset root.
+    """
+    out: List[Dict[str, Any]] = []
+    cur: Optional[Dict[str, Any]] = None
+    for raw in (text or "").splitlines():
+        m = re.match(r"^(\w+):\s*(\S+)\s*$", raw)
+        if m:
+            cur = {"storage": m.group(2), "pool": "", "content": [], "nodes": []}
+            if m.group(1) == "zfspool":
+                out.append(cur)
+            else:
+                cur = None          # different storage type -- skip its body
+            continue
+        if cur is None or not raw.strip():
+            continue
+        p = re.match(r"^\s+(\w+)\s+(.*)$", raw)
+        if not p:
+            continue
+        key, val = p.group(1), p.group(2).strip()
+        if key == "pool":
+            cur["pool"] = val
+        elif key == "content":
+            cur["content"] = [c.strip() for c in val.split(",") if c.strip()]
+        elif key == "nodes":
+            cur["nodes"] = [n.strip() for n in val.split(",") if n.strip()]
+    return out
+
+
+def usable_guest_storages(storages: List[Dict[str, Any]],
+                          node: str = "") -> List[Dict[str, Any]]:
+    """ZFS storages that can actually hold guest disks on ``node``.
+
+    Needs ``images`` (VM disks) or ``rootdir`` (CT volumes) in its content
+    types, and must not be restricted away from this node.
+    """
+    out = []
+    for s in storages or []:
+        if not s.get("pool"):
+            continue
+        content = s.get("content") or []
+        if content and not ({"images", "rootdir"} & set(content)):
+            continue
+        nodes = s.get("nodes") or []
+        if nodes and node and node not in nodes:
+            continue
+        out.append(s)
+    return out
+
+
+def read_zfs_storages(host: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """ZFS storages defined on the host that can hold guest disks."""
+    r = run_command(host, "cat /etc/pve/storage.cfg 2>/dev/null", timeout=15)
+    if not r.get("success"):
+        return []
+    node = ""
+    hr = run_command(host, "hostname", timeout=10)
+    if hr.get("success"):
+        node = (hr.get("stdout") or "").strip().split(".")[0]
+    return usable_guest_storages(parse_zfs_storages(r.get("stdout") or ""), node)
+
+
 # A dataset that IS a guest disk -- never a sensible destination root.
 _GUEST_DISK_DS_RE = re.compile(r"/(?:vm|subvol|base|basevol)-\d+-disk-\d+$")
 
@@ -333,9 +412,35 @@ def probe_ssh(from_host: Dict[str, Any], to_host: Dict[str, Any]) -> bool:
 # Preflight
 # ---------------------------------------------------------------------------
 
+def check_storage_match(storages: List[Dict[str, Any]], target_storage: str,
+                        target_root: str) -> Tuple[bool, str, List[str]]:
+    """Does the chosen target storage write into the chosen target dataset?
+
+    This is the cross-datastore trap: send the disks to ``tank/data`` but leave
+    the config pointing at a storage backed by ``rpool/data`` and PVE simply
+    cannot find them -- the guest fails to start, long after the migration
+    reported success. Returns ``(ok, detail, suggestions)``.
+    """
+    matching = [s["storage"] for s in storages if s.get("pool") == target_root]
+    if not target_storage:
+        if matching:
+            return False, "pick the target storage (matching: " + ", ".join(matching) + ")", matching
+        return (False, f"no ZFS storage on the target writes into {target_root} -- "
+                       "create one in PVE first, or pick a different target dataset", [])
+    st = next((s for s in storages if s.get("storage") == target_storage), None)
+    if st is None:
+        return False, f"storage {target_storage} does not exist on the target", matching
+    if st.get("pool") != target_root:
+        return (False, f"storage {target_storage} writes into {st.get('pool')}, "
+                       f"but the disks go to {target_root} -- the guest would not "
+                       "find them", matching)
+    return True, f"{target_storage} → {target_root}", matching
+
+
 def preflight(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
               gtype: str, target_root: str,
-              new_vmid: Optional[str] = None) -> Dict[str, Any]:
+              new_vmid: Optional[str] = None,
+              target_storage: str = "") -> Dict[str, Any]:
     """Everything that must hold before a migration is allowed to start.
 
     Returns ``{checks: [{id, ok, level, detail}], can_precopy, can_cutover, ...}``
@@ -393,6 +498,13 @@ def preflight(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
             "guest has PVE snapshots (" + ", ".join(snaps[:5]) +
             ") -- their vmstate volumes are not migrated", level="warn")
 
+    # Storage: the disks land in target_root, but the guest config keeps
+    # pointing at a storage ID. Both must agree or the guest won't find them.
+    storages = read_zfs_storages(target)
+    ok_st, detail_st, suggestions = check_storage_match(storages, target_storage,
+                                                        target_root)
+    add("storage", ok_st, detail_st)
+
     src_bridges = parse_config_bridges(text)
     tgt_bridges = host_bridges(target)
     missing = [b for b in src_bridges if b not in tgt_bridges]
@@ -446,6 +558,10 @@ def preflight(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
     return {"success": True, "checks": checks, "plan": plan,
             "running": running, "target_vmid": tgt_vmid,
             "bridges": src_bridges, "target_bridges": tgt_bridges,
+            "source_storages": config_storage_ids(text, gtype),
+            "target_storages": storages,
+            "storage_suggestions": suggestions,
+            "target_storage": target_storage,
             "pull": pull, "push": push,
             "can_precopy": not errors, "can_cutover": not errors}
 

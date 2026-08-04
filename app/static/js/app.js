@@ -5438,6 +5438,7 @@ async function viewMigrate() {
     const tgtSel = h("select", { className: "form-input" }, opts());
     if (tgtSel.options.length > 1) tgtSel.selectedIndex = 1;
     const rootSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
+    const storSel = h("select", { className: "form-input" }, h("option", { value: "" }, t("loading")));
     const newVmidInp = h("input", { type: "text", className: "form-input", placeholder: t("mig_same_vmid"), style: "max-width:140px" });
 
     let pf = null;                 // last preflight result (plan + direction)
@@ -5453,6 +5454,7 @@ async function viewMigrate() {
             source: srcSel.value, target: tgtSel.value,
             vmid: g ? g.vmid : "", gtype: g ? g.type : "qemu",
             target_root: rootSel.value,
+            target_storage: storSel.value,
             new_vmid: newVmidInp.value.trim() || null,
         };
     };
@@ -5487,10 +5489,38 @@ async function viewMigrate() {
             rootSel.appendChild(h("option", { value: "" }, e.message || t("failed")));
         }
     }
+    // Target storage: the disks land in the chosen dataset, but the guest config
+    // keeps pointing at a storage ID -- if they disagree PVE can't find the
+    // disks and the guest fails to start long after the migration "succeeded".
+    // Preselecting the storage whose pool IS the chosen dataset makes the
+    // cross-datastore case correct by default.
+    let _storages = [];
+    function syncStorageSel() {
+        storSel.innerHTML = "";
+        if (!_storages.length) {
+            storSel.appendChild(h("option", { value: "" }, t("mig_no_storages")));
+            return;
+        }
+        _storages.forEach(s => storSel.appendChild(h("option", { value: s.storage },
+            s.storage + "  (" + s.pool + ")")));
+        const match = _storages.find(s => s.pool === rootSel.value);
+        if (match) storSel.value = match.storage;
+    }
+    async function loadTargetStorages() {
+        storSel.innerHTML = "";
+        storSel.appendChild(h("option", { value: "" }, t("loading")));
+        try {
+            const r = await API.get("/api/migrate/target-storages?host=" + encodeURIComponent(tgtSel.value));
+            _storages = r.storages || [];
+        } catch (e) { _storages = []; }
+        syncStorageSel();
+    }
     srcSel.onchange = loadGuests;
-    tgtSel.onchange = loadTargetDatasets;
+    tgtSel.onchange = async () => { await loadTargetDatasets(); await loadTargetStorages(); };
+    rootSel.onchange = syncStorageSel;
     await loadGuests();
     await loadTargetDatasets();
+    await loadTargetStorages();
 
     // --- 1. selection + preflight -----------------------------------------
     const card1 = h("div", { className: "card" });
@@ -5501,6 +5531,7 @@ async function viewMigrate() {
         h("div", {}, [lbl(t("mig_guest")), guestSel]),
         h("div", {}, [lbl(t("mig_target")), tgtSel]),
         h("div", {}, [lbl(t("mig_target_root")), rootSel]),
+        h("div", {}, [lbl(t("mig_target_storage")), storSel]),
         h("div", {}, [lbl(t("mig_new_vmid")), newVmidInp]),
     ]));
     const checkBtn = h("button", { className: "btn btn-primary btn-sm", style: "margin-top:12px" }, t("mig_check"));
@@ -5611,13 +5642,19 @@ async function viewMigrate() {
         style: "color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;font-size:12px;margin-bottom:10px",
     }, t("mig_cutover_warn")));
     const mapsBox = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:10px" });
-    const storFrom = h("input", { type: "text", className: "form-input", placeholder: "local-zfs" });
-    const storTo = h("input", { type: "text", className: "form-input", placeholder: "local-zfs" });
+    const storeInfo = h("div", { style: "font-size:12px;margin-bottom:10px" });
     const bridgeInputs = {};
     function buildMaps() {
+        // The storage rewrite is derived, not typed: the source IDs come from
+        // the guest config, the destination is the storage picked in step 1.
+        storeInfo.innerHTML = "";
+        const from = (pf && pf.source_storages) || [];
+        const to = storSel.value;
+        if (from.length && to) {
+            from.forEach(f => storeInfo.appendChild(h("div", { className: "muted" },
+                f === to ? `${t("mig_storage_keep")}: ${f}` : `${t("mig_storage_rewrite")}: ${f} → ${to}`)));
+        }
         mapsBox.innerHTML = "";
-        mapsBox.appendChild(h("div", {}, [lbl(t("mig_storage_from")), storFrom]));
-        mapsBox.appendChild(h("div", {}, [lbl(t("mig_storage_to")), storTo]));
         Object.keys(bridgeInputs).forEach(k => delete bridgeInputs[k]);
         // One picker per bridge the guest uses, filled with the bridges that
         // actually exist on the target (the preflight already looked them up).
@@ -5639,9 +5676,11 @@ async function viewMigrate() {
         if (!pf || !pf.can_cutover) { toast(t("mig_run_check_first"), "error"); return; }
         const g = _guest();
         if (!confirm(t("mig_cutover_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", tgtSel.value))) return;
+        // Every storage the guest currently uses is rewritten to the one picked
+        // in step 1 (which the preflight verified writes into the target dataset).
         const smap = {}, bmap = {};
-        if (storFrom.value.trim() && storTo.value.trim() && storFrom.value.trim() !== storTo.value.trim())
-            smap[storFrom.value.trim()] = storTo.value.trim();
+        const to = storSel.value;
+        ((pf && pf.source_storages) || []).forEach(f => { if (to && f !== to) smap[f] = to; });
         Object.entries(bridgeInputs).forEach(([from, inp]) => {
             if (inp.value.trim() && inp.value.trim() !== from) bmap[from] = inp.value.trim();
         });
@@ -5664,6 +5703,7 @@ async function viewMigrate() {
             });
         } catch (e) { cutBtn.disabled = false; cutStatus.textContent = ""; toast(e.message || t("failed"), "error"); }
     };
+    b3.appendChild(storeInfo);
     b3.appendChild(mapsBox);
     b3.appendChild(h("label", { style: "display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px" },
         [startCb, h("span", {}, t("mig_start_on_target"))]));

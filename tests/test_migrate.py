@@ -111,6 +111,91 @@ def test_candidate_roots_keep_avail_and_handle_empty():
     assert m.candidate_target_roots(None) == []
 
 
+# --- storage.cfg: the cross-datastore trap ---------------------------------
+
+STORAGE_CFG = """dir: local
+\tpath /var/lib/vz
+\tcontent iso,vztmpl,backup
+
+zfspool: local-zfs
+\tpool rpool/data
+\tcontent images,rootdir
+\tsparse 1
+
+zfspool: tank-zfs
+\tpool tank/data
+\tcontent images,rootdir
+
+zfspool: backup-only
+\tpool tank/backup
+\tcontent backup
+
+zfspool: other-node
+\tpool tank/data
+\tcontent images
+\tnodes pve99
+
+lvmthin: vmstore
+\tthinpool data
+\tcontent images
+"""
+
+
+def test_parse_zfs_storages_only_zfspool():
+    st = m.parse_zfs_storages(STORAGE_CFG)
+    assert [s["storage"] for s in st] == ["local-zfs", "tank-zfs", "backup-only", "other-node"]
+    assert st[0]["pool"] == "rpool/data"
+    assert st[1]["pool"] == "tank/data"
+    assert st[0]["content"] == ["images", "rootdir"]
+    assert st[3]["nodes"] == ["pve99"]
+
+
+def test_usable_storages_filter_content_and_node():
+    st = m.usable_guest_storages(m.parse_zfs_storages(STORAGE_CFG), node="pve250")
+    names = [s["storage"] for s in st]
+    assert "backup-only" not in names      # cannot hold guest disks
+    assert "other-node" not in names       # restricted to another node
+    assert names == ["local-zfs", "tank-zfs"]
+
+
+def test_storage_match_accepts_matching_pair():
+    st = m.usable_guest_storages(m.parse_zfs_storages(STORAGE_CFG), "pve250")
+    ok, detail, _ = m.check_storage_match(st, "tank-zfs", "tank/data")
+    assert ok and "tank/data" in detail
+
+
+def test_storage_match_rejects_mismatch():
+    # THE trap: disks go to tank/data but the config would point at rpool/data
+    st = m.usable_guest_storages(m.parse_zfs_storages(STORAGE_CFG), "pve250")
+    ok, detail, sugg = m.check_storage_match(st, "local-zfs", "tank/data")
+    assert not ok
+    assert "rpool/data" in detail and "tank/data" in detail
+    assert sugg == ["tank-zfs"]
+
+
+def test_storage_match_unknown_storage():
+    st = m.usable_guest_storages(m.parse_zfs_storages(STORAGE_CFG), "pve250")
+    ok, detail, _ = m.check_storage_match(st, "nope", "tank/data")
+    assert not ok and "does not exist" in detail
+
+
+def test_storage_match_suggests_when_none_picked():
+    st = m.usable_guest_storages(m.parse_zfs_storages(STORAGE_CFG), "pve250")
+    ok, _, sugg = m.check_storage_match(st, "", "rpool/data")
+    assert not ok and sugg == ["local-zfs"]
+
+
+def test_storage_match_no_storage_writes_there():
+    st = m.usable_guest_storages(m.parse_zfs_storages(STORAGE_CFG), "pve250")
+    ok, detail, sugg = m.check_storage_match(st, "", "rpool/elsewhere")
+    assert not ok and sugg == [] and "create one" in detail
+
+
+def test_config_storage_ids():
+    assert m.config_storage_ids(LXC_CFG, "lxc") == ["local-zfs"]
+    assert m.config_storage_ids(QEMU_CFG, "qemu") == ["local-zfs"]
+
+
 # --- config rewrite --------------------------------------------------------
 
 def test_rewrite_storage_and_bridge():
