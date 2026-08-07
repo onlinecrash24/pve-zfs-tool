@@ -101,13 +101,49 @@ def test_copy_behind_the_source():
     cp = {"guids": {"a", "b"}, "newest": 700}
     got = ri.compare_copy(src, cp)
     assert got == {"shared_snapshots": 2, "missing_from_source": 1,
-                   "lag_seconds": 300, "in_sync": False}
+                   "excluded_labels": [], "lag_seconds": 300, "in_sync": False}
 
 
 def test_copy_in_sync():
     src = {"guids": {"a", "b"}, "newest": 1000}
     got = ri.compare_copy(src, {"guids": {"a", "b"}, "newest": 1000})
     assert got["in_sync"] is True and got["lag_seconds"] == 0
+
+
+def _labelled(pairs):
+    """Copy dict as group_lineages builds it, from (guid, label) pairs."""
+    by_guid = dict(pairs)
+    return {"guids": set(by_guid), "by_guid": by_guid,
+            "labels": {l for l in by_guid.values() if l}, "newest": 1000}
+
+
+def test_labels_the_copy_never_receives_are_not_missing():
+    # replication filters usually exclude frequent snapshots on purpose;
+    # counting them as missing reports a healthy copy as broken
+    src = _labelled([("f1", "frequent"), ("f2", "frequent"),
+                     ("h1", "hourly"), ("h2", "hourly")])
+    cp = _labelled([("h1", "hourly"), ("h2", "hourly")])
+    got = ri.compare_copy(src, cp)
+    assert got["missing_from_source"] == 0
+    assert got["excluded_labels"] == ["frequent"]
+    assert got["in_sync"] is True
+
+
+def test_a_gap_within_a_replicated_label_still_counts():
+    src = _labelled([("h1", "hourly"), ("h2", "hourly"), ("h3", "hourly"),
+                     ("f1", "frequent")])
+    cp = _labelled([("h1", "hourly")])
+    got = ri.compare_copy(src, cp)
+    assert got["missing_from_source"] == 2       # h2, h3 -- frequent excluded
+    assert got["excluded_labels"] == ["frequent"]
+    assert got["in_sync"] is False
+
+
+def test_unlabelled_snapshots_fall_back_to_counting_everything():
+    src = {"guids": {"a", "b"}, "by_guid": {"a": None, "b": None},
+           "labels": set(), "newest": 1000}
+    cp = {"guids": {"a"}, "by_guid": {"a": None}, "labels": set(), "newest": 900}
+    assert ri.compare_copy(src, cp)["missing_from_source"] == 1
 
 
 def test_lag_never_negative():

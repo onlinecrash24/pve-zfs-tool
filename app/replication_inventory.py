@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.snaptags import extract_tag
 from app.ssh_manager import run_command
 
 # Snapshots created by the migration feature: they exist on both sides by
@@ -133,6 +134,10 @@ def group_lineages(per_host: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, 
         copies = []
         for host, dataset in sorted(keys):
             snaps = sorted(members[(host, dataset)], key=lambda r: r["creation"])
+            # Label per guid: which snapshot labels a copy carries is what
+            # reveals the replication filter, so a deliberately excluded label
+            # is not mistaken for a gap.
+            by_guid = {s["guid"]: extract_tag(s["snapshot"]) for s in snaps}
             copies.append({
                 "host": host,
                 "dataset": dataset,
@@ -140,6 +145,8 @@ def group_lineages(per_host: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, 
                 "oldest": snaps[0]["creation"] if snaps else None,
                 "newest": snaps[-1]["creation"] if snaps else None,
                 "guids": {s["guid"] for s in snaps},
+                "by_guid": by_guid,
+                "labels": {l for l in by_guid.values() if l},
                 "newest_snapshot": snaps[-1]["snapshot"] if snaps else "",
             })
         out.append({"copies": copies})
@@ -161,17 +168,41 @@ def detect_source(copies: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def compare_copy(source: Dict[str, Any], copy: Dict[str, Any]) -> Dict[str, Any]:
-    """How far a copy trails its source, measured in guids and seconds."""
-    src_guids = source.get("guids") or set()
+    """How far a copy trails its source, counting only what is meant to travel.
+
+    A replication config usually filters by snapshot label -- frequent
+    snapshots are commonly left out on purpose, since shipping something taken
+    every 15 minutes to a backup host is rarely wanted. Counting those as
+    "missing" reports a healthy copy as incomplete, which is worse than useless:
+    it trains people to ignore the number.
+
+    So the labels the copy actually carries define what is being replicated, and
+    only snapshots of those labels count towards ``missing_from_source``. The
+    labels that never arrive are reported separately as ``excluded_labels`` --
+    not an error, just a fact about the configuration.
+    """
+    src_by_guid = source.get("by_guid") or {}
     cp_guids = copy.get("guids") or set()
+    src_guids = source.get("guids") or set()
     shared = src_guids & cp_guids
-    missing = src_guids - cp_guids
+
+    copy_labels = copy.get("labels") or set()
+    src_labels = source.get("labels") or set()
+    excluded = sorted(l for l in (src_labels - copy_labels) if l)
+
+    if copy_labels:
+        missing = {g for g in (src_guids - cp_guids)
+                   if src_by_guid.get(g) in copy_labels}
+    else:
+        missing = src_guids - cp_guids
+
     lag = None
     if source.get("newest") is not None and copy.get("newest") is not None:
         lag = max(0, int(source["newest"]) - int(copy["newest"]))
     return {
         "shared_snapshots": len(shared),
         "missing_from_source": len(missing),
+        "excluded_labels": excluded,
         "lag_seconds": lag,
         "in_sync": bool(shared) and not missing,
     }
@@ -215,8 +246,9 @@ def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
         rows = []
         for c in copies:
             is_src = (c["host"], c["dataset"]) == (source["host"], source["dataset"])
-            cmp_ = {"shared_snapshots": c["snapshot_count"], "missing_from_source": 0,
-                    "lag_seconds": 0, "in_sync": True} if is_src else compare_copy(source, c)
+            cmp_ = ({"shared_snapshots": c["snapshot_count"], "missing_from_source": 0,
+                     "excluded_labels": [], "lag_seconds": 0, "in_sync": True}
+                    if is_src else compare_copy(source, c))
             rows.append({
                 "host": c["host"], "dataset": c["dataset"],
                 "is_source": is_src,

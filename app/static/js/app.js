@@ -5696,11 +5696,16 @@ async function viewInventory() {
         g.copies.filter(c => !c.is_source).forEach(c => {
             const lag = c.lag_seconds == null ? "?" : _formatAge(c.lag_seconds);
             const bad = c.missing_from_source > 0;
+            // Labels the copy never receives are the replication filter at
+            // work, not a gap -- naming them stops "4 missing" from looking
+            // like a fault on a perfectly healthy copy.
+            const excl = (c.excluded_labels || []).length
+                ? ` · ${t("inv_not_replicated")}: ${c.excluded_labels.join(", ")}` : "";
             copyTd.appendChild(h("div", { style: "margin-bottom:2px" }, [
                 h("span", {}, c.host + " "),
                 h("span", { className: "muted", style: "font-size:11px" },
                     `${c.snapshot_count} ${t("inv_snaps_short")} · ${t("inv_behind")} ${lag}` +
-                    (bad ? ` · ${c.missing_from_source} ${t("inv_missing")}` : "")),
+                    (bad ? ` · ${c.missing_from_source} ${t("inv_missing")}` : "") + excl),
             ]));
         });
         if (g.copy_count === 0) {
