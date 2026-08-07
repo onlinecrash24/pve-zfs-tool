@@ -50,6 +50,21 @@ def test_uses_the_dataset_property_not_the_snapshot_column(monkeypatch):
     assert res["by_pool"]["tank"] == 2048
 
 
+def test_dataset_filter_scopes_the_query(monkeypatch):
+    # picking a dataset must not be answered with the whole host's total;
+    # -r includes its children, which is what a parent selection should mean
+    seen = {}
+
+    def fake_run(host, cmd, **kw):
+        seen["cmd"] = cmd
+        return {"success": True, "stdout": "rpool/data/subvol-253-disk-0\t3500000000\n"}
+
+    monkeypatch.setattr(zc, "run_command", fake_run)
+    res = zc.get_snapshot_space({"address": "h"}, "rpool/data/subvol-253-disk-0")
+    assert "-r rpool/data/subvol-253-disk-0" in seen["cmd"]
+    assert res["total"] == 3500000000
+
+
 def test_failure_is_reported_without_fake_zeros(monkeypatch):
     monkeypatch.setattr(zc, "run_command",
                         lambda *a, **k: {"success": False, "stderr": "boom"})

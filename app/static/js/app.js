@@ -1683,7 +1683,7 @@ function applySnapshotFilter() {
     } else {
         tlContainer.style.display = "none";
         tableCard.style.display = "block";
-        renderSnapshotTable(filtered);
+        renderSnapshotTable(filtered, ds);
     }
 }
 
@@ -1763,7 +1763,7 @@ function renderTimeline(snapshots) {
 }
 
 // -- Snapshot Table --------------------------------------------------------
-function renderSnapshotTable(snapshots) {
+function renderSnapshotTable(snapshots, datasetFilter) {
     const tableCard = document.getElementById("snap-table-card");
     tableCard.innerHTML = "";
     tableCard.appendChild(h("div", { className: "card-header" }, `${t("snapshots_count", snapshots.length)}`));
@@ -1783,14 +1783,24 @@ function renderSnapshotTable(snapshots) {
         style: "padding:8px 16px;font-size:12px;color:var(--text-secondary);border-bottom:1px solid var(--border)",
     }, t("loading"));
     tableCard.appendChild(spaceLine);
-    API.get("/api/snapshots/space?host=" + encodeURIComponent(currentHost)).then(r => {
+    // Follows the dataset filter: asking about one dataset should not be
+    // answered with the whole host's total. `-r <dataset>` on the server side
+    // includes its children, which is what you want when a parent is picked.
+    let spaceUrl = "/api/snapshots/space?host=" + encodeURIComponent(currentHost);
+    if (datasetFilter) spaceUrl += "&dataset=" + encodeURIComponent(datasetFilter);
+    API.get(spaceUrl).then(r => {
         if (!r || r.success === false) { spaceLine.textContent = ""; return; }
         spaceLine.innerHTML = "";
         spaceLine.appendChild(h("strong", {}, t("snap_space_total") + ": " + formatBytes(r.total || 0)));
-        const pools = Object.entries(r.by_pool || {}).sort((a, b) => b[1] - a[1]);
-        if (pools.length) {
-            spaceLine.appendChild(h("span", {}, "  ·  " +
-                pools.map(([p, b]) => `${p}: ${formatBytes(b)}`).join("  ·  ")));
+        if (datasetFilter) {
+            // One dataset -- the per-pool breakdown would just repeat the total.
+            spaceLine.appendChild(h("span", { style: "font-family:monospace" }, "  ·  " + datasetFilter));
+        } else {
+            const pools = Object.entries(r.by_pool || {}).sort((a, b) => b[1] - a[1]);
+            if (pools.length) {
+                spaceLine.appendChild(h("span", {}, "  ·  " +
+                    pools.map(([p, b]) => `${p}: ${formatBytes(b)}`).join("  ·  ")));
+            }
         }
         spaceLine.appendChild(h("div", { style: "font-size:11px;margin-top:2px" }, t("snap_space_hint")));
     }).catch(() => { spaceLine.textContent = ""; });
