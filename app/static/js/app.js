@@ -513,17 +513,25 @@ function _renderDashboard(d) {
                              (p.cap_pct != null && p.cap_pct >= 90) ? "color:var(--error,#f44336);font-weight:bold" :
                              (p.cap_pct != null && p.cap_pct >= 80) ? "color:#e67e22" : "";
             const free = p.free_bytes != null ? formatBytes(p.free_bytes) : "—";
+            // Growth rate shown next to the projection: it reacts to what the
+            // pool is doing now, while a days-until-full number of 400+ looks
+            // static even when the trend has changed.
+            const rate = p.forecast_bytes_per_day;
+            const rateTxt = (rate != null && Math.abs(rate) >= 1024)
+                ? `<div class="muted" style="font-size:11px">${rate > 0 ? "+" : "−"}${escapeHtml(formatBytes(Math.abs(rate)))}/${escapeHtml(t("dash_per_day"))}</div>`
+                : "";
             let fc;
             if (p.forecast_days_until_full == null) {
-                fc = `<span class="muted">—</span>`;
-            } else if (stale) {
-                fc = `<span class="muted">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
-            } else if (p.forecast_days_until_full < 30) {
-                fc = `<span style="color:var(--error,#f44336);font-weight:bold">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
-            } else if (p.forecast_days_until_full < 90) {
-                fc = `<span style="color:#e67e22">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
+                const why = t("forecast_why_" + (p.forecast_reason || "no_data"));
+                fc = `<span class="muted" title="${escapeHtml(why)}">—</span>${rateTxt}`;
             } else {
-                fc = `${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}`;
+                const d = p.forecast_days_until_full.toFixed(0) + " " + t("dash_days");
+                const win = p.forecast_window_days
+                    ? t("forecast_window").replace("{d}", String(p.forecast_window_days)) : "";
+                const style = stale ? 'class="muted"'
+                    : p.forecast_days_until_full < 30 ? 'style="color:var(--error,#f44336);font-weight:bold"'
+                    : p.forecast_days_until_full < 90 ? 'style="color:#e67e22"' : "";
+                fc = `<span ${style} title="${escapeHtml(win)}">${escapeHtml(d)}</span>${rateTxt}`;
             }
             tr.innerHTML = `${nameCell}${statusCell}
                 <td style="font-family:monospace">${escapeHtml(p.pool)}</td>
