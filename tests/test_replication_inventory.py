@@ -221,6 +221,25 @@ def test_a_replicating_host_also_shows_its_unreplicated_guests():
     assert got["without_copy_guests"][0]["vmid"] == "101"
 
 
+def test_guest_with_no_snapshots_at_all_is_still_listed():
+    # a guest that never got a snapshot appears in no snapshot listing, so it
+    # would be invisible -- yet that is the worst case: no rollback and nothing
+    # that could ever have been replicated
+    per_host = {
+        "h1": ri.parse_snapshot_guids(_rows("rpool/data/subvol-253-disk-0",
+                                            [("a", 1), ("b", 2)])),
+        "h2": ri.parse_snapshot_guids(_rows("tank/repl/subvol-253-disk-0", [("a", 1)])),
+    }
+    guests = {"h1": [{"vmid": "253", "name": "test253", "type": "lxc"},
+                     {"vmid": "254", "name": "test254", "type": "lxc"}]}
+    got = ri.filter_matrix(ri.build_matrix(per_host, guests), source_host="h1")
+    by_id = {g["vmid"]: g for g in got["guests"]}
+    assert set(by_id) == {"253", "254"}
+    assert by_id["254"]["no_snapshots"] is True
+    assert by_id["254"]["guest_name"] == "test254"
+    assert by_id["253"]["no_snapshots"] is False
+
+
 def test_a_host_that_replicates_nothing_yields_nothing():
     # a standalone machine has no replication story; flagging every guest on it
     # would drown out the hosts that do replicate

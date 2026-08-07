@@ -235,6 +235,27 @@ def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
             "config_mismatch": _config_mismatch(source, rows, configured),
         })
 
+    # Guests PVE knows about that produced no lineage at all -- they have no
+    # snapshots yet, so they never appear in a snapshot listing. That is the
+    # worst case, not a reason to hide them: no snapshots means no local
+    # rollback AND nothing that could ever have been replicated.
+    seen = {(e["source_host"], str(e["vmid"])) for e in entries}
+    for host, guests in (guests_by_host or {}).items():
+        for g in guests or []:
+            vmid = str(g.get("vmid") or "")
+            if not vmid or (host, vmid) in seen:
+                continue
+            entries.append({
+                "vmid": vmid,
+                "guest_type": "lxc" if g.get("type") == "lxc" else "qemu",
+                "guest_name": g.get("name", ""),
+                "source_host": host, "source_dataset": "",
+                "copy_count": 0, "copies": [], "config_mismatch": "",
+                "no_snapshots": True,
+            })
+
+    for e in entries:
+        e.setdefault("no_snapshots", False)
     entries.sort(key=lambda e: (e["source_host"],
                                 int(e["vmid"]) if str(e["vmid"] or "").isdigit() else 0,
                                 e["source_dataset"]))

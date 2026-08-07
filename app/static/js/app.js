@@ -5636,12 +5636,6 @@ async function viewInventory() {
     tiles.appendChild(tile(t("inv_snapshots"), m.snapshot_count || 0));
     container.appendChild(tiles);
 
-    if ((m.hosts_without_data || []).length) {
-        container.appendChild(h("div", {
-            style: "color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;font-size:12px;margin-bottom:12px",
-        }, t("inv_no_data").replace("{h}", m.hosts_without_data.join(", "))));
-    }
-
     // AI report
     const repCard = h("div", { className: "card", style: "margin-bottom:16px" });
     repCard.appendChild(h("div", { className: "card-header" }, t("inv_report_title")));
@@ -5693,7 +5687,9 @@ async function viewInventory() {
         tr.appendChild(h("td", {}, h("strong", {}, label)));
         tr.appendChild(h("td", { style: "font-size:12px" }, [
             h("div", {}, g.source_host),
-            h("div", { className: "muted", style: "font-family:monospace;font-size:11px" }, g.source_dataset),
+            g.no_snapshots
+                ? h("div", { style: "color:var(--error,#f44336);font-size:11px" }, t("inv_no_snapshots"))
+                : h("div", { className: "muted", style: "font-family:monospace;font-size:11px" }, g.source_dataset),
         ]));
 
         const copyTd = h("td", { style: "font-size:12px" });
@@ -5708,7 +5704,8 @@ async function viewInventory() {
             ]));
         });
         if (g.copy_count === 0) {
-            copyTd.appendChild(h("span", { style: "color:var(--error,#f44336)" }, t("inv_none")));
+            copyTd.appendChild(h("span", { style: "color:var(--error,#f44336)" },
+                g.no_snapshots ? t("inv_none_at_all") : t("inv_none")));
         }
         tr.appendChild(copyTd);
 
