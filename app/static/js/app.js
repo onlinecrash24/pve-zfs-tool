@@ -5613,8 +5613,10 @@ async function viewInventory() {
         setContent(container); return;
     }
 
-    const guests = m.guests || [];          // already filtered: guests with copies
-    const noCopy = m.excluded_without_copy || 0;
+    // Guests of the selected host as source: replicated ones first, then the
+    // ones without a copy -- those are the gaps in an otherwise working set.
+    const guests = m.guests || [];
+    const noCopy = m.without_copy_count || 0;
     const mismatch = guests.filter(g => g.config_mismatch).length;
 
     // Summary tiles
@@ -5628,7 +5630,7 @@ async function viewInventory() {
         }, String(value)));
         return c;
     };
-    tiles.appendChild(tile(t("inv_guests"), guests.length));
+    tiles.appendChild(tile(t("inv_guests"), m.replicated_count || 0));
     tiles.appendChild(tile(t("inv_no_copy"), noCopy, noCopy === 0));
     tiles.appendChild(tile(t("inv_mismatch"), mismatch, mismatch === 0));
     tiles.appendChild(tile(t("inv_snapshots"), m.snapshot_count || 0));
@@ -5676,7 +5678,6 @@ async function viewInventory() {
         card.appendChild(h("div", { className: "empty-state" },
             t("inv_empty").replace("{h}", currentHost)));
         container.appendChild(card);
-        _invExcluded(container, m);
         setContent(container); return;
     }
     const table = h("table");
@@ -5726,32 +5727,8 @@ async function viewInventory() {
     table.appendChild(tbody);
     card.appendChild(table);
     container.appendChild(card);
-    _invExcluded(container, m);
     setContent(container);
 }
-
-// Guests that exist in exactly one place are not part of a replication
-// overview -- but "no copy anywhere" is worth knowing, so they are named
-// rather than silently dropped.
-function _invExcluded(container, m) {
-    const list = m.without_copy_guests || [];
-    if (!list.length) return;
-    const card = h("div", { className: "card", style: "margin-top:16px" });
-    card.appendChild(h("div", { className: "card-header" },
-        t("inv_excluded_title").replace("{n}", String(list.length))));
-    const body = h("div", { className: "card-body" });
-    body.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" },
-        t("inv_excluded_intro")));
-    list.forEach(g => body.appendChild(h("div", { style: "font-size:12px" }, [
-        h("strong", {}, `${g.vmid} ${g.guest_name ? "— " + g.guest_name : ""} ` +
-            `(${g.guest_type === "lxc" ? "CT" : "VM"})`),
-        h("span", { className: "muted", style: "font-family:monospace;font-size:11px" },
-            "  " + g.source_dataset),
-    ])));
-    card.appendChild(body);
-    container.appendChild(card);
-}
-
 
 // Near-live guest migration between two non-clustered hosts. Four numbered
 // steps mirroring the PVE Config Restore layout: check -> pre-copy -> cutover

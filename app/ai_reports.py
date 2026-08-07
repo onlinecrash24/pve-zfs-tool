@@ -1130,7 +1130,7 @@ def generate_replication_report(lang_override=None, source_host=None):
         return {"success": False, "error": "No hosts configured"}
     try:
         matrix = filter_matrix(collect_inventory(hosts), source_host=source_host,
-                               only_with_copies=True)
+                               only_when_replicating=True)
     except Exception as e:
         return {"success": False, "error": f"Inventory collection failed: {e}"}
     if not matrix.get("guests"):
@@ -1164,7 +1164,7 @@ def generate_replication_report(lang_override=None, source_host=None):
     # Verdict from facts, not prose: a guest that exists in only one place is
     # critical (a single failure destroys it), a reversed or stopped
     # replication direction is a warning.
-    no_copy = len(matrix.get("without_copy_guests", []))
+    no_copy = matrix.get("without_copy_count", 0)
     mismatches = sum(1 for g in payload.get("guests", []) if g.get("config_mismatch"))
     verdict = "crit" if no_copy else ("warn" if mismatches else "ok")
 

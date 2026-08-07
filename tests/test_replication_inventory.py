@@ -200,12 +200,14 @@ def test_filter_keeps_only_the_selected_source_host():
         "h2": ri.parse_snapshot_guids(_rows("rpool/data/vm-200-disk-0", [("b", 9)])),
     }
     m = ri.build_matrix(per_host, {})
-    got = ri.filter_matrix(m, source_host="h1", only_with_copies=False)
+    got = ri.filter_matrix(m, source_host="h1", only_when_replicating=False)
     assert [g["vmid"] for g in got["guests"]] == ["100"]
     assert got["source_host"] == "h1"
 
 
-def test_filter_drops_guests_without_a_copy_but_counts_them():
+def test_a_replicating_host_also_shows_its_unreplicated_guests():
+    # a guest missing from an otherwise working replication set is exactly the
+    # omission worth catching, so it belongs in the list, not hidden from it
     per_host = {
         "h1": ri.parse_snapshot_guids(
             _rows("rpool/data/vm-100-disk-0", [("a", 1), ("b", 2)]) + "\n" +
@@ -213,9 +215,20 @@ def test_filter_drops_guests_without_a_copy_but_counts_them():
         "h2": ri.parse_snapshot_guids(_rows("tank/repl/vm-100-disk-0", [("a", 1)])),
     }
     got = ri.filter_matrix(ri.build_matrix(per_host, {}), source_host="h1")
-    assert [g["vmid"] for g in got["guests"]] == ["100"]
-    assert got["excluded_without_copy"] == 1
+    assert [g["vmid"] for g in got["guests"]] == ["100", "101"]   # replicated first
+    assert got["replicated_count"] == 1
+    assert got["without_copy_count"] == 1
     assert got["without_copy_guests"][0]["vmid"] == "101"
+
+
+def test_a_host_that_replicates_nothing_yields_nothing():
+    # a standalone machine has no replication story; flagging every guest on it
+    # would drown out the hosts that do replicate
+    per_host = {"h1": ri.parse_snapshot_guids(
+        _rows("rpool/data/vm-100-disk-0", [("solo", 5)]))}
+    got = ri.filter_matrix(ri.build_matrix(per_host, {}), source_host="h1")
+    assert got["guests"] == []
+    assert got["replicated_count"] == 0
 
 
 def test_source_hosts_lists_only_origins_of_replicated_guests():

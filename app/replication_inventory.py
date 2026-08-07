@@ -242,26 +242,35 @@ def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
 
 
 def filter_matrix(matrix: Dict[str, Any], source_host: Optional[str] = None,
-                  only_with_copies: bool = True) -> Dict[str, Any]:
+                  only_when_replicating: bool = True) -> Dict[str, Any]:
     """Narrow the matrix to what is worth looking at.
 
     ``source_host`` keeps only guests whose ORIGIN is that host, so the view and
-    the report describe one host's data and its outbound copies -- listing both
+    the report describe one host's data and where it goes -- listing both
     directions at once shows every guest twice and reads as duplicates.
 
-    ``only_with_copies`` drops guests that exist in exactly one place. They are
-    still counted (``excluded_without_copy``) because "no copy at all" is worth
-    knowing, but they are not part of a replication overview.
+    Once a host replicates anything, ALL of its guests are listed, including the
+    ones without a copy: a guest missing from an otherwise working replication
+    set is precisely the omission worth catching. A host that replicates nothing
+    at all has no replication story, so ``only_when_replicating`` yields an
+    empty list rather than flagging every guest on a standalone machine.
     """
     guests = matrix.get("guests") or []
     if source_host:
         guests = [g for g in guests if g["source_host"] == source_host]
+    replicated = [g for g in guests if g["copy_count"] > 0]
     without = [g for g in guests if g["copy_count"] == 0]
-    if only_with_copies:
-        guests = [g for g in guests if g["copy_count"] > 0]
+    if only_when_replicating and not replicated:
+        guests = []
+        without = []
+    else:
+        # Replicated first, then the gaps -- sorted so the omissions stand out
+        # at the end instead of being scattered through the list.
+        guests = replicated + without
     out = dict(matrix)
     out["guests"] = guests
-    out["excluded_without_copy"] = len(without)
+    out["replicated_count"] = len(replicated)
+    out["without_copy_count"] = len(without)
     out["without_copy_guests"] = [
         {"vmid": g["vmid"], "guest_name": g["guest_name"],
          "guest_type": g["guest_type"], "source_dataset": g["source_dataset"]}
