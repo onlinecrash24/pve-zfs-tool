@@ -296,6 +296,63 @@ def test_source_hosts_lists_only_origins_of_replicated_guests():
     assert "h3" not in ri.source_hosts(ri.build_matrix(per_host, {}))
 
 
+# --- collection cost -------------------------------------------------------
+
+def test_listing_is_filtered_on_the_host(monkeypatch):
+    # filtering after transfer would ship every rpool/ROOT and var-lib-vz
+    # snapshot over SSH just to discard it -- with 15-minute auto-snapshots
+    # that is the bulk of the output, and it is what made the request time out
+    seen = {}
+
+    def fake_run(host, cmd, **kw):
+        seen.update({"cmd": cmd, **kw})
+        return {"success": True, "stdout": ""}
+
+    monkeypatch.setattr(ri, "run_command", fake_run)
+    ri.collect_host_snapshots({"address": "h"})
+    assert "grep -E" in seen["cmd"]
+    assert "vm|subvol|base|basevol" in seen["cmd"]
+    assert seen["cache_ttl"] > 0
+    # grep exits 1 on no match; a host with no guest snapshots yet must not
+    # look like a host that failed to answer
+    assert seen["cmd"].rstrip().endswith("|| true")
+
+
+def test_host_filter_matches_guest_disks_only():
+    import re
+    pat = re.compile(r"(^|/)(vm|subvol|base|basevol)-[0-9]+-disk-[0-9]+@")
+    for keep in ("rpool/data/vm-100-disk-0@snap", "rpool/data/subvol-253-disk-1@s",
+                 "tank/repl/base-9000-disk-0@s"):
+        assert pat.search(keep), keep
+    for drop in ("rpool@snap", "rpool/ROOT/pve-1@snap", "rpool/var-lib-vz@snap",
+                 "rpool/data@snap"):
+        assert not pat.search(drop), drop
+
+
+def test_hosts_are_collected_in_parallel(monkeypatch):
+    # sequential collection makes the wait the SUM of every host's listing
+    import threading, time
+    concurrent, peak, lock = [0], [0], threading.Lock()
+
+    def fake_one(h):
+        with lock:
+            concurrent[0] += 1
+            peak[0] = max(peak[0], concurrent[0])
+        time.sleep(0.05)
+        with lock:
+            concurrent[0] -= 1
+        return {"address": h["address"], "rows": [], "guests": [], "configs": []}
+
+    monkeypatch.setattr(ri, "_collect_one_host", fake_one)
+    ri.collect_inventory([{"address": f"h{i}"} for i in range(4)])
+    assert peak[0] > 1
+
+
+def test_collect_inventory_without_hosts():
+    got = ri.collect_inventory([])
+    assert got["guests"] == [] and got["snapshot_count"] == 0
+
+
 # --- condensation ----------------------------------------------------------
 
 def test_condense_drops_the_raw_snapshot_list():
