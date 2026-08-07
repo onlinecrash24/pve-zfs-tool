@@ -56,7 +56,36 @@ function toast(msg, type = "info") {
 // ---------------------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------------------
+// Dashboard auto-refresh. The numbers only change when the metrics sampler
+// writes new rows, so polling faster than its interval just costs SSH round
+// trips for identical data. A hidden tab is not refreshed at all; coming back
+// to it reloads immediately, so a page left open overnight is current again
+// the moment it is looked at.
+let _dashTimer = null;
+
+function stopDashboardRefresh() {
+    if (_dashTimer) { clearTimeout(_dashTimer); _dashTimer = null; }
+}
+
+function scheduleDashboardRefresh(intervalSeconds, reload) {
+    stopDashboardRefresh();
+    const ms = Math.max(60, parseInt(intervalSeconds) || 900) * 1000;
+    _dashTimer = setTimeout(() => {
+        if (currentView !== "home") return stopDashboardRefresh();
+        if (document.hidden) {
+            // Catch up once the tab is looked at again.
+            document.addEventListener("visibilitychange", function once() {
+                document.removeEventListener("visibilitychange", once);
+                if (currentView === "home") reload();
+            });
+            return;
+        }
+        reload();
+    }, ms);
+}
+
 function navigate(view) {
+    if (view !== "home") stopDashboardRefresh();
     currentView = view;
     document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
     const el = document.querySelector(`[data-view="${view}"]`);
@@ -231,15 +260,18 @@ async function viewHome() {
         const dashMount = h("div", { style: "margin-top:16px" }, loading());
         container.appendChild(dashMount);
         // Async — don't block rest of page
-        (async () => {
+        const loadDash = async () => {
             try {
                 const d = await API.get("/api/dashboard");
+                if (currentView !== "home" || !document.body.contains(dashMount)) return;
                 dashMount.innerHTML = "";
                 dashMount.appendChild(_renderDashboard(d));
+                scheduleDashboardRefresh(d.sample_interval_seconds, loadDash);
             } catch (e) {
                 dashMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Dashboard load failed")}</p>`;
             }
-        })();
+        };
+        loadDash();
     }
 
     // Feature overview
@@ -432,6 +464,18 @@ function _renderDashboard(d) {
         t("dash_forecast_critical_sub"),
         (agg.forecast_pools_critical || 0) === 0 ? true : false));
     root.appendChild(tiles);
+
+    // Say how fresh this is: with a 15-minute sampler, a page that silently
+    // shows the same numbers for a while should not look broken.
+    if (d.generated_at) {
+        const mins = Math.round((d.sample_interval_seconds || 900) / 60);
+        root.appendChild(h("div", {
+            className: "muted",
+            style: "font-size:11px;margin:-8px 0 12px 2px",
+        }, t("dash_updated")
+            .replace("{t}", new Date(d.generated_at * 1000).toLocaleTimeString())
+            .replace("{m}", String(mins))));
+    }
 
     const tiles2 = h("div", { className: "grid grid-3", style: "gap:12px;margin-bottom:16px" });
     tiles2.appendChild(tile(t("dash_stale_labels"),

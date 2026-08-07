@@ -54,6 +54,15 @@ def _linreg(xs, ys):
     return slope, intercept
 
 
+def _sample_interval():
+    """How often the metrics sampler writes new rows (seconds)."""
+    try:
+        from app.metrics import SAMPLE_INTERVAL
+        return int(SAMPLE_INTERVAL)
+    except Exception:
+        return 900
+
+
 def bucket_medians(points, bucket_seconds=FORECAST_BUCKET_SECONDS):
     """[(timestamp, value)] collapsed into per-bucket medians.
 
@@ -420,6 +429,9 @@ def dashboard():
         "hosts": hosts_out,
         "bad_pools": bad_pools,
         "generated_at": int(time.time()),
+        # The dashboard is only as fresh as the sampler; reported so the page
+        # can refresh at that cadence instead of guessing or polling pointlessly.
+        "sample_interval_seconds": _sample_interval(),
     }
 
 
