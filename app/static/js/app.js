@@ -175,6 +175,7 @@ async function renderView() {
         replication: viewReplication,
         dr: viewDR,
         "config-restore": viewConfigRestore,
+        inventory: viewInventory,
         migrate: viewMigrate,
         guests: viewGuests,
         health: viewHealth,
@@ -3534,6 +3535,16 @@ async function viewHealth() {
     setContent(container);
 }
 
+// Seconds -> short human age ("5m", "3h 20m", "2d 4h"), matching the wording
+// snapshot_analysis.format_age produces on the Python side.
+function _formatAge(seconds) {
+    const s = Math.max(0, parseInt(seconds) || 0);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
 function formatBytes(bytes) {
     if (bytes === 0) return "0 B";
     const k = 1024;
@@ -5572,6 +5583,141 @@ async function viewDR() {
 
 // -- Config Restore (from a host-config backup onto a fresh PVE) -----------
 const _CR_CATS = ["guests", "network", "storage", "apt", "access", "ssh", "firewall", "jobs", "other", "info"];
+
+// Where does every guest's data live, and how current are its copies?
+// Correlated by ZFS snapshot guid: a guid survives send/recv, so datasets
+// sharing guids are the same lineage regardless of their names or pools, and
+// the host holding the newest snapshot is the source.
+async function viewInventory() {
+    setContent(loading());
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("inv_title")),
+        h("p", {}, t("inv_subtitle")),
+    ]));
+
+    let m;
+    try {
+        m = await API.get("/api/inventory/matrix");
+    } catch (e) {
+        container.appendChild(h("div", { className: "card" },
+            h("div", { className: "card-body" }, e.message || t("failed"))));
+        setContent(container); return;
+    }
+
+    const guests = m.guests || [];
+    const noCopy = guests.filter(g => g.copy_count === 0).length;
+    const mismatch = guests.filter(g => g.config_mismatch).length;
+
+    // Summary tiles
+    const tiles = h("div", { className: "grid grid-4", style: "gap:12px;margin-bottom:16px" });
+    const tile = (label, value, ok) => {
+        const c = h("div", { className: "stat-card" });
+        c.appendChild(h("div", { className: "stat-label" }, label));
+        c.appendChild(h("div", {
+            className: "stat-value",
+            style: ok === false ? "color:var(--error,#f44336)" : (ok === true ? "color:var(--success,#4caf50)" : ""),
+        }, String(value)));
+        return c;
+    };
+    tiles.appendChild(tile(t("inv_guests"), guests.length));
+    tiles.appendChild(tile(t("inv_no_copy"), noCopy, noCopy === 0));
+    tiles.appendChild(tile(t("inv_mismatch"), mismatch, mismatch === 0));
+    tiles.appendChild(tile(t("inv_snapshots"), m.snapshot_count || 0));
+    container.appendChild(tiles);
+
+    if ((m.hosts_without_data || []).length) {
+        container.appendChild(h("div", {
+            style: "color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;font-size:12px;margin-bottom:12px",
+        }, t("inv_no_data").replace("{h}", m.hosts_without_data.join(", "))));
+    }
+
+    // AI report
+    const repCard = h("div", { className: "card", style: "margin-bottom:16px" });
+    repCard.appendChild(h("div", { className: "card-header" }, t("inv_report_title")));
+    const repBody = h("div", { className: "card-body" });
+    repBody.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("inv_report_intro")));
+    const repBtn = h("button", { className: "btn btn-primary btn-sm" }, t("inv_report_btn"));
+    const repStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    repBtn.onclick = async () => {
+        repBtn.disabled = true; repStatus.textContent = t("mig_starting");
+        try {
+            const r = await API.post("/api/ai/replication-report", {});
+            pollReplicationTask(r.task_id, {
+                onTick: rec => { repStatus.textContent = rec.progress || t("mig_running"); },
+                onDone: rec => {
+                    repBtn.disabled = false;
+                    const ok = rec.result && rec.result.success;
+                    repStatus.textContent = (ok ? "✓ " : "✗ ") +
+                        (ok ? t("inv_report_done") : ((rec.result || {}).error || t("failed")));
+                    if (ok) toast(t("inv_report_done"), "success");
+                },
+                onError: msg => { repBtn.disabled = false; repStatus.textContent = "✗ " + msg; },
+            });
+        } catch (e) { repBtn.disabled = false; repStatus.textContent = "✗ " + (e.message || ""); }
+    };
+    repBody.appendChild(repBtn);
+    repBody.appendChild(repStatus);
+    repCard.appendChild(repBody);
+    container.appendChild(repCard);
+
+    // Matrix
+    const card = h("div", { className: "card" });
+    card.appendChild(h("div", { className: "card-header" }, t("inv_matrix")));
+    if (!guests.length) {
+        card.appendChild(h("div", { className: "empty-state" }, t("inv_empty")));
+        container.appendChild(card); setContent(container); return;
+    }
+    const table = h("table");
+    table.appendChild(h("thead", {}, h("tr", {}, [
+        h("th", {}, t("inv_guest")), h("th", {}, t("inv_source")),
+        h("th", {}, t("inv_copies")), h("th", {}, t("inv_state")),
+    ])));
+    const tbody = h("tbody");
+    for (const g of guests) {
+        const tr = h("tr");
+        const label = `${g.vmid || "?"} ${g.guest_name ? "— " + g.guest_name : ""}` +
+            ` (${g.guest_type === "lxc" ? "CT" : "VM"})`;
+        tr.appendChild(h("td", {}, h("strong", {}, label)));
+        tr.appendChild(h("td", { style: "font-size:12px" }, [
+            h("div", {}, g.source_host),
+            h("div", { className: "muted", style: "font-family:monospace;font-size:11px" }, g.source_dataset),
+        ]));
+
+        const copyTd = h("td", { style: "font-size:12px" });
+        g.copies.filter(c => !c.is_source).forEach(c => {
+            const lag = c.lag_seconds == null ? "?" : _formatAge(c.lag_seconds);
+            const bad = c.missing_from_source > 0;
+            copyTd.appendChild(h("div", { style: "margin-bottom:2px" }, [
+                h("span", {}, c.host + " "),
+                h("span", { className: "muted", style: "font-size:11px" },
+                    `${c.snapshot_count} ${t("inv_snaps_short")} · ${t("inv_behind")} ${lag}` +
+                    (bad ? ` · ${c.missing_from_source} ${t("inv_missing")}` : "")),
+            ]));
+        });
+        if (g.copy_count === 0) {
+            copyTd.appendChild(h("span", { style: "color:var(--error,#f44336)" }, t("inv_none")));
+        }
+        tr.appendChild(copyTd);
+
+        const stTd = h("td", { style: "font-size:12px" });
+        if (g.config_mismatch) {
+            stTd.appendChild(h("span", { className: "badge badge-warning", title: g.config_mismatch }, "⚠"));
+            stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" }, t("inv_mismatch_hint")));
+        } else if (g.copy_count === 0) {
+            stTd.appendChild(h("span", { className: "badge badge-danger" }, t("inv_at_risk")));
+        } else {
+            stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
+        }
+        tr.appendChild(stTd);
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    card.appendChild(table);
+    container.appendChild(card);
+    setContent(container);
+}
+
 
 // Near-live guest migration between two non-clustered hosts. Four numbered
 // steps mirroring the PVE Config Restore layout: check -> pre-copy -> cutover

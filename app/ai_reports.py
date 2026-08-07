@@ -933,6 +933,7 @@ def generate_report(host_address=None, lang_override=None):
         "warnings_count": warn_count,
         "verdict_source": verdict_source,
         "section_statuses": section_status_map,
+        "kind": "status",
     }
 
     _add_report(report)
@@ -1040,6 +1041,155 @@ def generate_report(host_address=None, lang_override=None):
         notify_summary["skipped_reason"] = "notify_on_report disabled"
 
     return {"success": True, "report": report, "notify": notify_summary}
+
+
+REPLICATION_PROMPT_EN = """You document the backup situation of a Proxmox/ZFS
+estate. The data has already been correlated: for every guest disk it names the
+SOURCE (the host holding the newest snapshots) and every COPY on other hosts,
+matched by ZFS snapshot guid -- a guid survives send/recv, so a shared guid
+proves the copy descends from that source.
+
+Write in this structure:
+
+## 1. Overview
+How many guests, how many have no second copy at all, how many are behind.
+
+## 2. Per host
+For each source host, list its guests as: VMID, name, type, then one line per
+copy -- which host, how many snapshots, how far behind, how many snapshots of
+the source it is missing. Say plainly which copy is the live one.
+
+## 3. Findings
+Guests without any copy (a single failure destroys them), copies that stopped
+advancing, and any config_mismatch entry -- a host configured as a replication
+target that holds the NEWEST snapshots means replication reversed or stopped,
+and the "source" you would restore from may not be the one you think.
+
+## 4. Recommendations
+Concrete and ranked. No generic advice.
+
+Rules: lag_seconds is the age difference to the source, not an error by itself --
+a replica running every 15 minutes is normally a few minutes behind. Judge it
+against that cadence. Do not invent numbers; use only what the data contains.
+"""
+
+REPLICATION_PROMPT_DE = """Du dokumentierst die Sicherungslage einer
+Proxmox-/ZFS-Umgebung. Die Daten sind bereits korreliert: Für jede Gast-Platte
+sind die QUELLE (der Host mit den neuesten Snapshots) und alle KOPIEN auf
+anderen Hosts benannt, zugeordnet über die ZFS-Snapshot-GUID -- eine GUID
+übersteht send/recv, eine gemeinsame GUID beweist also die Abstammung.
+
+Schreibe in dieser Struktur:
+
+## 1. Überblick
+Wie viele Gäste, wie viele ohne zweite Kopie, wie viele im Rückstand.
+
+## 2. Je Host
+Für jeden Quell-Host dessen Gäste: VMID, Name, Typ, danach je Kopie eine Zeile
+-- welcher Host, wie viele Snapshots, wie weit zurück, wie viele Snapshots der
+Quelle fehlen. Benenne klar, welche Kopie die aktive ist.
+
+## 3. Befunde
+Gäste ohne jede Kopie (ein einzelner Ausfall vernichtet sie), Kopien die nicht
+mehr nachziehen, und jeder config_mismatch -- ein als Replikationsziel
+konfigurierter Host, der die NEUESTEN Snapshots hält, bedeutet umgekehrte oder
+gestoppte Replikation, und die vermeintliche Quelle für einen Restore ist
+womöglich nicht die richtige.
+
+## 4. Empfehlungen
+Konkret und nach Dringlichkeit. Keine Allgemeinplätze.
+
+Regeln: lag_seconds ist der Altersabstand zur Quelle, für sich genommen kein
+Fehler -- ein Replikat mit 15-Minuten-Takt liegt normalerweise ein paar Minuten
+zurück. Bewerte den Rückstand an diesem Takt. Erfinde keine Zahlen, nutze nur
+was in den Daten steht. Schreibe den gesamten Bericht auf Deutsch.
+"""
+
+
+def generate_replication_report(lang_override=None):
+    """AI report on where every guest's data lives and how current the copies are.
+
+    Separate from the status report: different question, different structure, and
+    it spans all hosts by design -- the whole point is the relationship between
+    them. Shares the LLM call, storage and PDF rendering.
+    """
+    from app.replication_inventory import collect_inventory, condense_for_report
+    from app.ssh_manager import load_hosts
+
+    config = load_config()
+    provider = config.get("provider", "openai")
+    provider_cfg = config.get(provider, {})
+    model = provider_cfg.get("model", "unknown")
+    lang = lang_override or config.get("report_language", "en")
+
+    hosts = load_hosts()
+    if not hosts:
+        return {"success": False, "error": "No hosts configured"}
+    try:
+        matrix = collect_inventory(hosts)
+    except Exception as e:
+        return {"success": False, "error": f"Inventory collection failed: {e}"}
+    if not matrix.get("guests"):
+        return {"success": False,
+                "error": "No guest datasets with snapshots found on any host"}
+
+    payload = condense_for_report(matrix)
+    payload["hosts"] = matrix.get("hosts", [])
+    payload["hosts_without_data"] = matrix.get("hosts_without_data", [])
+    data_json = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+    if len(data_json) > 30000:
+        data_json = data_json[:30000] + "\n... (truncated)"
+
+    system_prompt = REPLICATION_PROMPT_DE if lang == "de" else REPLICATION_PROMPT_EN
+    intro = ("Hier ist die korrelierte Sicherungslage. Bitte erstelle den Bericht "
+             "auf Deutsch." if lang == "de" else
+             "Here is the correlated backup situation. Please write the report.")
+    result = call_llm([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{intro}\n\n```json\n{data_json}\n```"},
+    ])
+    if not result.get("success"):
+        return {"success": False, "error": result.get("error", "LLM call failed")}
+
+    # Verdict from facts, not prose: a guest with no copy at all is critical,
+    # a reversed/stopped replication is a warning.
+    no_copy = payload.get("guests_without_copy", 0)
+    mismatches = sum(1 for g in payload.get("guests", []) if g.get("config_mismatch"))
+    verdict = "crit" if no_copy else ("warn" if mismatches else "ok")
+
+    content, _ = _extract_and_strip_verdict_block(result.get("content", ""))
+    report = {
+        "id": str(uuid.uuid4())[:8],
+        "timestamp": tz_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "provider": provider,
+        "model": model,
+        "content": content,
+        "host_count": len(matrix.get("hosts", [])),
+        "host_names": matrix.get("hosts", []),
+        "host_addresses": matrix.get("hosts", []),
+        "usage": result.get("usage", {}),
+        "verdict": verdict,
+        "critical_findings": no_copy,
+        "warnings_count": mismatches,
+        "verdict_source": "facts",
+        "kind": "replication",
+    }
+    _add_report(report)
+    return {"success": True, "report": report}
+
+
+def generate_replication_report_async(lang_override=None):
+    """Background variant; the client polls the shared task registry."""
+    from app.tasks import start_task
+
+    def _job(progress, lang):
+        progress("Collecting snapshots from all hosts …")
+        res = generate_replication_report(lang)
+        progress("Report finished" if res.get("success") else "Report failed",
+                 ok=res.get("success", False))
+        return res
+
+    return start_task("replication-report", _job, lang_override, prefix="aireport")
 
 
 def generate_report_async(host_address=None, lang_override=None):
