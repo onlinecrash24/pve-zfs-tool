@@ -1222,6 +1222,7 @@ async function viewPools() {
     const table = h("table");
     table.appendChild(h("thead", {}, h("tr", {}, [
         h("th", {}, t("name")), h("th", {}, t("size")), h("th", {}, t("alloc")),
+        h("th", { title: t("pool_snap_space_hint") }, t("pool_snap_space")),
         h("th", {}, t("free")), h("th", {}, t("frag")), h("th", {}, t("cap")),
         h("th", {}, t("health")), h("th", {}, t("actions")),
     ])));
@@ -1231,6 +1232,9 @@ async function viewPools() {
         tr.appendChild(h("td", {}, h("strong", {}, pool.name)));
         tr.appendChild(h("td", {}, pool.size));
         tr.appendChild(h("td", {}, pool.alloc));
+        // Filled in below once the snapshot space is known -- one extra query
+        // for the whole table rather than one per pool.
+        tr.appendChild(h("td", { className: "pool-snapspace", "data-pool": pool.name }, "…"));
         tr.appendChild(h("td", {}, pool.free));
         tr.appendChild(h("td", { style: ampelColor(parseFloat(pool.frag), 79, 49, false) }, pool.frag));
         tr.appendChild(h("td", { style: ampelColor(parseFloat(pool.cap), 89, 79, false) }, pool.cap));
@@ -1257,6 +1261,17 @@ async function viewPools() {
     container.appendChild(tableCard);
 
     setContent(container);
+
+    // One query fills the snapshot-space column for every pool.
+    API.get("/api/snapshots/space?host=" + encodeURIComponent(currentHost)).then(r => {
+        const byPool = (r && r.by_pool) || {};
+        document.querySelectorAll(".pool-snapspace").forEach(td => {
+            const bytes = byPool[td.dataset.pool];
+            td.textContent = bytes === undefined ? "—" : formatBytes(bytes);
+        });
+    }).catch(() => {
+        document.querySelectorAll(".pool-snapspace").forEach(td => { td.textContent = "—"; });
+    });
 
     for (const pool of pools) {
         checkPoolUpgrade(pool.name);
@@ -1722,7 +1737,8 @@ function renderTimeline(snapshots) {
             content.appendChild(topRow);
 
             const metaRow = h("div", { className: "tl-meta" });
-            metaRow.appendChild(h("span", {}, `${t("used")}: ${snap.used}`));
+            metaRow.appendChild(h("span", { title: t("snap_frees_hint") },
+                `${t("snap_frees")}: ${snap.used}`));
             metaRow.appendChild(h("span", {}, `${t("refer")}: ${snap.refer}`));
             if (isAuto) metaRow.appendChild(h("span", { className: "badge badge-stopped", style: "font-size:9px" }, "auto"));
             content.appendChild(metaRow);
@@ -1757,10 +1773,33 @@ function renderSnapshotTable(snapshots) {
         return;
     }
 
+    // How much the snapshots actually occupy. Deliberately NOT the sum of the
+    // "used" column: that value is what destroying that ONE snapshot would
+    // free, so blocks held by several snapshots count in none of them and the
+    // sum can read 0 while the snapshots hold hundreds of gigabytes.
+    // usedbysnapshots is the honest number.
+    const spaceLine = h("div", {
+        id: "snap-space-line",
+        style: "padding:8px 16px;font-size:12px;color:var(--text-secondary);border-bottom:1px solid var(--border)",
+    }, t("loading"));
+    tableCard.appendChild(spaceLine);
+    API.get("/api/snapshots/space?host=" + encodeURIComponent(currentHost)).then(r => {
+        if (!r || r.success === false) { spaceLine.textContent = ""; return; }
+        spaceLine.innerHTML = "";
+        spaceLine.appendChild(h("strong", {}, t("snap_space_total") + ": " + formatBytes(r.total || 0)));
+        const pools = Object.entries(r.by_pool || {}).sort((a, b) => b[1] - a[1]);
+        if (pools.length) {
+            spaceLine.appendChild(h("span", {}, "  ·  " +
+                pools.map(([p, b]) => `${p}: ${formatBytes(b)}`).join("  ·  ")));
+        }
+        spaceLine.appendChild(h("div", { style: "font-size:11px;margin-top:2px" }, t("snap_space_hint")));
+    }).catch(() => { spaceLine.textContent = ""; });
+
     const table = h("table");
     table.appendChild(h("thead", {}, h("tr", {}, [
         h("th", {}, t("dataset_label")), h("th", {}, t("snapshot")), h("th", {}, t("type")),
-        h("th", {}, t("used")), h("th", {}, t("refer")), h("th", {}, t("created")), h("th", {}, t("actions")),
+        h("th", { title: t("snap_frees_hint") }, t("snap_frees")),
+        h("th", {}, t("refer")), h("th", {}, t("created")), h("th", {}, t("actions")),
     ])));
     const tbody = h("tbody");
     for (const snap of snapshots) {
@@ -2386,7 +2425,7 @@ async function _guestSnapshotsHtml(guest, pools, guestType) {
     if (snaps.length === 0) {
         html += `<p style="color:var(--text-secondary)">${escapeHtml(t("no_guest_snapshots"))}</p>`;
     } else {
-        html += `<table><thead><tr><th>${escapeHtml(t("snapshot"))}</th><th>${escapeHtml(t("used"))}</th><th>${escapeHtml(t("refer"))}</th><th>${escapeHtml(t("created"))}</th><th>${escapeHtml(t("actions"))}</th></tr></thead><tbody>`;
+        html += `<table><thead><tr><th>${escapeHtml(t("snapshot"))}</th><th title="${escapeHtml(t("snap_frees_hint"))}">${escapeHtml(t("snap_frees"))}</th><th>${escapeHtml(t("refer"))}</th><th>${escapeHtml(t("created"))}</th><th>${escapeHtml(t("actions"))}</th></tr></thead><tbody>`;
         for (const s of snaps) {
             const isLxc = guest.type === "lxc";
             html += `<tr>

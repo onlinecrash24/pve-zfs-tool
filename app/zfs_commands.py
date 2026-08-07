@@ -360,6 +360,62 @@ def destroy_dataset(host, name, recursive=False):
 # Snapshot operations
 # ---------------------------------------------------------------------------
 
+def parse_snapshot_space(stdout):
+    """[(dataset, bytes)] from ``zfs list -Hp -o name,usedsnap``."""
+    rows = []
+    for line in (stdout or "").strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        try:
+            rows.append((parts[0].strip(), int(parts[1])))
+        except (ValueError, TypeError):
+            continue
+    return rows
+
+
+def snapshot_space_by_pool(rows):
+    """Per-pool totals from the per-dataset values.
+
+    Each dataset's ``usedbysnapshots`` is disjoint from every other's, so
+    summing them across a pool is correct -- unlike summing the per-snapshot
+    ``used`` column, which misses every block shared between snapshots.
+    """
+    out = {}
+    for name, size in rows or []:
+        pool = name.split("/", 1)[0]
+        out[pool] = out.get(pool, 0) + size
+    return out
+
+
+def get_snapshot_space(host, dataset=None):
+    """How much space snapshots actually occupy, per dataset and per pool.
+
+    Uses the ``usedbysnapshots`` property rather than adding up the per-snapshot
+    ``used`` column: ``used`` is what destroying THAT ONE snapshot would free,
+    so blocks held by several snapshots belong to none of them individually.
+    Three snapshots of data that was deleted afterwards each report 0 while the
+    dataset's usedbysnapshots is the full amount -- summing the column would
+    tell the user "0" when the snapshots hold hundreds of gigabytes.
+    """
+    cmd = "zfs list -Hp -o name,usedsnap -t filesystem,volume"
+    if dataset is not None:
+        try:
+            dataset = validate_zfs_name(dataset, "Dataset")
+        except ValueError as e:
+            return {"success": False, "stderr": str(e)}
+        cmd += f" -r {dataset}"
+    result = run_command(host, f"{cmd} 2>/dev/null", cache_ttl=_TTL_SHORT)
+    if not result.get("success"):
+        return {"success": False, "stderr": result.get("stderr", ""),
+                "datasets": [], "by_pool": {}, "total": 0}
+    rows = parse_snapshot_space(result.get("stdout", ""))
+    return {"success": True,
+            "datasets": [{"name": n, "used_by_snapshots": s} for n, s in rows],
+            "by_pool": snapshot_space_by_pool(rows),
+            "total": sum(s for _, s in rows)}
+
+
 def get_snapshots(host, dataset=None):
     if dataset is not None:
         try:
