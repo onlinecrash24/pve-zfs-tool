@@ -423,7 +423,7 @@ function _renderDashboard(d) {
         `${agg.pools_ok || 0} / ${agg.pools_total || 0}`,
         t("dash_pools_ok"),
         (agg.pools_degraded || 0) === 0 ? true : false));
-    tiles.appendChild(tile(t("dash_capacity_warn"),
+    tiles.appendChild(tile(t("dash_capacity_warn").replace("{p}", String(agg.capacity_warn_pct ?? 70)),
         String(agg.pools_capacity_warn || 0),
         t("dash_capacity_warn_sub"),
         (agg.pools_capacity_warn || 0) === 0 ? true : ((agg.pools_capacity_warn || 0) > 0 ? false : undefined)));
@@ -6599,6 +6599,31 @@ async function viewNotifications() {
     evCard.appendChild(evBody);
     container.appendChild(evCard);
 
+    // --- Capacity thresholds -------------------------------------------------
+    // Which fill level triggers health_warning. ZFS gets uncomfortable well
+    // before it is full and snapshots eat the rest quickly, so this is worth
+    // setting per environment instead of being hardcoded.
+    const th = config.thresholds || {};
+    const thCard = h("div", { className: "card", style: "margin-top:16px" });
+    thCard.appendChild(h("div", { className: "card-header" }, t("thresholds_title")));
+    const thBody = h("div", { className: "card-body" });
+    thBody.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" },
+        t("thresholds_intro")));
+    const numInp = (id, val) => {
+        const i = h("input", { type: "number", className: "form-input", id,
+                               min: "1", max: "100", style: "max-width:120px" });
+        i.value = String(val);
+        return i;
+    };
+    thBody.appendChild(h("div", { style: "display:flex;gap:16px;flex-wrap:wrap" }, [
+        h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
+            t("threshold_warn")), numInp("cap-warn", th.capacity_warn_pct ?? 70)]),
+        h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
+            t("threshold_crit")), numInp("cap-crit", th.capacity_crit_pct ?? 80)]),
+    ]));
+    thCard.appendChild(thBody);
+    container.appendChild(thCard);
+
     // --- Save Button ---
     const saveBar = h("div", { style: "margin-top:16px;display:flex;gap:8px" });
     saveBar.appendChild(h("button", { className: "btn btn-primary", id: "notify-save-btn" }, t("save_config")));
@@ -6686,6 +6711,10 @@ async function viewNotifications() {
                 security: document.getElementById("em-security").value,
             },
             events,
+            thresholds: {
+                capacity_warn_pct: parseInt(document.getElementById("cap-warn").value) || 70,
+                capacity_crit_pct: parseInt(document.getElementById("cap-crit").value) || 80,
+            },
         };
         const r = await API.post("/api/notifications/config", newConfig);
         toast(r.message || t("saved"), r.success ? "success" : "error");

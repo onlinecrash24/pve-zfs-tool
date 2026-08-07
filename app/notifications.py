@@ -67,6 +67,14 @@ DEFAULT_CONFIG = {
         "replication_lag": True,
         "host_backup_failed": True,
     },
+    # Pool fill levels that trigger health_warning. ZFS gets uncomfortable well
+    # before it is actually full -- fragmentation rises and the allocator
+    # switches strategy -- and snapshots can eat the remaining space quickly,
+    # so the default warns early rather than at the last moment.
+    "thresholds": {
+        "capacity_warn_pct": 70,
+        "capacity_crit_pct": 80,
+    },
 }
 
 

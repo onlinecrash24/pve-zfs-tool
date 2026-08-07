@@ -201,6 +201,13 @@ def summarize_host_pools(reachable, pools):
     """
     counts = {"pools_total": 0, "pools_ok": 0, "pools_degraded": 0,
               "pools_capacity_warn": 0, "forecast_pools_critical": 0}
+    # Same threshold the notification uses, so the dashboard tile and the alert
+    # can never disagree about what counts as "too full".
+    try:
+        from app.monitor import capacity_thresholds
+        warn_pct = capacity_thresholds()[0]
+    except Exception:
+        warn_pct = 70.0
     stale = (reachable is False)
     annotated = []
     for p in pools:
@@ -216,7 +223,7 @@ def summarize_host_pools(reachable, pools):
         elif health == "ONLINE":
             counts["pools_ok"] += 1
         cap = p.get("cap_pct")
-        if cap is not None and cap >= 90:
+        if cap is not None and cap >= warn_pct:
             counts["pools_capacity_warn"] += 1
         days = p.get("forecast_days_until_full")
         if days is not None and days < 30:
@@ -245,6 +252,13 @@ def dashboard():
            "pools_capacity_warn": 0, "hosts_online": 0, "hosts_offline": 0,
            "hosts_standby": 0, "stale_snap_labels": 0,
            "forecast_pools_critical": 0}
+    # Reported so the dashboard tile can name the configured threshold instead
+    # of a hardcoded percentage that stops being true once it is changed.
+    try:
+        from app.monitor import capacity_thresholds
+        agg["capacity_warn_pct"] = int(capacity_thresholds()[0])
+    except Exception:
+        agg["capacity_warn_pct"] = 70
 
     for h in hosts_cfg:
         addr = h["address"]
