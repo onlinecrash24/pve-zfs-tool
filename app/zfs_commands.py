@@ -588,6 +588,36 @@ def get_clone_targets(host):
     return {"pools": pools, "datasets": datasets}
 
 
+def order_snapshot_pair(a, b, created):
+    """(older, newer, swapped) for a snapshot pair.
+
+    ``zfs diff`` reads "from -> to" and refuses a pair given the wrong way
+    round, so the caller's order must not decide whether the comparison works.
+    ``created`` maps snapshot name -> creation epoch; unknown entries keep the
+    given order rather than guessing.
+    """
+    ca, cb = (created or {}).get(a), (created or {}).get(b)
+    if ca is not None and cb is not None and ca > cb:
+        return b, a, True
+    return a, b, False
+
+
+def snapshot_creation_epochs(host, dataset):
+    """{snapshot name: creation epoch} for one dataset's snapshots."""
+    r = run_command(host, f"zfs list -Hp -o name,creation -t snapshot -d 1 "
+                          f"{shlex.quote(dataset)} 2>/dev/null", cache_ttl=_TTL_MED)
+    out = {}
+    if r.get("success"):
+        for line in (r.get("stdout") or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                try:
+                    out[parts[0].strip()] = int(parts[1])
+                except (ValueError, TypeError):
+                    continue
+    return out
+
+
 def diff_snapshot(host, snapshot1, snapshot2=None):
     try:
         snapshot1 = validate_zfs_name(snapshot1, "Snapshot")
@@ -662,14 +692,29 @@ def diff_snapshot(host, snapshot1, snapshot2=None):
             "stderr": f"'{ds_name}' is not mounted. 'zfs diff' requires the dataset to be mounted.\n\nTry: zfs mount {ds_name}",
         }
 
+    swapped = False
     if snapshot2:
+        # `zfs diff A B` needs both on the same dataset and A older than B,
+        # otherwise it fails with a cryptic message. Order the pair by creation
+        # time instead of making the user work it out.
+        if snapshot2.rsplit("@", 1)[0] != ds_name:
+            return {"success": False, "stdout": "", "is_zvol": False,
+                    "stderr": "Both snapshots must belong to the same dataset "
+                              f"({ds_name})."}
+        created = snapshot_creation_epochs(host, ds_name)
+        snapshot1, snapshot2, swapped = order_snapshot_pair(
+            snapshot1, snapshot2, created)
         cmd = f"zfs diff {snapshot1} {snapshot2}"
     else:
         cmd = f"zfs diff {snapshot1}"
     result = run_command(host, cmd)
     if result["success"] and not result["stdout"].strip():
-        result["stdout"] = "(No changes since this snapshot)"
+        result["stdout"] = ("(No differences between these snapshots)" if snapshot2
+                            else "(No changes since this snapshot)")
     result["is_zvol"] = False
+    result["from"] = snapshot1
+    result["to"] = snapshot2 or ""
+    result["swapped"] = swapped
     return result
 
 

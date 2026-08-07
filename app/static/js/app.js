@@ -1939,17 +1939,62 @@ async function cloneSnap(snap) {
     footer.appendChild(cloneBtn);
 }
 
+// Compare A against B. B defaults to the live filesystem (what this used to do
+// unconditionally); any other snapshot OF THE SAME DATASET can be picked
+// instead -- zfs diff cannot compare across datasets. The order is sorted out
+// server-side, so picking an older B still works.
 async function diffSnap(snap) {
-    openModal(`${t("diff")}: ${snap.snapshot}`, `<div class="loading-placeholder"><span class="spinner"></span> ${t("loading_diff")}</div>`);
-    const r = await API.get(`/api/snapshots/diff?host=${currentHost}&snapshot1=${encodeURIComponent(snap.full_name)}`);
+    openModal(`${t("diff")}: ${snap.snapshot}`, "");
     const body = document.getElementById("modal-body");
-    if (body) {
-        if (r.success) {
-            body.innerHTML = `<pre class="output">${escapeHtml(r.stdout || t("no_changes"))}</pre>`;
-        } else {
-            body.innerHTML = `<div style="color:var(--danger);margin-bottom:12px;font-weight:600">${escapeHtml(t("diff_failed"))}</div><pre class="output">${escapeHtml(r.stderr || t("error"))}</pre>`;
-        }
-    }
+    if (!body) return;
+
+    const others = _allSnapshots
+        .filter(s => s.dataset === snap.dataset && s.full_name !== snap.full_name);
+    const bSel = h("select", { className: "form-input", style: "max-width:340px" },
+        [h("option", { value: "" }, t("diff_b_live"))].concat(
+            others.map(s => h("option", { value: s.full_name },
+                `${s.snapshot}  (${s.creation})`))));
+    const runBtn = h("button", { className: "btn btn-primary btn-sm", style: "margin-left:8px" }, t("diff_compare"));
+    const out = h("div", { style: "margin-top:12px" });
+
+    const picker = h("div", { style: "display:flex;align-items:flex-end;flex-wrap:wrap;gap:6px" }, [
+        h("div", {}, [
+            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
+                `A: ${snap.snapshot}  →  B`),
+            bSel,
+        ]),
+        runBtn,
+    ]);
+    body.appendChild(picker);
+    body.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-top:4px" }, t("diff_hint")));
+    body.appendChild(out);
+
+    const run = async () => {
+        runBtn.disabled = true;
+        out.innerHTML = `<div class="loading-placeholder"><span class="spinner"></span> ${escapeHtml(t("loading_diff"))}</div>`;
+        try {
+            let url = `/api/snapshots/diff?host=${encodeURIComponent(currentHost)}` +
+                `&snapshot1=${encodeURIComponent(snap.full_name)}`;
+            if (bSel.value) url += `&snapshot2=${encodeURIComponent(bSel.value)}`;
+            const r = await API.get(url);
+            out.innerHTML = "";
+            if (r.success) {
+                if (r.swapped) {
+                    out.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-bottom:6px" },
+                        t("diff_swapped").replace("{a}", (r.from || "").split("@")[1] || "")
+                            .replace("{b}", (r.to || "").split("@")[1] || "")));
+                }
+                out.innerHTML += `<pre class="output">${escapeHtml(r.stdout || t("no_changes"))}</pre>`;
+            } else {
+                out.innerHTML = `<div style="color:var(--danger);margin-bottom:12px;font-weight:600">${escapeHtml(t("diff_failed"))}</div><pre class="output">${escapeHtml(r.stderr || t("error"))}</pre>`;
+            }
+        } catch (e) {
+            out.innerHTML = `<div style="color:var(--danger)">${escapeHtml(e.message || t("error"))}</div>`;
+        } finally { runBtn.disabled = false; }
+    };
+    runBtn.onclick = run;
+    bSel.onchange = run;
+    run();      // start with the live filesystem, as before
 }
 
 async function destroySnap(snap) {
