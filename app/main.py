@@ -1451,6 +1451,23 @@ def api_ai_generate_report():
     return jsonify({"success": True, "task_id": task_id})
 
 
+@app.route("/api/ai/replication-report", methods=["POST"])
+@login_required
+def api_ai_replication_report():
+    """Kick off the backup-situation report (source + copies per guest).
+
+    Always spans every host -- the relationship between them is the subject.
+    Returns a task id; the client polls /api/ai/task like the status report."""
+    from app.ai_reports import generate_replication_report_async
+    data = request.json or {}
+    source_host = (data.get("host") or "").strip() or None
+    task_id = generate_replication_report_async(lang_override=data.get("lang"),
+                                                source_host=source_host)
+    audit_log("ai.replication_report", target=source_host or "all hosts",
+              success=True, details={"task_id": task_id})
+    return jsonify({"success": True, "task_id": task_id})
+
+
 @app.route("/api/ai/task")
 def api_ai_task():
     """Return the current state of an AI-report task started via /api/ai/report."""
@@ -2301,6 +2318,31 @@ def api_dr_restore_category():
               details={"file": data.get("file"), "restored": res.get("restored"),
                        "skipped": res.get("skipped"), "failed": res.get("failed")})
     return jsonify(res)
+
+
+# ---------------------------------------------------------------------------
+# Backup overview: which host holds the original, where are the copies
+# ---------------------------------------------------------------------------
+
+@app.route("/api/inventory/matrix")
+@login_required
+def api_inventory_matrix():
+    """Per-guest source and copies across all hosts, correlated by snapshot guid.
+
+    zfs send/recv preserves the guid, so datasets sharing guids are the same
+    lineage regardless of their names or pools; the host holding the newest
+    snapshot is the source."""
+    from app.replication_inventory import (collect_inventory, filter_matrix,
+                                           source_hosts)
+    matrix = collect_inventory(load_hosts())
+    available = source_hosts(matrix)
+    # Scoped to one source host: showing both directions at once lists every
+    # replicated guest twice, once per side.
+    host = (request.args.get("host") or "").strip()
+    out = filter_matrix(matrix, source_host=host or None,
+                        only_when_replicating=request.args.get("all") != "1")
+    out["source_hosts"] = available
+    return jsonify(out)
 
 
 # ---------------------------------------------------------------------------

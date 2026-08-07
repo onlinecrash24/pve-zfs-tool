@@ -56,7 +56,36 @@ function toast(msg, type = "info") {
 // ---------------------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------------------
+// Dashboard auto-refresh. The numbers only change when the metrics sampler
+// writes new rows, so polling faster than its interval just costs SSH round
+// trips for identical data. A hidden tab is not refreshed at all; coming back
+// to it reloads immediately, so a page left open overnight is current again
+// the moment it is looked at.
+let _dashTimer = null;
+
+function stopDashboardRefresh() {
+    if (_dashTimer) { clearTimeout(_dashTimer); _dashTimer = null; }
+}
+
+function scheduleDashboardRefresh(intervalSeconds, reload) {
+    stopDashboardRefresh();
+    const ms = Math.max(60, parseInt(intervalSeconds) || 900) * 1000;
+    _dashTimer = setTimeout(() => {
+        if (currentView !== "home") return stopDashboardRefresh();
+        if (document.hidden) {
+            // Catch up once the tab is looked at again.
+            document.addEventListener("visibilitychange", function once() {
+                document.removeEventListener("visibilitychange", once);
+                if (currentView === "home") reload();
+            });
+            return;
+        }
+        reload();
+    }, ms);
+}
+
 function navigate(view) {
+    if (view !== "home") stopDashboardRefresh();
     currentView = view;
     document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
     const el = document.querySelector(`[data-view="${view}"]`);
@@ -146,6 +175,7 @@ async function renderView() {
         replication: viewReplication,
         dr: viewDR,
         "config-restore": viewConfigRestore,
+        inventory: viewInventory,
         migrate: viewMigrate,
         guests: viewGuests,
         health: viewHealth,
@@ -231,15 +261,18 @@ async function viewHome() {
         const dashMount = h("div", { style: "margin-top:16px" }, loading());
         container.appendChild(dashMount);
         // Async — don't block rest of page
-        (async () => {
+        const loadDash = async () => {
             try {
                 const d = await API.get("/api/dashboard");
+                if (currentView !== "home" || !document.body.contains(dashMount)) return;
                 dashMount.innerHTML = "";
                 dashMount.appendChild(_renderDashboard(d));
+                scheduleDashboardRefresh(d.sample_interval_seconds, loadDash);
             } catch (e) {
                 dashMount.innerHTML = `<p class="muted">${escapeHtml(e.message || "Dashboard load failed")}</p>`;
             }
-        })();
+        };
+        loadDash();
     }
 
     // Feature overview
@@ -433,6 +466,18 @@ function _renderDashboard(d) {
         (agg.forecast_pools_critical || 0) === 0 ? true : false));
     root.appendChild(tiles);
 
+    // Say how fresh this is: with a 15-minute sampler, a page that silently
+    // shows the same numbers for a while should not look broken.
+    if (d.generated_at) {
+        const mins = Math.round((d.sample_interval_seconds || 900) / 60);
+        root.appendChild(h("div", {
+            className: "muted",
+            style: "font-size:11px;margin:-8px 0 12px 2px",
+        }, t("dash_updated")
+            .replace("{t}", new Date(d.generated_at * 1000).toLocaleTimeString())
+            .replace("{m}", String(mins))));
+    }
+
     const tiles2 = h("div", { className: "grid grid-3", style: "gap:12px;margin-bottom:16px" });
     tiles2.appendChild(tile(t("dash_stale_labels"),
         String(agg.stale_snap_labels || 0),
@@ -513,17 +558,25 @@ function _renderDashboard(d) {
                              (p.cap_pct != null && p.cap_pct >= 90) ? "color:var(--error,#f44336);font-weight:bold" :
                              (p.cap_pct != null && p.cap_pct >= 80) ? "color:#e67e22" : "";
             const free = p.free_bytes != null ? formatBytes(p.free_bytes) : "—";
+            // Growth rate shown next to the projection: it reacts to what the
+            // pool is doing now, while a days-until-full number of 400+ looks
+            // static even when the trend has changed.
+            const rate = p.forecast_bytes_per_day;
+            const rateTxt = (rate != null && Math.abs(rate) >= 1024)
+                ? `<div class="muted" style="font-size:11px">${rate > 0 ? "+" : "−"}${escapeHtml(formatBytes(Math.abs(rate)))}/${escapeHtml(t("dash_per_day"))}</div>`
+                : "";
             let fc;
             if (p.forecast_days_until_full == null) {
-                fc = `<span class="muted">—</span>`;
-            } else if (stale) {
-                fc = `<span class="muted">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
-            } else if (p.forecast_days_until_full < 30) {
-                fc = `<span style="color:var(--error,#f44336);font-weight:bold">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
-            } else if (p.forecast_days_until_full < 90) {
-                fc = `<span style="color:#e67e22">${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}</span>`;
+                const why = t("forecast_why_" + (p.forecast_reason || "no_data"));
+                fc = `<span class="muted" title="${escapeHtml(why)}">—</span>${rateTxt}`;
             } else {
-                fc = `${p.forecast_days_until_full.toFixed(0)} ${escapeHtml(t("dash_days"))}`;
+                const d = p.forecast_days_until_full.toFixed(0) + " " + t("dash_days");
+                const win = p.forecast_window_days
+                    ? t("forecast_window").replace("{d}", String(p.forecast_window_days)) : "";
+                const style = stale ? 'class="muted"'
+                    : p.forecast_days_until_full < 30 ? 'style="color:var(--error,#f44336);font-weight:bold"'
+                    : p.forecast_days_until_full < 90 ? 'style="color:#e67e22"' : "";
+                fc = `<span ${style} title="${escapeHtml(win)}">${escapeHtml(d)}</span>${rateTxt}`;
             }
             tr.innerHTML = `${nameCell}${statusCell}
                 <td style="font-family:monospace">${escapeHtml(p.pool)}</td>
@@ -3482,6 +3535,16 @@ async function viewHealth() {
     setContent(container);
 }
 
+// Seconds -> short human age ("5m", "3h 20m", "2d 4h"), matching the wording
+// snapshot_analysis.format_age produces on the Python side.
+function _formatAge(seconds) {
+    const s = Math.max(0, parseInt(seconds) || 0);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
 function formatBytes(bytes) {
     if (bytes === 0) return "0 B";
     const k = 1024;
@@ -5520,6 +5583,154 @@ async function viewDR() {
 
 // -- Config Restore (from a host-config backup onto a fresh PVE) -----------
 const _CR_CATS = ["guests", "network", "storage", "apt", "access", "ssh", "firewall", "jobs", "other", "info"];
+
+// Where does every guest's data live, and how current are its copies?
+// Correlated by ZFS snapshot guid: a guid survives send/recv, so datasets
+// sharing guids are the same lineage regardless of their names or pools, and
+// the host holding the newest snapshot is the source.
+async function viewInventory() {
+    setContent(loading());
+    const container = h("div");
+    container.appendChild(h("div", { className: "page-header" }, [
+        h("h2", {}, t("inv_title")),
+        h("p", {}, t("inv_subtitle")),
+    ]));
+
+    if (!currentHost) {
+        container.appendChild(h("div", { className: "card" },
+            h("div", { className: "card-body" }, t("select_host_first"))));
+        setContent(container); return;
+    }
+
+    let m;
+    try {
+        // Scoped to the selected host AS SOURCE: with hosts replicating to each
+        // other, an unscoped view lists every guest twice, once per direction.
+        m = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(currentHost));
+    } catch (e) {
+        container.appendChild(h("div", { className: "card" },
+            h("div", { className: "card-body" }, e.message || t("failed"))));
+        setContent(container); return;
+    }
+
+    // Guests of the selected host as source: replicated ones first, then the
+    // ones without a copy -- those are the gaps in an otherwise working set.
+    const guests = m.guests || [];
+    const noCopy = m.without_copy_count || 0;
+    const mismatch = guests.filter(g => g.config_mismatch).length;
+
+    // Summary tiles
+    const tiles = h("div", { className: "grid grid-4", style: "gap:12px;margin-bottom:16px" });
+    const tile = (label, value, ok) => {
+        const c = h("div", { className: "stat-card" });
+        c.appendChild(h("div", { className: "stat-label" }, label));
+        c.appendChild(h("div", {
+            className: "stat-value",
+            style: ok === false ? "color:var(--error,#f44336)" : (ok === true ? "color:var(--success,#4caf50)" : ""),
+        }, String(value)));
+        return c;
+    };
+    tiles.appendChild(tile(t("inv_guests"), m.replicated_count || 0));
+    tiles.appendChild(tile(t("inv_no_copy"), noCopy, noCopy === 0));
+    tiles.appendChild(tile(t("inv_mismatch"), mismatch, mismatch === 0));
+    tiles.appendChild(tile(t("inv_snapshots"), m.snapshot_count || 0));
+    container.appendChild(tiles);
+
+    // AI report
+    const repCard = h("div", { className: "card", style: "margin-bottom:16px" });
+    repCard.appendChild(h("div", { className: "card-header" }, t("inv_report_title")));
+    const repBody = h("div", { className: "card-body" });
+    repBody.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("inv_report_intro")));
+    const repBtn = h("button", { className: "btn btn-primary btn-sm" }, t("inv_report_btn"));
+    const repStatus = h("div", { style: "font-size:12px;margin-top:8px" });
+    repBtn.onclick = async () => {
+        repBtn.disabled = true; repStatus.textContent = t("mig_starting");
+        try {
+            const r = await API.post("/api/ai/replication-report", { host: currentHost });
+            pollReplicationTask(r.task_id, {
+                onTick: rec => { repStatus.textContent = rec.progress || t("mig_running"); },
+                onDone: rec => {
+                    repBtn.disabled = false;
+                    const ok = rec.result && rec.result.success;
+                    repStatus.textContent = (ok ? "✓ " : "✗ ") +
+                        (ok ? t("inv_report_done") : ((rec.result || {}).error || t("failed")));
+                    if (ok) toast(t("inv_report_done"), "success");
+                },
+                onError: msg => { repBtn.disabled = false; repStatus.textContent = "✗ " + msg; },
+            });
+        } catch (e) { repBtn.disabled = false; repStatus.textContent = "✗ " + (e.message || ""); }
+    };
+    repBody.appendChild(repBtn);
+    repBody.appendChild(repStatus);
+    repCard.appendChild(repBody);
+    container.appendChild(repCard);
+
+    // Matrix
+    const card = h("div", { className: "card" });
+    card.appendChild(h("div", { className: "card-header" }, t("inv_matrix")));
+    if (!guests.length) {
+        card.appendChild(h("div", { className: "empty-state" },
+            t("inv_empty").replace("{h}", currentHost)));
+        container.appendChild(card);
+        setContent(container); return;
+    }
+    const table = h("table");
+    table.appendChild(h("thead", {}, h("tr", {}, [
+        h("th", {}, t("inv_guest")), h("th", {}, t("inv_source")),
+        h("th", {}, t("inv_copies")), h("th", {}, t("inv_state")),
+    ])));
+    const tbody = h("tbody");
+    for (const g of guests) {
+        const tr = h("tr");
+        const label = `${g.vmid || "?"} ${g.guest_name ? "— " + g.guest_name : ""}` +
+            ` (${g.guest_type === "lxc" ? "CT" : "VM"})`;
+        tr.appendChild(h("td", {}, h("strong", {}, label)));
+        tr.appendChild(h("td", { style: "font-size:12px" }, [
+            h("div", {}, g.source_host),
+            g.no_snapshots
+                ? h("div", { style: "color:var(--error,#f44336);font-size:11px" }, t("inv_no_snapshots"))
+                : h("div", { className: "muted", style: "font-family:monospace;font-size:11px" }, g.source_dataset),
+        ]));
+
+        const copyTd = h("td", { style: "font-size:12px" });
+        g.copies.filter(c => !c.is_source).forEach(c => {
+            const lag = c.lag_seconds == null ? "?" : _formatAge(c.lag_seconds);
+            const bad = c.missing_from_source > 0;
+            // Labels the copy never receives are the replication filter at
+            // work, not a gap -- naming them stops "4 missing" from looking
+            // like a fault on a perfectly healthy copy.
+            const excl = (c.excluded_labels || []).length
+                ? ` · ${t("inv_not_replicated")}: ${c.excluded_labels.join(", ")}` : "";
+            copyTd.appendChild(h("div", { style: "margin-bottom:2px" }, [
+                h("span", {}, c.host + " "),
+                h("span", { className: "muted", style: "font-size:11px" },
+                    `${c.snapshot_count} ${t("inv_snaps_short")} · ${t("inv_behind")} ${lag}` +
+                    (bad ? ` · ${c.missing_from_source} ${t("inv_missing")}` : "") + excl),
+            ]));
+        });
+        if (g.copy_count === 0) {
+            copyTd.appendChild(h("span", { style: "color:var(--error,#f44336)" },
+                g.no_snapshots ? t("inv_none_at_all") : t("inv_none")));
+        }
+        tr.appendChild(copyTd);
+
+        const stTd = h("td", { style: "font-size:12px" });
+        if (g.config_mismatch) {
+            stTd.appendChild(h("span", { className: "badge badge-warning", title: g.config_mismatch }, "⚠"));
+            stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" }, t("inv_mismatch_hint")));
+        } else if (g.copy_count === 0) {
+            stTd.appendChild(h("span", { className: "badge badge-danger" }, t("inv_at_risk")));
+        } else {
+            stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
+        }
+        tr.appendChild(stTd);
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    card.appendChild(table);
+    container.appendChild(card);
+    setContent(container);
+}
 
 // Near-live guest migration between two non-clustered hosts. Four numbered
 // steps mirroring the PVE Config Restore layout: check -> pre-copy -> cutover

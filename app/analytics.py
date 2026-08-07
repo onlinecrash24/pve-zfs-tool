@@ -18,8 +18,18 @@ from app.database import get_conn
 
 log = logging.getLogger(__name__)
 
-FORECAST_WINDOW_DAYS = 30
+# A 30-day least-squares fit is almost frozen: at 15-minute sampling that is
+# ~2880 points, so one new sample moves the slope by ~0.03 % and the projection
+# never visibly reacts to what the pool is doing now. It is also skewed by the
+# sawtooth that auto-snapshots create (allocation jumps up, pruning drops it).
+# So: prefer a short recent window, widen only when there is not enough data,
+# collapse the samples into hourly medians (kills the sawtooth), and take a
+# median-of-slopes rather than least squares (immune to the remaining spikes).
+FORECAST_WINDOW_DAYS = 30         # fallback window when recent data is thin
+FORECAST_PRIMARY_DAYS = 7         # preferred window: reacts within days
 FORECAST_MIN_SAMPLES = 8          # need at least ~2 h of data @ 15 min
+FORECAST_MIN_BUCKETS = 6          # hourly medians needed for a usable slope
+FORECAST_BUCKET_SECONDS = 3600
 FORECAST_MAX_DAYS = 3650          # clamp absurd long tails
 
 
@@ -44,16 +54,63 @@ def _linreg(xs, ys):
     return slope, intercept
 
 
-def forecast_days_until_full(host_addr, pool, window_days=FORECAST_WINDOW_DAYS):
-    """Return days until the pool is projected to reach 100 % allocated.
+def _sample_interval():
+    """How often the metrics sampler writes new rows (seconds)."""
+    try:
+        from app.metrics import SAMPLE_INTERVAL
+        return int(SAMPLE_INTERVAL)
+    except Exception:
+        return 900
 
-    None if: insufficient data, non-positive growth, pool already full,
-    or projected > FORECAST_MAX_DAYS (effectively never).
+
+def bucket_medians(points, bucket_seconds=FORECAST_BUCKET_SECONDS):
+    """[(timestamp, value)] collapsed into per-bucket medians.
+
+    Auto-snapshots make allocation jump up and drop again between samples; the
+    median of each hour is what the pool actually holds, without that noise.
     """
+    buckets = {}
+    for ts, val in points or []:
+        buckets.setdefault(int(ts) // bucket_seconds, []).append(float(val))
+    out = []
+    for b in sorted(buckets):
+        vals = sorted(buckets[b])
+        mid = len(vals) // 2
+        median = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+        out.append((b * bucket_seconds, median))
+    return out
+
+
+def theil_sen_slope(points):
+    """Median of all pairwise slopes -- robust where least squares is not.
+
+    A single snapshot burst or a big delete drags a least-squares line along
+    with it; the median of slopes ignores such outliers, which matters because
+    the whole point is to describe the underlying trend.
+    """
+    n = len(points or [])
+    if n < 2:
+        return None
+    slopes = []
+    for i in range(n - 1):
+        x1, y1 = points[i]
+        for j in range(i + 1, n):
+            x2, y2 = points[j]
+            dx = x2 - x1
+            if dx > 0:
+                slopes.append((y2 - y1) / dx)
+    if not slopes:
+        return None
+    slopes.sort()
+    mid = len(slopes) // 2
+    return slopes[mid] if len(slopes) % 2 else (slopes[mid - 1] + slopes[mid]) / 2.0
+
+
+def _fetch_pool_series(host_addr, pool, window_days):
     since = int(time.time()) - window_days * 86400
     conn = get_conn()
     try:
-        rows = conn.execute(
+        return conn.execute(
             """SELECT timestamp, alloc_bytes, size_bytes
                FROM pool_metrics
                WHERE host=? AND pool=?
@@ -66,32 +123,56 @@ def forecast_days_until_full(host_addr, pool, window_days=FORECAST_WINDOW_DAYS):
     finally:
         conn.close()
 
-    if len(rows) < FORECAST_MIN_SAMPLES:
-        return None
 
-    # Use hours as x-axis → slope comes out as bytes/hour, easier to reason
-    # about than raw epoch seconds.
-    t0 = rows[0]["timestamp"]
-    xs = [(r["timestamp"] - t0) / 3600.0 for r in rows]
-    ys = [float(r["alloc_bytes"]) for r in rows]
-    slope, intercept = _linreg(xs, ys)
-    if slope is None or slope <= 0:
-        return None
+def forecast_detail(host_addr, pool):
+    """Growth trend and projected time to full.
 
-    # Use the most recent size_bytes (pool may have been expanded)
+    Returns ``{days, bytes_per_day, window_days, reason}``. ``days`` is None
+    when no projection is possible; ``reason`` says why, so the UI can explain
+    a dash instead of leaving the user guessing.
+    """
+    out = {"days": None, "bytes_per_day": None,
+           "window_days": FORECAST_PRIMARY_DAYS, "reason": "no_data"}
+
+    # Prefer the recent window; widen only if it is too thin to fit.
+    rows = _fetch_pool_series(host_addr, pool, FORECAST_PRIMARY_DAYS)
+    buckets = bucket_medians([(r["timestamp"], r["alloc_bytes"]) for r in rows])
+    if len(rows) < FORECAST_MIN_SAMPLES or len(buckets) < FORECAST_MIN_BUCKETS:
+        rows = _fetch_pool_series(host_addr, pool, FORECAST_WINDOW_DAYS)
+        buckets = bucket_medians([(r["timestamp"], r["alloc_bytes"]) for r in rows])
+        out["window_days"] = FORECAST_WINDOW_DAYS
+    if len(rows) < FORECAST_MIN_SAMPLES or len(buckets) < 2:
+        return out
+
+    # x in hours -> slope is bytes/hour
+    t0 = buckets[0][0]
+    slope = theil_sen_slope([((t - t0) / 3600.0, v) for t, v in buckets])
+    if slope is None:
+        return out
+    out["bytes_per_day"] = slope * 24.0
+
     size_bytes = float(rows[-1]["size_bytes"])
     latest_alloc = float(rows[-1]["alloc_bytes"])
     if latest_alloc >= size_bytes:
-        return 0
+        out.update(days=0, reason="full")
+        return out
+    if slope <= 0:
+        out["reason"] = "no_growth"
+        return out
 
-    remaining = size_bytes - latest_alloc
-    hours = remaining / slope
-    days = hours / 24.0
+    days = ((size_bytes - latest_alloc) / slope) / 24.0
     if days <= 0:
-        return 0
-    if days > FORECAST_MAX_DAYS:
-        return None
-    return round(days, 1)
+        out.update(days=0, reason="full")
+    elif days > FORECAST_MAX_DAYS:
+        out["reason"] = "too_far"
+    else:
+        out.update(days=round(days, 1), reason="ok")
+    return out
+
+
+def forecast_days_until_full(host_addr, pool, window_days=None):
+    """Days until the pool is projected to reach 100 % allocated, or None."""
+    return forecast_detail(host_addr, pool)["days"]
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +363,15 @@ def dashboard():
             health = (r.get("health") or "").upper()
             # Forecast (best-effort; skip on error)
             try:
-                days = forecast_days_until_full(addr, r["pool"])
+                fc = forecast_detail(addr, r["pool"])
             except Exception:
-                days = None
+                fc = {"days": None, "bytes_per_day": None,
+                      "window_days": None, "reason": "error"}
+            days = fc["days"]
             pools_here.append({
+                "forecast_bytes_per_day": fc.get("bytes_per_day"),
+                "forecast_window_days": fc.get("window_days"),
+                "forecast_reason": fc.get("reason"),
                 "pool": r["pool"],
                 "health": health or None,
                 "cap_pct": r.get("cap_pct"),
@@ -343,6 +429,9 @@ def dashboard():
         "hosts": hosts_out,
         "bad_pools": bad_pools,
         "generated_at": int(time.time()),
+        # The dashboard is only as fresh as the sampler; reported so the page
+        # can refresh at that cadence instead of guessing or polling pointlessly.
+        "sample_interval_seconds": _sample_interval(),
     }
 
 
