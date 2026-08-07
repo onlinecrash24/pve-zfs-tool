@@ -1106,14 +1106,17 @@ was in den Daten steht. Schreibe den gesamten Bericht auf Deutsch.
 """
 
 
-def generate_replication_report(lang_override=None):
-    """AI report on where every guest's data lives and how current the copies are.
+def generate_replication_report(lang_override=None, source_host=None):
+    """AI report on where one host's guests are copied to and how current those
+    copies are.
 
-    Separate from the status report: different question, different structure, and
-    it spans all hosts by design -- the whole point is the relationship between
-    them. Shares the LLM call, storage and PDF rendering.
+    Scoped to a single source host: with several hosts replicating to each
+    other, an unscoped report describes every guest twice (once from each side)
+    and reads as duplicates. Only guests that actually have a copy are included
+    -- the rest are counted and named, but they are not a replication story.
     """
-    from app.replication_inventory import collect_inventory, condense_for_report
+    from app.replication_inventory import (collect_inventory, condense_for_report,
+                                           filter_matrix)
     from app.ssh_manager import load_hosts
 
     config = load_config()
@@ -1126,16 +1129,23 @@ def generate_replication_report(lang_override=None):
     if not hosts:
         return {"success": False, "error": "No hosts configured"}
     try:
-        matrix = collect_inventory(hosts)
+        matrix = filter_matrix(collect_inventory(hosts), source_host=source_host,
+                               only_with_copies=True)
     except Exception as e:
         return {"success": False, "error": f"Inventory collection failed: {e}"}
     if not matrix.get("guests"):
         return {"success": False,
-                "error": "No guest datasets with snapshots found on any host"}
+                "error": (f"No replicated guests found with {source_host} as source"
+                          if source_host else
+                          "No replicated guests found on any host")}
 
     payload = condense_for_report(matrix)
+    payload["source_host"] = source_host or ""
     payload["hosts"] = matrix.get("hosts", [])
     payload["hosts_without_data"] = matrix.get("hosts_without_data", [])
+    # Named, not silently dropped: a guest that exists in one place only is a
+    # real risk, it just is not part of a replication overview.
+    payload["guests_without_any_copy"] = matrix.get("without_copy_guests", [])
     data_json = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
     if len(data_json) > 30000:
         data_json = data_json[:30000] + "\n... (truncated)"
@@ -1151,9 +1161,10 @@ def generate_replication_report(lang_override=None):
     if not result.get("success"):
         return {"success": False, "error": result.get("error", "LLM call failed")}
 
-    # Verdict from facts, not prose: a guest with no copy at all is critical,
-    # a reversed/stopped replication is a warning.
-    no_copy = payload.get("guests_without_copy", 0)
+    # Verdict from facts, not prose: a guest that exists in only one place is
+    # critical (a single failure destroys it), a reversed or stopped
+    # replication direction is a warning.
+    no_copy = len(matrix.get("without_copy_guests", []))
     mismatches = sum(1 for g in payload.get("guests", []) if g.get("config_mismatch"))
     verdict = "crit" if no_copy else ("warn" if mismatches else "ok")
 
@@ -1164,9 +1175,10 @@ def generate_replication_report(lang_override=None):
         "provider": provider,
         "model": model,
         "content": content,
-        "host_count": len(matrix.get("hosts", [])),
-        "host_names": matrix.get("hosts", []),
-        "host_addresses": matrix.get("hosts", []),
+        "host_count": 1 if source_host else len(matrix.get("hosts", [])),
+        "host_names": [source_host] if source_host else matrix.get("hosts", []),
+        "host_addresses": [source_host] if source_host else matrix.get("hosts", []),
+        "source_host": source_host or "",
         "usage": result.get("usage", {}),
         "verdict": verdict,
         "critical_findings": no_copy,
@@ -1178,18 +1190,19 @@ def generate_replication_report(lang_override=None):
     return {"success": True, "report": report}
 
 
-def generate_replication_report_async(lang_override=None):
+def generate_replication_report_async(lang_override=None, source_host=None):
     """Background variant; the client polls the shared task registry."""
     from app.tasks import start_task
 
-    def _job(progress, lang):
+    def _job(progress, lang, src):
         progress("Collecting snapshots from all hosts …")
-        res = generate_replication_report(lang)
+        res = generate_replication_report(lang, source_host=src)
         progress("Report finished" if res.get("success") else "Report failed",
                  ok=res.get("success", False))
         return res
 
-    return start_task("replication-report", _job, lang_override, prefix="aireport")
+    return start_task("replication-report", _job, lang_override, source_host,
+                      prefix="aireport")
 
 
 def generate_report_async(host_address=None, lang_override=None):

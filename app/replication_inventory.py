@@ -205,7 +205,12 @@ def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
         if source is None:
             continue
         gtype, vmid = guest_ref_from_dataset(source["dataset"])
-        name = guest_names.get((source["host"], str(vmid)), "") if vmid else ""
+        # Only guest disks. Pool roots, rpool/ROOT/pve-1, var-lib-vz and the
+        # like are replicated too, but they are not VMs or containers and
+        # listing them as "? (VM)" buries the entries that matter.
+        if not vmid:
+            continue
+        name = guest_names.get((source["host"], str(vmid)), "")
 
         rows = []
         for c in copies:
@@ -234,6 +239,42 @@ def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
                                 int(e["vmid"]) if str(e["vmid"] or "").isdigit() else 0,
                                 e["source_dataset"]))
     return {"guests": entries, "generated": True}
+
+
+def filter_matrix(matrix: Dict[str, Any], source_host: Optional[str] = None,
+                  only_with_copies: bool = True) -> Dict[str, Any]:
+    """Narrow the matrix to what is worth looking at.
+
+    ``source_host`` keeps only guests whose ORIGIN is that host, so the view and
+    the report describe one host's data and its outbound copies -- listing both
+    directions at once shows every guest twice and reads as duplicates.
+
+    ``only_with_copies`` drops guests that exist in exactly one place. They are
+    still counted (``excluded_without_copy``) because "no copy at all" is worth
+    knowing, but they are not part of a replication overview.
+    """
+    guests = matrix.get("guests") or []
+    if source_host:
+        guests = [g for g in guests if g["source_host"] == source_host]
+    without = [g for g in guests if g["copy_count"] == 0]
+    if only_with_copies:
+        guests = [g for g in guests if g["copy_count"] > 0]
+    out = dict(matrix)
+    out["guests"] = guests
+    out["excluded_without_copy"] = len(without)
+    out["without_copy_guests"] = [
+        {"vmid": g["vmid"], "guest_name": g["guest_name"],
+         "guest_type": g["guest_type"], "source_dataset": g["source_dataset"]}
+        for g in without
+    ]
+    out["source_host"] = source_host or ""
+    return out
+
+
+def source_hosts(matrix: Dict[str, Any]) -> List[str]:
+    """Hosts that are the origin of at least one replicated guest."""
+    return sorted({g["source_host"] for g in (matrix.get("guests") or [])
+                   if g["copy_count"] > 0})
 
 
 def _config_mismatch(source, rows, configured) -> str:

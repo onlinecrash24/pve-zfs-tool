@@ -1460,9 +1460,11 @@ def api_ai_replication_report():
     Returns a task id; the client polls /api/ai/task like the status report."""
     from app.ai_reports import generate_replication_report_async
     data = request.json or {}
-    task_id = generate_replication_report_async(lang_override=data.get("lang"))
-    audit_log("ai.replication_report", target="all hosts", success=True,
-              details={"task_id": task_id})
+    source_host = (data.get("host") or "").strip() or None
+    task_id = generate_replication_report_async(lang_override=data.get("lang"),
+                                                source_host=source_host)
+    audit_log("ai.replication_report", target=source_host or "all hosts",
+              success=True, details={"task_id": task_id})
     return jsonify({"success": True, "task_id": task_id})
 
 
@@ -2330,8 +2332,17 @@ def api_inventory_matrix():
     zfs send/recv preserves the guid, so datasets sharing guids are the same
     lineage regardless of their names or pools; the host holding the newest
     snapshot is the source."""
-    from app.replication_inventory import collect_inventory
-    return jsonify(collect_inventory(load_hosts()))
+    from app.replication_inventory import (collect_inventory, filter_matrix,
+                                           source_hosts)
+    matrix = collect_inventory(load_hosts())
+    available = source_hosts(matrix)
+    # Scoped to one source host: showing both directions at once lists every
+    # replicated guest twice, once per side.
+    host = (request.args.get("host") or "").strip()
+    only = request.args.get("all") != "1"
+    out = filter_matrix(matrix, source_host=host or None, only_with_copies=only)
+    out["source_hosts"] = available
+    return jsonify(out)
 
 
 # ---------------------------------------------------------------------------

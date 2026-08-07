@@ -178,6 +178,56 @@ def test_no_mismatch_when_direction_matches():
     assert ri.build_matrix(per_host, {}, configured)["guests"][0]["config_mismatch"] == ""
 
 
+# --- only guests, scoped to one source host --------------------------------
+
+def test_non_guest_datasets_are_not_listed():
+    # rpool, rpool/ROOT/pve-1, var-lib-vz etc. are replicated too but are not
+    # VMs or containers; listing them as "? (VM)" buries the real entries
+    per_host = {
+        "h1": ri.parse_snapshot_guids(
+            _rows("rpool", [("a", 1)]) + "\n" +
+            _rows("rpool/ROOT/pve-1", [("b", 2)]) + "\n" +
+            _rows("rpool/var-lib-vz", [("c", 3)]) + "\n" +
+            _rows("rpool/data/subvol-253-disk-0", [("d", 4)])),
+    }
+    guests = ri.build_matrix(per_host, {})["guests"]
+    assert [g["vmid"] for g in guests] == ["253"]
+
+
+def test_filter_keeps_only_the_selected_source_host():
+    per_host = {
+        "h1": ri.parse_snapshot_guids(_rows("rpool/data/vm-100-disk-0", [("a", 9)])),
+        "h2": ri.parse_snapshot_guids(_rows("rpool/data/vm-200-disk-0", [("b", 9)])),
+    }
+    m = ri.build_matrix(per_host, {})
+    got = ri.filter_matrix(m, source_host="h1", only_with_copies=False)
+    assert [g["vmid"] for g in got["guests"]] == ["100"]
+    assert got["source_host"] == "h1"
+
+
+def test_filter_drops_guests_without_a_copy_but_counts_them():
+    per_host = {
+        "h1": ri.parse_snapshot_guids(
+            _rows("rpool/data/vm-100-disk-0", [("a", 1), ("b", 2)]) + "\n" +
+            _rows("rpool/data/vm-101-disk-0", [("solo", 5)])),
+        "h2": ri.parse_snapshot_guids(_rows("tank/repl/vm-100-disk-0", [("a", 1)])),
+    }
+    got = ri.filter_matrix(ri.build_matrix(per_host, {}), source_host="h1")
+    assert [g["vmid"] for g in got["guests"]] == ["100"]
+    assert got["excluded_without_copy"] == 1
+    assert got["without_copy_guests"][0]["vmid"] == "101"
+
+
+def test_source_hosts_lists_only_origins_of_replicated_guests():
+    per_host = {
+        "h1": ri.parse_snapshot_guids(_rows("rpool/data/vm-100-disk-0", [("a", 9)])),
+        "h2": ri.parse_snapshot_guids(_rows("tank/repl/vm-100-disk-0", [("a", 9), ("z", 1)])),
+        "h3": ri.parse_snapshot_guids(_rows("rpool/data/vm-999-disk-0", [("solo", 5)])),
+    }
+    # h1/h2 share a lineage, h3 stands alone -> h3 is not a replication source
+    assert "h3" not in ri.source_hosts(ri.build_matrix(per_host, {}))
+
+
 # --- condensation ----------------------------------------------------------
 
 def test_condense_drops_the_raw_snapshot_list():

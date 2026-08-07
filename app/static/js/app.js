@@ -5596,17 +5596,25 @@ async function viewInventory() {
         h("p", {}, t("inv_subtitle")),
     ]));
 
+    if (!currentHost) {
+        container.appendChild(h("div", { className: "card" },
+            h("div", { className: "card-body" }, t("select_host_first"))));
+        setContent(container); return;
+    }
+
     let m;
     try {
-        m = await API.get("/api/inventory/matrix");
+        // Scoped to the selected host AS SOURCE: with hosts replicating to each
+        // other, an unscoped view lists every guest twice, once per direction.
+        m = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(currentHost));
     } catch (e) {
         container.appendChild(h("div", { className: "card" },
             h("div", { className: "card-body" }, e.message || t("failed"))));
         setContent(container); return;
     }
 
-    const guests = m.guests || [];
-    const noCopy = guests.filter(g => g.copy_count === 0).length;
+    const guests = m.guests || [];          // already filtered: guests with copies
+    const noCopy = m.excluded_without_copy || 0;
     const mismatch = guests.filter(g => g.config_mismatch).length;
 
     // Summary tiles
@@ -5642,7 +5650,7 @@ async function viewInventory() {
     repBtn.onclick = async () => {
         repBtn.disabled = true; repStatus.textContent = t("mig_starting");
         try {
-            const r = await API.post("/api/ai/replication-report", {});
+            const r = await API.post("/api/ai/replication-report", { host: currentHost });
             pollReplicationTask(r.task_id, {
                 onTick: rec => { repStatus.textContent = rec.progress || t("mig_running"); },
                 onDone: rec => {
@@ -5665,8 +5673,11 @@ async function viewInventory() {
     const card = h("div", { className: "card" });
     card.appendChild(h("div", { className: "card-header" }, t("inv_matrix")));
     if (!guests.length) {
-        card.appendChild(h("div", { className: "empty-state" }, t("inv_empty")));
-        container.appendChild(card); setContent(container); return;
+        card.appendChild(h("div", { className: "empty-state" },
+            t("inv_empty").replace("{h}", currentHost)));
+        container.appendChild(card);
+        _invExcluded(container, m);
+        setContent(container); return;
     }
     const table = h("table");
     table.appendChild(h("thead", {}, h("tr", {}, [
@@ -5715,7 +5726,30 @@ async function viewInventory() {
     table.appendChild(tbody);
     card.appendChild(table);
     container.appendChild(card);
+    _invExcluded(container, m);
     setContent(container);
+}
+
+// Guests that exist in exactly one place are not part of a replication
+// overview -- but "no copy anywhere" is worth knowing, so they are named
+// rather than silently dropped.
+function _invExcluded(container, m) {
+    const list = m.without_copy_guests || [];
+    if (!list.length) return;
+    const card = h("div", { className: "card", style: "margin-top:16px" });
+    card.appendChild(h("div", { className: "card-header" },
+        t("inv_excluded_title").replace("{n}", String(list.length))));
+    const body = h("div", { className: "card-body" });
+    body.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" },
+        t("inv_excluded_intro")));
+    list.forEach(g => body.appendChild(h("div", { style: "font-size:12px" }, [
+        h("strong", {}, `${g.vmid} ${g.guest_name ? "— " + g.guest_name : ""} ` +
+            `(${g.guest_type === "lxc" ? "CT" : "VM"})`),
+        h("span", { className: "muted", style: "font-family:monospace;font-size:11px" },
+            "  " + g.source_dataset),
+    ])));
+    card.appendChild(body);
+    container.appendChild(card);
 }
 
 
