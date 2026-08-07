@@ -401,43 +401,78 @@ def condense_for_report(matrix: Dict[str, Any], max_guests: int = 120) -> Dict[s
 # Collection (SSH)
 # ---------------------------------------------------------------------------
 
+# Only guest-disk snapshots are of interest. Filtering on the HOST rather than
+# after transfer is the difference between a few hundred kilobytes and tens of
+# megabytes over SSH: with auto-snapshots every 15 minutes, rpool/ROOT,
+# var-lib-vz and the pool roots contribute the overwhelming majority of lines,
+# and every one of them is discarded later anyway because it has no VMID.
+_GUEST_SNAP_GREP = r"grep -E '(^|/)(vm|subvol|base|basevol)-[0-9]+-disk-[0-9]+@'"
+
+
 def collect_host_snapshots(host: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Every snapshot on one host with its guid. One command, one round trip."""
-    # Cached briefly: the listing is large and the view is clicked repeatedly,
-    # while the data only changes when a new snapshot is taken.
-    r = run_command(host, "zfs list -Hp -t snapshot -o name,guid,creation 2>/dev/null",
-                    timeout=120, cache_ttl=60)
+    """Guest-disk snapshots on one host with their guids. One round trip."""
+    # Cached: the listing is expensive to produce and the view is opened
+    # repeatedly, while the data only changes when a snapshot is taken.
+    # `|| true`: grep exits 1 when nothing matches, and a host that simply has
+    # no guest snapshots yet must not be mistaken for one that failed to answer.
+    r = run_command(host,
+                    f"zfs list -Hp -t snapshot -o name,guid,creation 2>/dev/null "
+                    f"| {_GUEST_SNAP_GREP} || true",
+                    timeout=180, cache_ttl=300)
     if not r.get("success"):
         return []
     return parse_snapshot_guids(r.get("stdout", ""))
 
 
-def collect_inventory(hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Gather snapshots, guests and replication configs from every host."""
+def _collect_one_host(h: Dict[str, Any]) -> Dict[str, Any]:
+    """Everything needed from a single host: snapshots, guests, configs."""
     from app.zfs_commands import get_pve_vms, get_pve_cts
     from app.replication import list_configs
 
+    addr = h.get("address", "")
+    out = {"address": addr, "rows": [], "guests": [], "configs": []}
+    out["rows"] = collect_host_snapshots(h)
+    try:
+        out["guests"] = list(get_pve_vms(h) or []) + list(get_pve_cts(h) or [])
+    except Exception:
+        pass
+    try:
+        out["configs"] = [
+            {"target_host": addr, "source": c.get("source", ""),
+             "target": c.get("target", "")}
+            for c in (list_configs(h).get("configs") or [])
+        ]
+    except Exception:
+        pass
+    return out
+
+
+def collect_inventory(hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Gather snapshots, guests and replication configs from every host.
+
+    Hosts are queried in parallel: sequentially, the wait is the sum of every
+    host's snapshot listing, which on a real estate is long enough to hit the
+    gunicorn request timeout and return an HTML error page instead of JSON.
+    run_command keeps its SSH connections thread-local, so each worker gets its
+    own connection and they do not interfere.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    hosts = list(hosts or [])
     per_host: Dict[str, List[Dict[str, Any]]] = {}
     guests_by_host: Dict[str, List[Dict[str, Any]]] = {}
     configured: List[Dict[str, str]] = []
     unreachable: List[str] = []
 
-    for h in hosts or []:
-        addr = h.get("address", "")
-        rows = collect_host_snapshots(h)
-        if not rows:
-            unreachable.append(addr)
-        per_host[addr] = rows
-        try:
-            guests_by_host[addr] = list(get_pve_vms(h) or []) + list(get_pve_cts(h) or [])
-        except Exception:
-            guests_by_host[addr] = []
-        try:
-            for cfg in (list_configs(h).get("configs") or []):
-                configured.append({"target_host": addr, "source": cfg.get("source", ""),
-                                   "target": cfg.get("target", "")})
-        except Exception:
-            pass
+    if hosts:
+        with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as pool:
+            for res in pool.map(_collect_one_host, hosts):
+                addr = res["address"]
+                per_host[addr] = res["rows"]
+                guests_by_host[addr] = res["guests"]
+                configured.extend(res["configs"])
+                if not res["rows"]:
+                    unreachable.append(addr)
 
     matrix = build_matrix(per_host, guests_by_host, configured)
     matrix["hosts"] = list(per_host.keys())
