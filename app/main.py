@@ -618,6 +618,19 @@ def api_snapshots():
     return jsonify(get_snapshots(host, ds))
 
 
+@app.route("/api/snapshots/space")
+def api_snapshot_space():
+    """How much space snapshots really occupy (usedbysnapshots), per dataset and
+    per pool. Adding up the per-snapshot "used" column would undercount: that
+    value is what destroying that one snapshot would free, so blocks shared
+    between snapshots appear in none of them."""
+    from app.zfs_commands import get_snapshot_space
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(get_snapshot_space(host, request.args.get("dataset")))
+
+
 @app.route("/api/snapshots/create", methods=["POST"])
 def api_create_snapshot():
     data = request.json

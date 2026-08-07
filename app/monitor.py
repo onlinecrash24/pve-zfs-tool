@@ -37,8 +37,58 @@ _alert_lock = threading.Lock()
 # Health values we consider "bad"
 BAD_HEALTH = {"DEGRADED", "FAULTED", "UNAVAIL", "REMOVED", "SUSPENDED"}
 
-# Capacity warning threshold (%)
-CAPACITY_WARN_PCT = 90.0
+# Capacity thresholds (%). Defaults live in notifications.DEFAULT_CONFIG so they
+# are configurable; these are the fallbacks when the config cannot be read.
+CAPACITY_WARN_PCT = 70.0
+CAPACITY_CRIT_PCT = 80.0
+
+_LEVEL_ORDER = {"below": 0, "warn": 1, "crit": 2}
+
+
+def capacity_thresholds():
+    """(warn, crit) from the notification config, sanitised.
+
+    A warn level above crit would make the warning unreachable, so it is pulled
+    back down; both are clamped to a sane range.
+    """
+    warn, crit = CAPACITY_WARN_PCT, CAPACITY_CRIT_PCT
+    try:
+        from app.notifications import load_config
+        th = (load_config() or {}).get("thresholds") or {}
+        warn = float(th.get("capacity_warn_pct", warn))
+        crit = float(th.get("capacity_crit_pct", crit))
+    except Exception:
+        pass
+    warn = min(max(warn, 1.0), 100.0)
+    crit = min(max(crit, 1.0), 100.0)
+    if warn > crit:
+        warn = crit
+    return warn, crit
+
+
+def capacity_level(cap, warn_pct, crit_pct):
+    """Which band a fill percentage falls into."""
+    if cap >= crit_pct:
+        return "crit"
+    if cap >= warn_pct:
+        return "warn"
+    return "below"
+
+
+def should_alert_capacity(prev_level, now_level):
+    """Whether a capacity change warrants a notification.
+
+    The first observation of a pool used to be recorded silently, so a pool that
+    was ALREADY above the threshold when the tool was installed never notified
+    at all -- it only alerted on an upward crossing that had happened before
+    anyone was watching. Now an unseen pool that is already at/above the warn
+    level alerts straight away; afterwards only upward changes do.
+    """
+    if now_level == "below":
+        return False
+    if prev_level is None or prev_level not in _LEVEL_ORDER:
+        return True
+    return _LEVEL_ORDER[now_level] > _LEVEL_ORDER[prev_level]
 
 # Auto-snap staleness thresholds (seconds). Entries not listed here are
 # ignored. Generous multipliers keep false positives down.
@@ -282,8 +332,9 @@ def check_pool_health(host, pools):
 
 
 def check_capacity(host, pools):
-    """Fire health_warning on capacity crossing upward past CAPACITY_WARN_PCT."""
+    """Fire health_warning when a pool reaches the warn or critical fill level."""
     scope = "capacity"
+    warn_pct, crit_pct = capacity_thresholds()
     for p in pools:
         pool_name = p.get("name", "")
         cap_raw = p.get("cap", "")
@@ -295,25 +346,24 @@ def check_capacity(host, pools):
             continue
         key = f"{host['address']}:{pool_name}"
         prev, last_alert = _state_get(scope, key)
-        prev_above = prev == "above"
-        now_above = cap >= CAPACITY_WARN_PCT
-        new_val = "above" if now_above else "below"
-        if prev is None:
-            _state_set(scope, key, new_val)
-            continue
-        # Upward crossing — alert if cooldown allows
-        if now_above and not prev_above and _cooldown_ok(last_alert, CAPACITY_ALERT_COOLDOWN):
+        level = capacity_level(cap, warn_pct, crit_pct)
+        if (should_alert_capacity(prev, level)
+                and _cooldown_ok(last_alert, CAPACITY_ALERT_COOLDOWN)):
             name = host.get("name") or host["address"]
+            crit = level == "crit"
+            limit = crit_pct if crit else warn_pct
             send_notification(
                 "health_warning",
-                f"Capacity Warning: {pool_name}",
+                f"Capacity {'Critical' if crit else 'Warning'}: {pool_name}",
                 f"Pool '{pool_name}' on {name} is at {cap:.0f}% "
-                f"(threshold {CAPACITY_WARN_PCT:.0f}%).",
-                priority=7,
+                f"(threshold {limit:.0f}%).\n\n"
+                "Snapshots often account for the difference between used data "
+                "and pool usage -- check the snapshot list if this is unexpected.",
+                priority=9 if crit else 7,
             )
-            _state_set(scope, key, new_val, last_alert_ts=int(time.time()))
+            _state_set(scope, key, level, last_alert_ts=int(time.time()))
         else:
-            _state_set(scope, key, new_val)
+            _state_set(scope, key, level)
 
 
 def check_pool_errors(host, pools_status):

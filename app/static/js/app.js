@@ -423,7 +423,7 @@ function _renderDashboard(d) {
         `${agg.pools_ok || 0} / ${agg.pools_total || 0}`,
         t("dash_pools_ok"),
         (agg.pools_degraded || 0) === 0 ? true : false));
-    tiles.appendChild(tile(t("dash_capacity_warn"),
+    tiles.appendChild(tile(t("dash_capacity_warn").replace("{p}", String(agg.capacity_warn_pct ?? 70)),
         String(agg.pools_capacity_warn || 0),
         t("dash_capacity_warn_sub"),
         (agg.pools_capacity_warn || 0) === 0 ? true : ((agg.pools_capacity_warn || 0) > 0 ? false : undefined)));
@@ -1222,6 +1222,7 @@ async function viewPools() {
     const table = h("table");
     table.appendChild(h("thead", {}, h("tr", {}, [
         h("th", {}, t("name")), h("th", {}, t("size")), h("th", {}, t("alloc")),
+        h("th", { title: t("pool_snap_space_hint") }, t("pool_snap_space")),
         h("th", {}, t("free")), h("th", {}, t("frag")), h("th", {}, t("cap")),
         h("th", {}, t("health")), h("th", {}, t("actions")),
     ])));
@@ -1231,6 +1232,9 @@ async function viewPools() {
         tr.appendChild(h("td", {}, h("strong", {}, pool.name)));
         tr.appendChild(h("td", {}, pool.size));
         tr.appendChild(h("td", {}, pool.alloc));
+        // Filled in below once the snapshot space is known -- one extra query
+        // for the whole table rather than one per pool.
+        tr.appendChild(h("td", { className: "pool-snapspace", "data-pool": pool.name }, "…"));
         tr.appendChild(h("td", {}, pool.free));
         tr.appendChild(h("td", { style: ampelColor(parseFloat(pool.frag), 79, 49, false) }, pool.frag));
         tr.appendChild(h("td", { style: ampelColor(parseFloat(pool.cap), 89, 79, false) }, pool.cap));
@@ -1257,6 +1261,17 @@ async function viewPools() {
     container.appendChild(tableCard);
 
     setContent(container);
+
+    // One query fills the snapshot-space column for every pool.
+    API.get("/api/snapshots/space?host=" + encodeURIComponent(currentHost)).then(r => {
+        const byPool = (r && r.by_pool) || {};
+        document.querySelectorAll(".pool-snapspace").forEach(td => {
+            const bytes = byPool[td.dataset.pool];
+            td.textContent = bytes === undefined ? "—" : formatBytes(bytes);
+        });
+    }).catch(() => {
+        document.querySelectorAll(".pool-snapspace").forEach(td => { td.textContent = "—"; });
+    });
 
     for (const pool of pools) {
         checkPoolUpgrade(pool.name);
@@ -1668,7 +1683,7 @@ function applySnapshotFilter() {
     } else {
         tlContainer.style.display = "none";
         tableCard.style.display = "block";
-        renderSnapshotTable(filtered);
+        renderSnapshotTable(filtered, ds);
     }
 }
 
@@ -1722,7 +1737,8 @@ function renderTimeline(snapshots) {
             content.appendChild(topRow);
 
             const metaRow = h("div", { className: "tl-meta" });
-            metaRow.appendChild(h("span", {}, `${t("used")}: ${snap.used}`));
+            metaRow.appendChild(h("span", { title: t("snap_frees_hint") },
+                `${t("snap_frees")}: ${snap.used}`));
             metaRow.appendChild(h("span", {}, `${t("refer")}: ${snap.refer}`));
             if (isAuto) metaRow.appendChild(h("span", { className: "badge badge-stopped", style: "font-size:9px" }, "auto"));
             content.appendChild(metaRow);
@@ -1747,7 +1763,7 @@ function renderTimeline(snapshots) {
 }
 
 // -- Snapshot Table --------------------------------------------------------
-function renderSnapshotTable(snapshots) {
+function renderSnapshotTable(snapshots, datasetFilter) {
     const tableCard = document.getElementById("snap-table-card");
     tableCard.innerHTML = "";
     tableCard.appendChild(h("div", { className: "card-header" }, `${t("snapshots_count", snapshots.length)}`));
@@ -1757,10 +1773,43 @@ function renderSnapshotTable(snapshots) {
         return;
     }
 
+    // How much the snapshots actually occupy. Deliberately NOT the sum of the
+    // "used" column: that value is what destroying that ONE snapshot would
+    // free, so blocks held by several snapshots count in none of them and the
+    // sum can read 0 while the snapshots hold hundreds of gigabytes.
+    // usedbysnapshots is the honest number.
+    const spaceLine = h("div", {
+        id: "snap-space-line",
+        style: "padding:8px 16px;font-size:12px;color:var(--text-secondary);border-bottom:1px solid var(--border)",
+    }, t("loading"));
+    tableCard.appendChild(spaceLine);
+    // Follows the dataset filter: asking about one dataset should not be
+    // answered with the whole host's total. `-r <dataset>` on the server side
+    // includes its children, which is what you want when a parent is picked.
+    let spaceUrl = "/api/snapshots/space?host=" + encodeURIComponent(currentHost);
+    if (datasetFilter) spaceUrl += "&dataset=" + encodeURIComponent(datasetFilter);
+    API.get(spaceUrl).then(r => {
+        if (!r || r.success === false) { spaceLine.textContent = ""; return; }
+        spaceLine.innerHTML = "";
+        spaceLine.appendChild(h("strong", {}, t("snap_space_total") + ": " + formatBytes(r.total || 0)));
+        if (datasetFilter) {
+            // One dataset -- the per-pool breakdown would just repeat the total.
+            spaceLine.appendChild(h("span", { style: "font-family:monospace" }, "  ·  " + datasetFilter));
+        } else {
+            const pools = Object.entries(r.by_pool || {}).sort((a, b) => b[1] - a[1]);
+            if (pools.length) {
+                spaceLine.appendChild(h("span", {}, "  ·  " +
+                    pools.map(([p, b]) => `${p}: ${formatBytes(b)}`).join("  ·  ")));
+            }
+        }
+        spaceLine.appendChild(h("div", { style: "font-size:11px;margin-top:2px" }, t("snap_space_hint")));
+    }).catch(() => { spaceLine.textContent = ""; });
+
     const table = h("table");
     table.appendChild(h("thead", {}, h("tr", {}, [
         h("th", {}, t("dataset_label")), h("th", {}, t("snapshot")), h("th", {}, t("type")),
-        h("th", {}, t("used")), h("th", {}, t("refer")), h("th", {}, t("created")), h("th", {}, t("actions")),
+        h("th", { title: t("snap_frees_hint") }, t("snap_frees")),
+        h("th", {}, t("refer")), h("th", {}, t("created")), h("th", {}, t("actions")),
     ])));
     const tbody = h("tbody");
     for (const snap of snapshots) {
@@ -1900,17 +1949,62 @@ async function cloneSnap(snap) {
     footer.appendChild(cloneBtn);
 }
 
+// Compare A against B. B defaults to the live filesystem (what this used to do
+// unconditionally); any other snapshot OF THE SAME DATASET can be picked
+// instead -- zfs diff cannot compare across datasets. The order is sorted out
+// server-side, so picking an older B still works.
 async function diffSnap(snap) {
-    openModal(`${t("diff")}: ${snap.snapshot}`, `<div class="loading-placeholder"><span class="spinner"></span> ${t("loading_diff")}</div>`);
-    const r = await API.get(`/api/snapshots/diff?host=${currentHost}&snapshot1=${encodeURIComponent(snap.full_name)}`);
+    openModal(`${t("diff")}: ${snap.snapshot}`, "");
     const body = document.getElementById("modal-body");
-    if (body) {
-        if (r.success) {
-            body.innerHTML = `<pre class="output">${escapeHtml(r.stdout || t("no_changes"))}</pre>`;
-        } else {
-            body.innerHTML = `<div style="color:var(--danger);margin-bottom:12px;font-weight:600">${escapeHtml(t("diff_failed"))}</div><pre class="output">${escapeHtml(r.stderr || t("error"))}</pre>`;
-        }
-    }
+    if (!body) return;
+
+    const others = _allSnapshots
+        .filter(s => s.dataset === snap.dataset && s.full_name !== snap.full_name);
+    const bSel = h("select", { className: "form-input", style: "max-width:340px" },
+        [h("option", { value: "" }, t("diff_b_live"))].concat(
+            others.map(s => h("option", { value: s.full_name },
+                `${s.snapshot}  (${s.creation})`))));
+    const runBtn = h("button", { className: "btn btn-primary btn-sm", style: "margin-left:8px" }, t("diff_compare"));
+    const out = h("div", { style: "margin-top:12px" });
+
+    const picker = h("div", { style: "display:flex;align-items:flex-end;flex-wrap:wrap;gap:6px" }, [
+        h("div", {}, [
+            h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
+                `A: ${snap.snapshot}  →  B`),
+            bSel,
+        ]),
+        runBtn,
+    ]);
+    body.appendChild(picker);
+    body.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-top:4px" }, t("diff_hint")));
+    body.appendChild(out);
+
+    const run = async () => {
+        runBtn.disabled = true;
+        out.innerHTML = `<div class="loading-placeholder"><span class="spinner"></span> ${escapeHtml(t("loading_diff"))}</div>`;
+        try {
+            let url = `/api/snapshots/diff?host=${encodeURIComponent(currentHost)}` +
+                `&snapshot1=${encodeURIComponent(snap.full_name)}`;
+            if (bSel.value) url += `&snapshot2=${encodeURIComponent(bSel.value)}`;
+            const r = await API.get(url);
+            out.innerHTML = "";
+            if (r.success) {
+                if (r.swapped) {
+                    out.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-bottom:6px" },
+                        t("diff_swapped").replace("{a}", (r.from || "").split("@")[1] || "")
+                            .replace("{b}", (r.to || "").split("@")[1] || "")));
+                }
+                out.innerHTML += `<pre class="output">${escapeHtml(r.stdout || t("no_changes"))}</pre>`;
+            } else {
+                out.innerHTML = `<div style="color:var(--danger);margin-bottom:12px;font-weight:600">${escapeHtml(t("diff_failed"))}</div><pre class="output">${escapeHtml(r.stderr || t("error"))}</pre>`;
+            }
+        } catch (e) {
+            out.innerHTML = `<div style="color:var(--danger)">${escapeHtml(e.message || t("error"))}</div>`;
+        } finally { runBtn.disabled = false; }
+    };
+    runBtn.onclick = run;
+    bSel.onchange = run;
+    run();      // start with the live filesystem, as before
 }
 
 async function destroySnap(snap) {
@@ -2386,7 +2480,7 @@ async function _guestSnapshotsHtml(guest, pools, guestType) {
     if (snaps.length === 0) {
         html += `<p style="color:var(--text-secondary)">${escapeHtml(t("no_guest_snapshots"))}</p>`;
     } else {
-        html += `<table><thead><tr><th>${escapeHtml(t("snapshot"))}</th><th>${escapeHtml(t("used"))}</th><th>${escapeHtml(t("refer"))}</th><th>${escapeHtml(t("created"))}</th><th>${escapeHtml(t("actions"))}</th></tr></thead><tbody>`;
+        html += `<table><thead><tr><th>${escapeHtml(t("snapshot"))}</th><th title="${escapeHtml(t("snap_frees_hint"))}">${escapeHtml(t("snap_frees"))}</th><th>${escapeHtml(t("refer"))}</th><th>${escapeHtml(t("created"))}</th><th>${escapeHtml(t("actions"))}</th></tr></thead><tbody>`;
         for (const s of snaps) {
             const isLxc = guest.type === "lxc";
             html += `<tr>
@@ -6599,6 +6693,31 @@ async function viewNotifications() {
     evCard.appendChild(evBody);
     container.appendChild(evCard);
 
+    // --- Capacity thresholds -------------------------------------------------
+    // Which fill level triggers health_warning. ZFS gets uncomfortable well
+    // before it is full and snapshots eat the rest quickly, so this is worth
+    // setting per environment instead of being hardcoded.
+    const th = config.thresholds || {};
+    const thCard = h("div", { className: "card", style: "margin-top:16px" });
+    thCard.appendChild(h("div", { className: "card-header" }, t("thresholds_title")));
+    const thBody = h("div", { className: "card-body" });
+    thBody.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" },
+        t("thresholds_intro")));
+    const numInp = (id, val) => {
+        const i = h("input", { type: "number", className: "form-input", id,
+                               min: "1", max: "100", style: "max-width:120px" });
+        i.value = String(val);
+        return i;
+    };
+    thBody.appendChild(h("div", { style: "display:flex;gap:16px;flex-wrap:wrap" }, [
+        h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
+            t("threshold_warn")), numInp("cap-warn", th.capacity_warn_pct ?? 70)]),
+        h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
+            t("threshold_crit")), numInp("cap-crit", th.capacity_crit_pct ?? 80)]),
+    ]));
+    thCard.appendChild(thBody);
+    container.appendChild(thCard);
+
     // --- Save Button ---
     const saveBar = h("div", { style: "margin-top:16px;display:flex;gap:8px" });
     saveBar.appendChild(h("button", { className: "btn btn-primary", id: "notify-save-btn" }, t("save_config")));
@@ -6686,6 +6805,10 @@ async function viewNotifications() {
                 security: document.getElementById("em-security").value,
             },
             events,
+            thresholds: {
+                capacity_warn_pct: parseInt(document.getElementById("cap-warn").value) || 70,
+                capacity_crit_pct: parseInt(document.getElementById("cap-crit").value) || 80,
+            },
         };
         const r = await API.post("/api/notifications/config", newConfig);
         toast(r.message || t("saved"), r.success ? "success" : "error");
