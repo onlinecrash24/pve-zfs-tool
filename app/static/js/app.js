@@ -5907,12 +5907,33 @@ async function viewInventory() {
         }
         tr.appendChild(bkTd);
 
+        // Overall state: replication and backup are two independent lines of
+        // defence, so the verdict combines both instead of judging on copies
+        // alone. Backup is only factored in where it was actually read
+        // (g.backup present with a known state) -- on a host where backups
+        // were never examined, every guest still falls back to the old
+        // copy-only judgement, so nothing changes for setups without backup
+        // storage configured.
+        const hasCopy = g.copy_count > 0;
+        const bkKnown = !!g.backup && g.backup.state !== "unknown";
+        const bkMissing = bkKnown && g.backup.state === "red";
+        const bkPresent = bkKnown && g.backup.state !== "red";
+
         const stTd = h("td", { style: "font-size:12px" });
         if (g.config_mismatch) {
             stTd.appendChild(h("span", { className: "badge badge-warning", title: g.config_mismatch }, "⚠"));
             stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" }, t("inv_mismatch_hint")));
-        } else if (g.copy_count === 0) {
+        } else if (!hasCopy && bkPresent) {
+            // No ZFS copy, but a real backup exists -- that IS a working
+            // second line of defence, just not a replication-shaped one.
+            stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
+        } else if (!hasCopy) {
             stTd.appendChild(h("span", { className: "badge badge-danger" }, t("inv_at_risk")));
+        } else if (hasCopy && bkMissing) {
+            // Replicated, but the backup read came back "no backup" -- only
+            // one of the two protections is in place.
+            stTd.appendChild(h("span", { className: "badge badge-warning" }, t("inv_no_backup_warn")));
+            stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" }, t("inv_no_backup_hint")));
         } else {
             stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
         }
@@ -7282,6 +7303,76 @@ function renderMarkdown(text) {
     return html;
 }
 
+// Report Logo card body: preview of whichever logo the next PDF header would
+// actually use (custom upload, or the tool's own), plus upload/remove. A
+// plain <form>-less file input + manual FormData fetch, since this is the
+// only binary upload in the app -- API.post's JSON body would be the wrong
+// shape here, and the browser must set its own multipart boundary, so the
+// Content-Type header is deliberately NOT set (only the CSRF header is).
+async function _renderLogoCard(mount) {
+    let status;
+    try { status = await API.get("/api/ai/report-logo/status"); }
+    catch (e) { status = { has_custom_logo: false }; }
+    const hasCustom = !!status.has_custom_logo;
+
+    mount.innerHTML = "";
+    mount.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" }, t("ai_logo_intro")));
+
+    const previewRow = h("div", { style: "display:flex;align-items:center;gap:14px;margin-bottom:12px" });
+    // Cache-busted so a fresh upload replaces the preview immediately instead
+    // of showing the browser's cached copy of the old one.
+    const img = h("img", {
+        src: `/api/ai/report-logo?t=${Date.now()}`,
+        style: "max-height:44px;max-width:160px;background:#fff;border-radius:4px;padding:4px;border:1px solid var(--border)",
+        onerror: (e) => { e.target.style.display = "none"; },
+    });
+    previewRow.appendChild(img);
+    previewRow.appendChild(h("span", { style: "font-size:13px;color:var(--text-secondary)" },
+        hasCustom ? t("ai_logo_custom_active") : t("ai_logo_default_active")));
+    mount.appendChild(previewRow);
+
+    const row = h("div", { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap" });
+    const fileInput = h("input", { type: "file", id: "ai-logo-file",
+                                   accept: "image/png,image/jpeg,image/webp,image/gif,image/bmp" });
+    const uploadBtn = h("button", { className: "btn btn-sm btn-primary" }, t("ai_logo_upload_btn"));
+    row.appendChild(fileInput);
+    row.appendChild(uploadBtn);
+    if (hasCustom) {
+        const removeBtn = h("button", { className: "btn btn-sm btn-danger" }, t("ai_logo_remove_btn"));
+        removeBtn.onclick = async () => {
+            removeBtn.disabled = true;
+            const r = await API.del("/api/ai/report-logo", {});
+            toast(r.message, r.success ? "success" : "error");
+            _renderLogoCard(mount);
+        };
+        row.appendChild(removeBtn);
+    }
+    mount.appendChild(row);
+
+    uploadBtn.onclick = async () => {
+        const file = fileInput.files[0];
+        if (!file) { toast(t("ai_logo_pick_file"), "error"); return; }
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = t("saving");
+        try {
+            const fd = new FormData();
+            fd.append("logo", file);
+            const resp = await fetch("/api/ai/report-logo", {
+                method: "POST",
+                headers: { "X-CSRF-Token": _csrfToken },
+                body: fd,
+            });
+            const r = await resp.json();
+            toast(r.message, r.success ? "success" : "error");
+            if (r.success) { _renderLogoCard(mount); return; }
+        } catch (e) {
+            toast(e.message || t("ai_logo_upload_btn"), "error");
+        }
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = t("ai_logo_upload_btn");
+    };
+}
+
 // ---------------------------------------------------------------------------
 // AI Reports view
 // ---------------------------------------------------------------------------
@@ -7423,6 +7514,16 @@ async function viewAI() {
     `;
     provCard.appendChild(provBody);
     container.appendChild(provCard);
+
+    // ---- Card 1b: Report Logo ----
+    // Self-contained (own body element, own listeners) so it can refresh
+    // itself in place after an upload/remove instead of reloading the whole
+    // settings page and losing whatever else was being edited.
+    const logoCard = h("div", { className: "card", style: "margin-top:16px" });
+    logoCard.appendChild(h("div", { className: "card-header" }, t("ai_logo_card")));
+    const logoBody = h("div", { className: "card-body" }, loading());
+    logoCard.appendChild(logoBody);
+    container.appendChild(logoCard);
 
     // ---- Card 2a: Combined-report schedule (independent block) ----
     // Lifted out of the per-host card into its own card so the user can
@@ -7649,6 +7750,7 @@ async function viewAI() {
     container.appendChild(reportCard);
 
     setContent(container);
+    _renderLogoCard(logoBody);
 
     // ---- Wire up event listeners ----
 
