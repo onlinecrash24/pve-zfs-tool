@@ -53,6 +53,11 @@ def _capture_prompt(monkeypatch):
         seen["user"] = messages[1]["content"]
         return {"success": True, "content": "## 1. Overview\nfine", "usage": {}}
 
+    # load_config() would create the data directory, which is not writable
+    # everywhere the tests run.
+    monkeypatch.setattr(ar, "load_config",
+                        lambda: {"provider": "openai", "openai": {"model": "m"},
+                                 "report_language": "en"})
     monkeypatch.setattr(ar, "load_hosts", lambda: [{"address": "h-src"}], raising=False)
     monkeypatch.setattr("app.ssh_manager.load_hosts", lambda: [{"address": "h-src"}])
     monkeypatch.setattr("app.replication_inventory.collect_inventory",
