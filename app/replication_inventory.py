@@ -294,32 +294,29 @@ def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
     return {"guests": entries, "generated": True}
 
 
-def filter_matrix(matrix: Dict[str, Any], source_host: Optional[str] = None,
-                  only_when_replicating: bool = True) -> Dict[str, Any]:
-    """Narrow the matrix to what is worth looking at.
+def filter_matrix(matrix: Dict[str, Any], source_host: Optional[str] = None) -> Dict[str, Any]:
+    """Narrow the matrix to one host's guests.
 
     ``source_host`` keeps only guests whose ORIGIN is that host, so the view and
     the report describe one host's data and where it goes -- listing both
     directions at once shows every guest twice and reads as duplicates.
 
-    Once a host replicates anything, ALL of its guests are listed, including the
-    ones without a copy: a guest missing from an otherwise working replication
-    set is precisely the omission worth catching. A host that replicates nothing
-    at all has no replication story, so ``only_when_replicating`` yields an
-    empty list rather than flagging every guest on a standalone machine.
+    ALL of that host's guests are listed, replicated or not. There used to be an
+    ``only_when_replicating`` flag that blanked the whole page for a host which
+    replicated nothing, on the reasoning that it had "no replication story".
+    That held while this was a replication-only view. Since backups joined it,
+    a host that backs up every guest and replicates none is precisely the case
+    the page exists to show -- and blanking it made a fully-protected host look
+    like a broken tool.
     """
     guests = matrix.get("guests") or []
     if source_host:
         guests = [g for g in guests if g["source_host"] == source_host]
     replicated = [g for g in guests if g["copy_count"] > 0]
     without = [g for g in guests if g["copy_count"] == 0]
-    if only_when_replicating and not replicated:
-        guests = []
-        without = []
-    else:
-        # Replicated first, then the gaps -- sorted so the omissions stand out
-        # at the end instead of being scattered through the list.
-        guests = replicated + without
+    # Replicated first, then the gaps -- sorted so the omissions stand out
+    # at the end instead of being scattered through the list.
+    guests = replicated + without
     out = dict(matrix)
     out["guests"] = guests
     out["replicated_count"] = len(replicated)

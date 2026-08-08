@@ -1051,14 +1051,20 @@ proves the copy descends from that source.
 
 Write in this structure:
 
-## 1. Overview
-How many guests, how many have no second copy at all, how many are behind, and
-how many have no usable backup.
+## 1. Overall state
+Open with a verdict on this host in one or two sentences: is every guest
+protected by at least one of the two defences, and by which. Then the numbers:
+how many guests, how many have no second copy, how many are behind, how many
+have no usable backup, and how many have NEITHER. A host that replicates
+nothing but backs up every guest is in good shape and must be described that
+way -- not as a failure -- and the same holds in reverse.
 
-## 2. Per host
-For each source host, list its guests as: VMID, name, type, then one line per
-copy -- which host, how many snapshots, how far behind, how many snapshots of
-the source it is missing. Say plainly which copy is the live one.
+## 2. Per guest
+List every guest as: VMID, name, type, its backup state (age, count, storages),
+then one line per replica -- which host, how many snapshots, how far behind, how
+many snapshots of the source it is missing. Say plainly which copy is the live
+one. A guest with no replica is not an error to skip over; state its backup
+situation instead.
 
 ## 3. Findings
 Guests with neither a copy nor a backup first -- they have no second line of
@@ -1101,14 +1107,21 @@ anderen Hosts benannt, zugeordnet über die ZFS-Snapshot-GUID -- eine GUID
 
 Schreibe in dieser Struktur:
 
-## 1. Überblick
-Wie viele Gäste, wie viele ohne zweite Kopie, wie viele im Rückstand, und wie
-viele ohne brauchbares Backup.
+## 1. Gesamtzustand
+Beginne mit einer Bewertung dieses Hosts in ein bis zwei Sätzen: Ist jeder Gast
+durch mindestens eine der beiden Verteidigungslinien geschützt, und durch
+welche? Dann die Zahlen: wie viele Gäste, wie viele ohne zweite Kopie, wie
+viele im Rückstand, wie viele ohne brauchbares Backup, und wie viele ohne
+BEIDES. Ein Host, der nichts repliziert, aber jeden Gast sichert, steht gut da
+und muss auch so beschrieben werden -- nicht als Mängelliste -- und umgekehrt
+genauso.
 
-## 2. Je Host
-Für jeden Quell-Host dessen Gäste: VMID, Name, Typ, danach je Kopie eine Zeile
--- welcher Host, wie viele Snapshots, wie weit zurück, wie viele Snapshots der
-Quelle fehlen. Benenne klar, welche Kopie die aktive ist.
+## 2. Je Gast
+Jeden Gast auflisten: VMID, Name, Typ, sein Backup-Zustand (Alter, Anzahl,
+Storages), danach je Replikat eine Zeile -- welcher Host, wie viele Snapshots,
+wie weit zurück, wie viele Snapshots der Quelle fehlen. Benenne klar, welche
+Kopie die aktive ist. Ein Gast ohne Replikat ist kein zu übergehender Fehler;
+nenne stattdessen seine Backup-Lage.
 
 ## 3. Befunde
 Zuerst Gäste, die weder eine Kopie noch ein Backup haben -- sie haben überhaupt
@@ -1174,15 +1187,18 @@ def generate_replication_report(lang_override=None, source_host=None):
     if not hosts:
         return {"success": False, "error": "No hosts configured"}
     try:
-        matrix = filter_matrix(collect_inventory(hosts), source_host=source_host,
-                               only_when_replicating=True)
+        matrix = filter_matrix(collect_inventory(hosts), source_host=source_host)
     except Exception as e:
         return {"success": False, "error": f"Inventory collection failed: {e}"}
+    # Only a host with no guests at all has nothing to report on. It used to
+    # bail out whenever nothing was REPLICATED, which meant the one host whose
+    # guests were backed up but not replicated -- a state worth a report --
+    # could not produce one at all.
     if not matrix.get("guests"):
         return {"success": False,
-                "error": (f"No replicated guests found with {source_host} as source"
+                "error": (f"No guests found with {source_host} as source"
                           if source_host else
-                          "No replicated guests found on any host")}
+                          "No guests found on any host")}
 
     # Backup state, read through the source host's PVE storage layer. Only for a
     # scoped report: backups live where the guest runs, so there is no single
@@ -1237,12 +1253,18 @@ def generate_replication_report(lang_override=None, source_host=None):
     if not result.get("success"):
         return {"success": False, "error": result.get("error", "LLM call failed")}
 
-    # Verdict from facts, not prose: a guest that exists in only one place is
-    # critical (a single failure destroys it), a reversed or stopped
-    # replication direction is a warning.
-    no_copy = matrix.get("without_copy_count", 0)
-    mismatches = sum(1 for g in payload.get("guests", []) if g.get("config_mismatch"))
-    verdict = "crit" if no_copy else ("warn" if mismatches else "ok")
+    # Verdict from facts, not prose, and from BOTH defences: a guest with no
+    # second copy anywhere is critical, one that has a backup but no replica is
+    # covered, and one with a replica but no backup is only half protected.
+    # Judging on copies alone called a fully backed-up host critical purely
+    # because it does not replicate.
+    from app.backups import overall_verdict, protection_state
+    states = [protection_state(g) for g in (matrix.get("guests") or [])]
+    verdict = overall_verdict(matrix.get("guests") or [])
+    # The banner's counts have to come from the same judgement as the verdict,
+    # or the PDF says "critical" over "0 critical findings".
+    unprotected = states.count("crit")
+    half_protected = states.count("warn")
 
     covered = ([source_host] if source_host else []) + payload["copy_hosts"]
     if not covered:
@@ -1263,8 +1285,8 @@ def generate_replication_report(lang_override=None, source_host=None):
         "source_host": source_host or "",
         "usage": result.get("usage", {}),
         "verdict": verdict,
-        "critical_findings": no_copy,
-        "warnings_count": mismatches,
+        "critical_findings": unprotected,
+        "warnings_count": half_protected,
         "verdict_source": "facts",
         "kind": "replication",
     }

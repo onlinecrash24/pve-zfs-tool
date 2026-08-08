@@ -5755,8 +5755,10 @@ async function viewInventory() {
         setContent(container); return;
     }
 
-    // Guests of the selected host as source: replicated ones first, then the
-    // ones without a copy -- those are the gaps in an otherwise working set.
+    // Every guest of the selected host, replicated ones first, then the ones
+    // without a copy. The page used to be blank for a host that replicated
+    // nothing at all -- which is exactly the host whose guests live on backups
+    // alone, and the one whose protection is most worth showing.
     const guests = m.guests || [];
     const noCopy = m.without_copy_count || 0;
     const mismatch = guests.filter(g => g.config_mismatch).length;
@@ -5775,9 +5777,15 @@ async function viewInventory() {
         }, String(value)));
         return c;
     };
+    // Total guests, not replicated ones: on a host that backs up everything and
+    // replicates nothing, a leading "0" would misread as "nothing here".
     const tileDefs = [
-        [t("inv_guests"), m.replicated_count || 0],
-        [t("inv_no_copy"), noCopy, noCopy === 0],
+        [t("inv_guests"), guests.length],
+        // Deliberately uncoloured: "not replicated" is a fact, not a verdict.
+        // Whether it matters depends on the backup, which the next tile judges
+        // -- colouring this one red would contradict the Zustand column, which
+        // calls a backed-up-but-unreplicated guest OK.
+        [t("inv_no_copy"), noCopy],
     ];
     if (m.backup_states_present) {
         const noBackup = m.backup_at_risk_count || 0;

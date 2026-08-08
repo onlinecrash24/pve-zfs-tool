@@ -126,7 +126,7 @@ def test_matrix_attaches_backups_for_the_selected_host_only(client, monkeypatch)
     monkeypatch.setattr("app.replication_inventory.collect_inventory",
                         lambda hosts: dict(matrix))
     monkeypatch.setattr("app.replication_inventory.filter_matrix",
-                        lambda mx, source_host=None, only_when_replicating=True: dict(mx))
+                        lambda mx, source_host=None: dict(mx))
     monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: ["10.0.0.1"])
     monkeypatch.setattr(m, "load_hosts", lambda: [{"address": "10.0.0.1"}])
     _route(monkeypatch, {
@@ -151,7 +151,7 @@ def test_matrix_still_renders_when_the_backup_read_explodes(client, monkeypatch)
     monkeypatch.setattr("app.replication_inventory.collect_inventory",
                         lambda hosts: dict(matrix))
     monkeypatch.setattr("app.replication_inventory.filter_matrix",
-                        lambda mx, source_host=None, only_when_replicating=True: dict(mx))
+                        lambda mx, source_host=None: dict(mx))
     monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: [])
     monkeypatch.setattr(m, "load_hosts", lambda: [{"address": "10.0.0.1"}])
 

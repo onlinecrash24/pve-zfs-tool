@@ -236,7 +236,7 @@ def test_filter_keeps_only_the_selected_source_host():
         "h2": ri.parse_snapshot_guids(_rows("rpool/data/vm-200-disk-0", [("b", 9)])),
     }
     m = ri.build_matrix(per_host, {})
-    got = ri.filter_matrix(m, source_host="h1", only_when_replicating=False)
+    got = ri.filter_matrix(m, source_host="h1")
     assert [g["vmid"] for g in got["guests"]] == ["100"]
     assert got["source_host"] == "h1"
 
@@ -276,14 +276,17 @@ def test_guest_with_no_snapshots_at_all_is_still_listed():
     assert by_id["253"]["no_snapshots"] is False
 
 
-def test_a_host_that_replicates_nothing_yields_nothing():
-    # a standalone machine has no replication story; flagging every guest on it
-    # would drown out the hosts that do replicate
+def test_a_host_that_replicates_nothing_still_lists_its_guests():
+    # This used to return an empty list on the reasoning that a standalone
+    # machine has "no replication story". Since the page also shows backups,
+    # that blanked the whole view for a host whose guests are backed up but not
+    # replicated -- the tool looked broken on a perfectly protected host.
     per_host = {"h1": ri.parse_snapshot_guids(
         _rows("rpool/data/vm-100-disk-0", [("solo", 5)]))}
     got = ri.filter_matrix(ri.build_matrix(per_host, {}), source_host="h1")
-    assert got["guests"] == []
+    assert [g["vmid"] for g in got["guests"]] == ["100"]
     assert got["replicated_count"] == 0
+    assert got["without_copy_count"] == 1
 
 
 def test_source_hosts_lists_only_origins_of_replicated_guests():
