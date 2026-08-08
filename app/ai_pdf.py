@@ -167,14 +167,134 @@ def _has_dejavu():
     return os.path.exists(os.path.join(FONT_DIR, "DejaVuSans.ttf"))
 
 
-# Aspect ratio (width/height) of logo-small.png, used to place the title clear
-# of the logo in the PDF header. Update if the logo asset's proportions change.
-_LOGO_ASPECT = 2080 / 480
+# ---------------------------------------------------------------------------
+# Report logo — the tool's own by default, replaceable by an upload
+# ---------------------------------------------------------------------------
+# A custom logo lives outside the container image, in the same data directory
+# as ai_config.json, so it survives an image update instead of being baked
+# into a layer that gets replaced on the next pull.
+DATA_DIR = "/app/data"
+CUSTOM_LOGO_PATH = os.path.join(DATA_DIR, "report_logo.png")
+
+# A real logo is a few KB; these only guard against someone uploading
+# something that plainly isn't meant to be one.
+MAX_LOGO_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_LOGO_DIMENSION_PX = 1200
+
+
+def _bundled_logo_path():
+    return os.path.join(IMG_DIR, "logo-small.png")
+
+
+def _resolve_logo_path():
+    """Which file goes in the report header: a custom upload if one was made,
+    else the tool's own bundled logo, else None (no logo at all)."""
+    if os.path.exists(CUSTOM_LOGO_PATH):
+        return CUSTOM_LOGO_PATH
+    bundled = _bundled_logo_path()
+    return bundled if os.path.exists(bundled) else None
 
 
 def _has_logo():
-    """Check if logo-small.png exists."""
-    return os.path.exists(os.path.join(IMG_DIR, "logo-small.png"))
+    return _resolve_logo_path() is not None
+
+
+def has_custom_logo():
+    """Whether an uploaded logo (as opposed to the tool's own) is active."""
+    return os.path.exists(CUSTOM_LOGO_PATH)
+
+
+def _logo_pixel_size(path):
+    """(width, height) in pixels, or None if the file can't be read as an
+    image. Kept apart from the box math below so that math stays a pure
+    function, testable without touching the filesystem."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.size
+    except Exception:
+        return None
+
+
+def _logo_box(iw, ih, target_h=11.0, max_w=45.0):
+    """Logo placement size in mm, given its pixel dimensions.
+
+    Normally the logo is drawn at a fixed height (target_h) and the width
+    follows from its aspect ratio -- that's what makes the bundled logo look
+    right. A user's own upload can be any shape, though, including a wide
+    banner that would push the title off the page at that same height, so the
+    width is capped at max_w and the height gives way instead.
+    """
+    if not iw or not ih:
+        return (0.0, 0.0)
+    aspect = iw / ih
+    w, h = target_h * aspect, target_h
+    if w > max_w:
+        w, h = max_w, max_w / aspect
+    return (w, h)
+
+
+def save_custom_logo(data):
+    """Validate and store an uploaded report logo. Returns (ok, message).
+
+    Normalises to PNG regardless of the input format (PNG/JPEG/GIF/BMP/WEBP)
+    so ``_resolve_logo_path`` never has to guess an extension, and downscales
+    an oversized image so the PDF doesn't silently balloon in size. Nothing is
+    written until validation has fully passed, so a rejected upload can never
+    clobber a working logo that was already there.
+    """
+    if not data:
+        return False, "No file received"
+    if len(data) > MAX_LOGO_UPLOAD_BYTES:
+        return False, f"File too large (max {MAX_LOGO_UPLOAD_BYTES // (1024 * 1024)} MB)"
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(data))
+        im.load()  # force full decode now rather than lazily on first use
+    except Exception:
+        return False, "Not a readable image file"
+    if not im.width or not im.height:
+        return False, "Not a readable image file"
+
+    im = im.convert("RGBA")
+    im.thumbnail((MAX_LOGO_DIMENSION_PX, MAX_LOGO_DIMENSION_PX), Image.LANCZOS)
+
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = f"{CUSTOM_LOGO_PATH}.tmp.{os.getpid()}"
+        im.save(tmp, format="PNG")
+        os.replace(tmp, CUSTOM_LOGO_PATH)
+    except Exception as e:
+        return False, f"Could not save logo: {e}"
+    return True, "Logo saved"
+
+
+def remove_custom_logo():
+    """Delete the custom logo, reverting to the bundled one. Returns
+    (ok, message); removing one that isn't there is reported as a no-op
+    rather than a success, so the UI never claims to have done something it
+    didn't."""
+    if not os.path.exists(CUSTOM_LOGO_PATH):
+        return False, "No custom logo to remove"
+    try:
+        os.remove(CUSTOM_LOGO_PATH)
+    except Exception as e:
+        return False, f"Could not remove logo: {e}"
+    return True, "Logo removed"
+
+
+def get_logo_bytes():
+    """Raw bytes of whichever logo is currently active, for the settings-page
+    preview. None if there is no logo at all (custom or bundled)."""
+    path = _resolve_logo_path()
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
 
 
 class ReportPDF(FPDF):
@@ -225,27 +345,34 @@ class ReportPDF(FPDF):
     def header(self):
         # --- Logo + Title row ---
         y_start = self.get_y()
-        logo_h = 11
-        if _has_logo():
-            try:
-                self.image(os.path.join(IMG_DIR, "logo-small.png"), x=self.l_margin, y=y_start, h=logo_h)
-            except Exception:
-                pass
+        logo_w = logo_h = 0.0
+        logo_path = _resolve_logo_path()
+        if logo_path:
+            dims = _logo_pixel_size(logo_path)
+            if dims:
+                logo_w, logo_h = _logo_box(*dims)
+            if logo_w and logo_h:
+                try:
+                    self.image(logo_path, x=self.l_margin, y=y_start, w=logo_w, h=logo_h)
+                except Exception:
+                    logo_w = logo_h = 0.0
 
         # Title — placed just after the logo (offset derived from the logo's
-        # actual width so a wider logo can't overlap the title), else centered.
+        # actual rendered width, so a custom logo of any shape can't overlap
+        # the title), else centered.
+        has_logo = logo_w > 0
         self._f("B", 16)
         self.set_text_color(*COLORS["accent"])
-        title_x = self.l_margin + logo_h * _LOGO_ASPECT + 6 if _has_logo() else self.l_margin
+        title_x = self.l_margin + logo_w + 6 if has_logo else self.l_margin
         self.set_xy(title_x, y_start)
-        self.cell(self.w - title_x - self.r_margin, 7, self._s("AI Report"), align="L" if _has_logo() else "C")
+        self.cell(self.w - title_x - self.r_margin, 7, self._s("AI Report"), align="L" if has_logo else "C")
 
         # Meta line
         if self.report_meta:
             self._f("", 7.5)
             self.set_text_color(*COLORS["text_light"])
             self.set_xy(title_x, y_start + 7)
-            self.cell(self.w - title_x - self.r_margin, 5, self._s(self.report_meta), align="L" if _has_logo() else "C")
+            self.cell(self.w - title_x - self.r_margin, 5, self._s(self.report_meta), align="L" if has_logo else "C")
 
         # Accent line under header
         line_y = y_start + 15
@@ -263,7 +390,7 @@ class ReportPDF(FPDF):
         self.set_draw_color(*COLORS["rule"])
         line_y = self.get_y() - 2
         self.line(self.l_margin, line_y, self.w - self.r_margin, line_y)
-        self.cell(0, 10, self._s(f"PVE ZFS Tool  |  Page {self.page_no()}/{{nb}}"), align="C")
+        self.cell(0, 10, self._s(f"Powered by PVE ZFS Tool  |  Page {self.page_no()}/{{nb}}"), align="C")
 
     def _s(self, text):
         """Make text safe for the current font encoding."""

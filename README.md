@@ -170,6 +170,7 @@
 - **Bilingual Reports** -- Reports follow the global UI language (English/German)
 - **Customizable System Prompt** -- Edit the AI prompt to reduce false positives for your environment
 - **PDF Export** -- Download reports as PDF or have them delivered automatically
+- **Custom Report Logo** -- Replace the tool's own logo in the PDF header with your own (PNG/JPEG/GIF/BMP/WEBP, up to 5 MB, auto-scaled). Stored outside the container image so it survives an update. The footer always credits "Powered by PVE ZFS Tool" regardless of which logo is shown
 - **Raw Data Export** -- Export the JSON payload that would be sent to the LLM
 
 ### Security

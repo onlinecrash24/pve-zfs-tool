@@ -1506,6 +1506,53 @@ def api_save_ai_config_route():
     return jsonify({"success": True, "message": "Configuration saved"})
 
 
+@app.route("/api/ai/report-logo")
+def api_ai_report_logo_get():
+    """Serve whichever logo is currently active (custom upload or the tool's
+    own), for the settings-page preview -- always the same image the next PDF
+    header would actually use."""
+    from app.ai_pdf import get_logo_bytes
+    data = get_logo_bytes()
+    if data is None:
+        return jsonify({"error": "No logo set"}), 404
+    from flask import send_file
+    from io import BytesIO
+    return send_file(BytesIO(data), mimetype="image/png")
+
+
+@app.route("/api/ai/report-logo/status")
+def api_ai_report_logo_status():
+    from app.ai_pdf import has_custom_logo
+    return jsonify({"has_custom_logo": has_custom_logo()})
+
+
+@app.route("/api/ai/report-logo", methods=["POST"])
+@login_required
+def api_ai_report_logo_upload():
+    from app.ai_pdf import save_custom_logo, MAX_LOGO_UPLOAD_BYTES
+    # Cheap pre-check on the declared size before reading the body at all --
+    # save_custom_logo() re-checks the actual byte count regardless.
+    if request.content_length and request.content_length > MAX_LOGO_UPLOAD_BYTES:
+        return jsonify({"success": False, "message": "File too large"}), 413
+    f = request.files.get("logo")
+    if not f or not f.filename:
+        return jsonify({"success": False, "message": "No file uploaded"}), 400
+    data = f.read()
+    ok, msg = save_custom_logo(data)
+    audit_log("ai.report_logo.upload", success=ok,
+              details={"message": msg, "size": len(data), "filename": f.filename})
+    return jsonify({"success": ok, "message": msg}), (200 if ok else 400)
+
+
+@app.route("/api/ai/report-logo", methods=["DELETE"])
+@login_required
+def api_ai_report_logo_delete():
+    from app.ai_pdf import remove_custom_logo
+    ok, msg = remove_custom_logo()
+    audit_log("ai.report_logo.remove", success=ok, details={"message": msg})
+    return jsonify({"success": ok, "message": msg})
+
+
 @app.route("/api/ai/test", methods=["POST"])
 def api_ai_test():
     result = test_ai_connection()
