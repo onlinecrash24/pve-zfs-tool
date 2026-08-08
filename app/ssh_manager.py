@@ -100,7 +100,11 @@ def get_host_fingerprint(address, port=22, timeout=6):
                 pass
 
 
-def add_host(name, address, port=22, user="root"):
+def add_host(name, address, port=22, user="root", identity=None):
+    """Register a host. ``identity`` (from ``host_identity.persisted_fields``)
+    is merged into the entry so the Hosts table can show PVE/PBS without an SSH
+    round trip. Whether a host is allowed to be added at all is decided by the
+    caller -- this function only stores."""
     if any(h["address"] == address for h in load_hosts()):
         return False, "Host already exists"
 
@@ -125,14 +129,29 @@ def add_host(name, address, port=22, user="root"):
         hosts = load_hosts()
         if any(h["address"] == address for h in hosts):
             return False, "Host already exists"
-        hosts.append({
+        entry = {
             "name": name,
             "address": address,
             "port": int(port),
             "user": user,
-        })
+        }
+        if identity:
+            entry.update(identity)
+        hosts.append(entry)
         save_hosts(hosts)
     return True, "Host added"
+
+
+def update_host_identity(address, identity):
+    """Store a re-detected product role/versions on an existing host."""
+    with _lock:
+        hosts = load_hosts()
+        for h in hosts:
+            if h["address"] == address:
+                h.update(identity)
+                save_hosts(hosts)
+                return True, "Host updated"
+    return False, "Host not found"
 
 
 def remove_host(address):
@@ -178,6 +197,30 @@ def _forget_host_key(address):
             hk.save(KNOWN_HOSTS)
         except Exception:
             pass
+
+
+def discard_unregistered(address):
+    """Leave no trace of a host that was probed but not registered.
+
+    Probing an address before adding it opens an SSH connection, which stores
+    the host key (TOFU) and pools the connection. If the add is then refused --
+    e.g. the machine turned out not to be a Proxmox host -- none of that should
+    linger. Refuses to touch anything for an address that IS registered, so a
+    mistaken call cannot break a working host's trust.
+    """
+    if any(h.get("address") == address for h in load_hosts()):
+        return False
+    pool = getattr(_tls, "ssh_pool", None)
+    if pool:
+        for key in [k for k in pool if k[0] == address]:
+            _close_quiet(pool.pop(key)["client"])
+    _forget_host_key(address)
+    try:
+        from app.cache import invalidate_host
+        invalidate_host(address)
+    except Exception:
+        pass
+    return True
 
 
 def get_ssh_client(host):

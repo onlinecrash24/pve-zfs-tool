@@ -747,7 +747,8 @@ async function viewHosts() {
         const table = h("table");
         table.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("name")), h("th", {}, t("address")), h("th", {}, t("port")),
-            h("th", {}, t("user")), h("th", {}, t("status")), h("th", {}, t("actions")),
+            h("th", {}, t("user")), h("th", {}, t("hi_product")),
+            h("th", {}, t("status")), h("th", {}, t("actions")),
         ])));
         const tbody = h("tbody");
         for (const host of hosts) {
@@ -756,6 +757,11 @@ async function viewHosts() {
             tr.appendChild(h("td", {}, host.address));
             tr.appendChild(h("td", {}, String(host.port)));
             tr.appendChild(h("td", {}, host.user));
+            // Product cell: the stored role renders instantly, the async probe
+            // below refreshes it (and the version) without blocking the table.
+            const productTd = h("td", { id: `product-${host.address}` });
+            productTd.appendChild(_productBadge(host));
+            tr.appendChild(productTd);
             const statusTd = h("td");
             statusTd.appendChild(h("span", { className: "badge badge-stopped", id: `status-${host.address}`,
                 "data-standby": host.standby ? "1" : "" }, t("unknown")));
@@ -818,7 +824,50 @@ async function viewHosts() {
     // endpoint as the Test button.
     for (const host of hosts) {
         _probeHostBadge(host.address);
+        _probeHostProduct(host.address);
     }
+}
+
+// Product (PVE / PBS / PVE+PBS) badge for a host row. Roles are stored in
+// hosts.json at add time, so this renders without waiting for SSH; a host added
+// before the detection existed has no role and shows as unknown until probed.
+function _productBadge(host) {
+    const role = host.role || "unknown";
+    const label = {
+        "pve": "PVE", "pbs": "PBS", "pve+pbs": "PVE+PBS",
+    }[role] || t("unknown");
+    const cls = role === "unknown" ? "badge badge-stopped" : "badge badge-online";
+    const version = role === "pbs" ? host.pbs_version : host.pve_version;
+    const span = h("span", { className: cls }, label);
+    if (role === "pve+pbs" && host.pve_version && host.pbs_version) {
+        span.title = `PVE ${host.pve_version} / PBS ${host.pbs_version}`;
+    } else if (version) {
+        span.title = version;
+    }
+    const wrap = h("span", {}, [span]);
+    if (version) {
+        wrap.appendChild(h("span", {
+            style: "margin-left:6px;font-size:11px;color:var(--text-secondary)",
+        }, version));
+    }
+    return wrap;
+}
+
+async function _probeHostProduct(addr) {
+    const cell = document.getElementById(`product-${addr}`);
+    if (!cell) return;
+    let identity;
+    try {
+        const r = await API.post("/api/hosts/identify", { address: addr });
+        identity = r && r.identity;
+    } catch (e) { return; }
+    if (!identity || !identity.reachable) return;   // keep the stored value
+    cell.innerHTML = "";
+    cell.appendChild(_productBadge({
+        role: identity.role,
+        pve_version: identity.pve_version,
+        pbs_version: identity.pbs_version,
+    }));
 }
 
 // Consolidated table of every stored host-config backup across all hosts.
@@ -936,7 +985,28 @@ async function addHost() {
     const port = document.getElementById("host-port").value.trim();
     const user = document.getElementById("host-user").value.trim();
     if (!name || !addr) { toast(t("name_addr_required"), "error"); return; }
-    const r = await API.post("/api/hosts", { name, address: addr, port, user });
+    const btn = document.getElementById("add-host-btn");
+    if (btn) { btn.disabled = true; btn.textContent = t("hi_checking"); }
+    let r;
+    try {
+        r = await API.post("/api/hosts", { name, address: addr, port, user });
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = t("add_host"); }
+    }
+
+    // Refused because the host has neither product: a real answer, nothing to
+    // override. Refused because it could not be asked: offer to add anyway --
+    // an unreachable host is not proof that it is not a Proxmox host, and this
+    // tool deliberately supports hosts that are powered off most of the time.
+    if (!r.success && r.code === "not_proxmox") {
+        toast(t("hi_reject_not_proxmox", addr), "error");
+        return;
+    }
+    if (!r.success && r.code === "unverified") {
+        const detail = (r.identity && r.identity.error) || "";
+        if (!confirm(t("hi_unverified_confirm", addr, detail))) return;
+        r = await API.post("/api/hosts", { name, address: addr, port, user, force: true });
+    }
     toast(r.message, r.success ? "success" : "error");
     if (r.success) {
         loadHostSelector();

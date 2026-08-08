@@ -1071,6 +1071,12 @@ Concrete and ranked. No generic advice.
 Rules: lag_seconds is the age difference to the source, not an error by itself --
 a replica running every 15 minutes is normally a few minutes behind. Judge it
 against that cadence. Do not invent numbers; use only what the data contains.
+
+Scope: this report covers ONE source host and the hosts holding copies of its
+guests -- source_host and copy_hosts. Other machines in the environment were not
+examined here, so write nothing about them: no counting of hosts, no remarks
+about missing or silent hosts, no speculation about offsite or backup targets.
+A host that does not appear in the data is outside this report, not a finding.
 """
 
 REPLICATION_PROMPT_DE = """Du dokumentierst die Sicherungslage einer
@@ -1102,7 +1108,16 @@ Konkret und nach Dringlichkeit. Keine Allgemeinplätze.
 Regeln: lag_seconds ist der Altersabstand zur Quelle, für sich genommen kein
 Fehler -- ein Replikat mit 15-Minuten-Takt liegt normalerweise ein paar Minuten
 zurück. Bewerte den Rückstand an diesem Takt. Erfinde keine Zahlen, nutze nur
-was in den Daten steht. Schreibe den gesamten Bericht auf Deutsch.
+was in den Daten steht.
+
+Umfang: Dieser Bericht behandelt EINEN Quell-Host und die Hosts, die Kopien
+seiner Gäste halten -- source_host und copy_hosts. Andere Maschinen der Umgebung
+wurden hier nicht untersucht, schreibe daher nichts über sie: kein Zählen von
+Hosts, keine Bemerkungen über fehlende oder stumme Hosts, keine Vermutungen über
+Offsite- oder Backup-Ziele. Ein Host, der nicht in den Daten vorkommt, liegt
+außerhalb dieses Berichts und ist kein Befund.
+
+Schreibe den gesamten Bericht auf Deutsch.
 """
 
 
@@ -1141,8 +1156,15 @@ def generate_replication_report(lang_override=None, source_host=None):
 
     payload = condense_for_report(matrix)
     payload["source_host"] = source_host or ""
-    payload["hosts"] = matrix.get("hosts", [])
-    payload["hosts_without_data"] = matrix.get("hosts_without_data", [])
+    # ONLY the hosts this report is about: the source and whoever holds a copy
+    # of its guests. Handing over the full host list made the model write about
+    # unrelated machines -- "5 silent hosts", offsite targets, config leftovers
+    # -- none of which this report can say anything useful about, because no
+    # data was collected about them here.
+    payload["copy_hosts"] = sorted({
+        c["host"] for g in payload.get("guests", [])
+        for c in g.get("copies", []) if c.get("role") != "source"
+    })
     # Named, not silently dropped: a guest that exists in one place only is a
     # real risk, it just is not part of a replication overview.
     payload["guests_without_any_copy"] = matrix.get("without_copy_guests", [])
@@ -1168,6 +1190,10 @@ def generate_replication_report(lang_override=None, source_host=None):
     mismatches = sum(1 for g in payload.get("guests", []) if g.get("config_mismatch"))
     verdict = "crit" if no_copy else ("warn" if mismatches else "ok")
 
+    covered = ([source_host] if source_host else []) + payload["copy_hosts"]
+    if not covered:
+        covered = matrix.get("hosts", [])
+
     content, _ = _extract_and_strip_verdict_block(result.get("content", ""))
     report = {
         "id": str(uuid.uuid4())[:8],
@@ -1175,9 +1201,11 @@ def generate_replication_report(lang_override=None, source_host=None):
         "provider": provider,
         "model": model,
         "content": content,
-        "host_count": 1 if source_host else len(matrix.get("hosts", [])),
-        "host_names": [source_host] if source_host else matrix.get("hosts", []),
-        "host_addresses": [source_host] if source_host else matrix.get("hosts", []),
+        # The hosts this report actually covers -- source plus whoever holds a
+        # copy -- not every registered host, so the PDF header matches the body.
+        "host_count": len(covered),
+        "host_names": covered,
+        "host_addresses": covered,
         "source_host": source_host or "",
         "usage": result.get("usage", {}),
         "verdict": verdict,
