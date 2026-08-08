@@ -2482,8 +2482,7 @@ def api_inventory_matrix():
     # Scoped to one source host: showing both directions at once lists every
     # replicated guest twice, once per side.
     host = (request.args.get("host") or "").strip()
-    out = filter_matrix(matrix, source_host=host or None,
-                        only_when_replicating=request.args.get("all") != "1")
+    out = filter_matrix(matrix, source_host=host or None)
     out["source_hosts"] = available
 
     # Backups, for the selected source host only: they live where the guest

@@ -447,3 +447,69 @@ def test_every_reason_has_a_label_in_both_languages():
     for r in reasons:
         # Twice: once in the English block, once in the German one.
         assert len(re.findall(rf"^\s+bk_reason_{r}:", i18n, re.M)) == 2, r
+
+
+# --- overall protection: the two defences judged together -----------------
+
+def _guest(copies=0, backup=None, mismatch=""):
+    g = {"vmid": "100", "copy_count": copies, "config_mismatch": mismatch}
+    if backup is not None:
+        g["backup"] = {"state": backup}
+    return g
+
+
+def test_replicated_and_backed_up_is_ok():
+    assert b.protection_state(_guest(copies=1, backup=b.STATE_OK)) == "ok"
+
+
+def test_backed_up_without_a_replica_is_ok():
+    # The bug this function exists to fix: a host that backs up every guest and
+    # replicates none was reported critical, and its overview page came up
+    # blank. A working backup is a second line of defence.
+    assert b.protection_state(_guest(copies=0, backup=b.STATE_OK)) == "ok"
+    assert b.protection_state(_guest(copies=0, backup=b.STATE_WARN)) == "ok"
+
+
+def test_replicated_without_a_backup_is_only_half_protected():
+    # Survives a dead disk, not ransomware or a wrong command -- worth a
+    # warning, not silence.
+    assert b.protection_state(_guest(copies=1, backup=b.STATE_BAD)) == "warn"
+
+
+def test_neither_defence_is_critical():
+    assert b.protection_state(_guest(copies=0, backup=b.STATE_BAD)) == "crit"
+
+
+def test_a_config_mismatch_outranks_everything():
+    assert b.protection_state(_guest(copies=2, backup=b.STATE_OK, mismatch="x")) == "warn"
+
+
+def test_unexamined_backups_fall_back_to_the_copy_only_judgement():
+    # A host without backup storage must read exactly as it did before, rather
+    # than every guest turning critical because no backup was found.
+    assert b.protection_state(_guest(copies=1, backup=None)) == "ok"
+    assert b.protection_state(_guest(copies=0, backup=None)) == "crit"
+
+
+def test_an_unreadable_backup_does_not_count_as_protection():
+    # "Could not ask" is not "is protected" -- an unreplicated guest whose PBS
+    # is down must not be reported as covered.
+    assert b.protection_state(_guest(copies=0, backup=b.STATE_UNKNOWN)) == "crit"
+    assert b.protection_state(_guest(copies=1, backup=b.STATE_UNKNOWN)) == "ok"
+
+
+def test_overall_verdict_is_the_worst_guest():
+    assert b.overall_verdict([]) == "ok"
+    assert b.overall_verdict([_guest(copies=1, backup=b.STATE_OK)]) == "ok"
+    assert b.overall_verdict([_guest(copies=1, backup=b.STATE_OK),
+                              _guest(copies=1, backup=b.STATE_BAD)]) == "warn"
+    assert b.overall_verdict([_guest(copies=1, backup=b.STATE_BAD),
+                              _guest(copies=0, backup=b.STATE_BAD)]) == "crit"
+
+
+def test_a_fully_backed_up_host_that_replicates_nothing_reports_ok():
+    # End to end on the reported case: five guests, all backed up, none
+    # replicated. The old copy-only verdict called this critical.
+    guests = [dict(_guest(copies=0, backup=b.STATE_OK), vmid=str(i))
+              for i in range(200, 205)]
+    assert b.overall_verdict(guests) == "ok"

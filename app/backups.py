@@ -502,3 +502,49 @@ def merge_backups(matrix: Dict[str, Any], states: Dict[str, Dict[str, Any]],
     matrix["backup_at_risk_count"] = without
     matrix["backup_states_present"] = bool(states)
     return matrix
+
+
+# ---------------------------------------------------------------------------
+# Overall protection: the two defences judged together
+# ---------------------------------------------------------------------------
+
+def protection_state(guest: Dict[str, Any]) -> str:
+    """One guest's overall protection -- ``ok`` / ``warn`` / ``crit``.
+
+    Replication and backup are independent lines of defence and the verdict is
+    about how many of them actually hold. A guest with a replica but no backup
+    survives a dead disk and nothing else; a guest with a backup but no replica
+    is genuinely covered, just not by replication. Judging on copies alone
+    reported the first as healthy and the second as at-risk -- both backwards.
+
+    A guest whose backups were never examined (no ``backup`` field, or state
+    ``unknown``) falls back to the copy-only judgement, so a host without
+    backup storage reads exactly as it did before.
+
+    Mirrors the Zustand column in the backup overview; keep the two in step.
+    """
+    has_copy = (guest.get("copy_count") or 0) > 0
+    bk = guest.get("backup") or {}
+    state = bk.get("state")
+    known = bool(bk) and state != STATE_UNKNOWN
+
+    if guest.get("config_mismatch"):
+        return "warn"
+    if not has_copy:
+        # A working backup IS a second line of defence, even without a replica.
+        return "ok" if (known and state != STATE_BAD) else "crit"
+    if known and state == STATE_BAD:
+        return "warn"
+    return "ok"
+
+
+def overall_verdict(guests: List[Dict[str, Any]]) -> str:
+    """Worst per-guest protection state across a host: ``ok``/``warn``/``crit``."""
+    worst = "ok"
+    for g in guests or []:
+        s = protection_state(g)
+        if s == "crit":
+            return "crit"
+        if s == "warn":
+            worst = "warn"
+    return worst
