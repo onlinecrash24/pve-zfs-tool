@@ -192,6 +192,7 @@
 - **SSH Key Auto-Generation** -- Ed25519 key pair generated on first start
 - **Public Key Display** -- Shown on the home page with copy button (works on HTTP and HTTPS)
 - **Multiple Hosts** -- Add and manage multiple Proxmox VE nodes
+- **Product Detection** -- Every host is probed while it is being added and labelled **PVE**, **PBS** or **PVE+PBS** (with version) in a "Product" column. Markers are the `pveversion` binary / `/etc/pve` / the `pve-manager` package and, for the backup server, `proxmox-backup-manager` / `/etc/proxmox-backup` / the `proxmox-backup-server` package -- deliberately **not** `proxmox-backup-client`, which is present on ordinary PVE nodes and would mislabel nearly all of them. A host that is neither is **refused**: the tool manages Proxmox hosts, and a file server in the list would only produce failing commands and misleading dashboards. A host that could not be *asked* (SSH key not installed yet, machine powered off) is a different case and can be added anyway on confirmation -- it is identified on the next successful connection. First step towards the PBS integration
 - **Connection Test** -- Verify SSH connectivity per host
 - **Wake-on-LAN** -- Wake an offline host from the Hosts view: the management NIC's MAC is captured automatically while the host is online; magic packets are sent from the container **and** relayed via every other reachable host (a bridged Docker network usually can't broadcast into the LAN, a sibling PVE node can)
 - **Expected Offline** -- Mark a host as expected-offline (e.g. a backup server that is powered off most of the time and woken via WOL): no offline notifications for its up/down cycles, a neutral gray "Expected Offline" badge instead of red, and the HOSTS dashboard tile stays green. While awake it is monitored normally
@@ -277,7 +278,7 @@ Open the web UI at `http://DOCKER-HOST-IP:5000`
    ```bash
    echo "ssh-ed25519 AAAA... zfs-tool@docker" >> /root/.ssh/authorized_keys
    ```
-5. **Add hosts in the UI** -- Go to "Hosts", add name, IP, port, and user.
+5. **Add hosts in the UI** -- Go to "Hosts", add name, IP, port, and user. The host is probed on add and must be a Proxmox VE or Proxmox Backup Server; step 4 has to be done first, otherwise the check cannot run and you are asked whether to add the host unverified.
 6. **Test connection** -- Click "Test" to verify SSH connectivity.
 7. **Manage ZFS** -- Select a host from the dropdown and explore pools, snapshots, etc.
 

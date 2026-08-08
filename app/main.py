@@ -359,17 +359,76 @@ def api_hosts():
 
 @app.route("/api/hosts", methods=["POST"])
 def api_add_host():
-    data = request.json
-    ok, msg = add_host(
-        data.get("name", ""),
-        data.get("address", ""),
-        data.get("port", 22),
-        data.get("user", "root"),
-    )
-    audit_log("host.add", target=data.get("address", ""), success=ok,
-              host=data.get("address", ""),
-              details={"name": data.get("name", ""), "user": data.get("user", "root")})
-    return jsonify({"success": ok, "message": msg})
+    """Register a host -- but only a Proxmox one.
+
+    The product is probed before the host is stored: PVE, PBS or both are
+    accepted, anything else is refused. The two ways this can go wrong are kept
+    apart on purpose, because they call for opposite reactions:
+
+    ``not_proxmox``  the host answered and has neither product -- a real answer,
+                     and no ``force`` overrides it.
+    ``unverified``   the host could not be asked at all (SSH key not installed
+                     yet, machine powered off -- the tool explicitly supports
+                     hosts that are offline most of the time). That is not proof
+                     of anything, so the client may repeat the request with
+                     ``force: true`` and the host is stored with role
+                     ``unknown``, to be identified on the next successful probe.
+    """
+    from app import host_identity as hid
+    from app.ssh_manager import discard_unregistered
+
+    data = request.json or {}
+    name = data.get("name", "")
+    addr = data.get("address", "")
+    port = data.get("port", 22)
+    user = data.get("user", "root")
+    force = bool(data.get("force"))
+
+    # Probed uncached: a host the user just fixed (installed the key, installed
+    # PBS) must not be judged on a 10-minute-old answer.
+    identity = hid.detect({"name": name, "address": addr, "port": port, "user": user},
+                          cache_ttl=0)
+    allowed, code = hid.admission(identity, force=force)
+    if not allowed:
+        # Probing opened an SSH connection and stored the host key -- undo that
+        # for a host we are not registering.
+        discard_unregistered(addr)
+        audit_log("host.add", target=addr, success=False, host=addr,
+                  details={"name": name, "user": user, "rejected": code,
+                           "error": identity.get("error")})
+        return jsonify({
+            "success": False,
+            "code": code,
+            "message": ("Host is neither a Proxmox VE nor a Proxmox Backup Server"
+                        if code == "not_proxmox"
+                        else f"Could not determine the product: {identity.get('error')}"),
+            "identity": identity,
+        }), 400
+
+    ok, msg = add_host(name, addr, port, user,
+                       identity=hid.persisted_fields(identity))
+    audit_log("host.add", target=addr, success=ok, host=addr,
+              details={"name": name, "user": user, "role": identity.get("role"),
+                       "forced": force and not identity.get("reachable")})
+    return jsonify({"success": ok, "message": msg, "identity": identity})
+
+
+@app.route("/api/hosts/identify", methods=["POST"])
+@login_required
+def api_identify_host():
+    """(Re-)detect PVE/PBS on a registered host and persist the result."""
+    from app import host_identity as hid
+    from app.ssh_manager import update_host_identity
+
+    data = request.get_json(silent=True) or {}
+    addr = (data.get("address") or "").strip()
+    host = _find_host(addr)
+    if not host:
+        return jsonify({"success": False, "error": "Host not found"}), 404
+    identity = hid.detect(host, cache_ttl=0 if data.get("refresh") else 600)
+    if identity.get("reachable"):
+        update_host_identity(addr, hid.persisted_fields(identity))
+    return jsonify({"success": True, "identity": identity})
 
 
 @app.route("/api/hosts", methods=["DELETE"])
