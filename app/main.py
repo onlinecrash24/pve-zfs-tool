@@ -1025,6 +1025,32 @@ def api_pve_guest_replication():
     return jsonify({"states": states, "source_status": src_status})
 
 
+@app.route("/api/pve/guest-backups")
+@login_required
+def api_pve_guest_backups():
+    """Per-VMID backup state (green/yellow/red/unknown) for the VMs & CTs page.
+
+    Read through this PVE node, which already holds the PBS credentials, so no
+    connection to the backup server is made from here.
+
+    green   a recent backup exists, verified where the storage verifies, and a
+            backup job covers the guest
+    yellow  too old, verification still pending, or no job covers it
+    red     no backup at all, older than the critical threshold, or the newest
+            one failed verification
+    unknown the storages could not be listed -- NOT the same as "no backup"
+    """
+    from app.backups import host_backup_states
+    from app.zfs_commands import get_pve_vms, get_pve_cts
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    vmids = [str(g.get("vmid")) for g in
+             (list(get_pve_vms(host) or []) + list(get_pve_cts(host) or []))
+             if g.get("vmid")]
+    return jsonify(host_backup_states(host, vmids=vmids))
+
+
 @app.route("/api/pve/guest-action", methods=["POST"])
 @login_required
 def api_pve_guest_action():
@@ -2401,6 +2427,30 @@ def api_inventory_matrix():
     out = filter_matrix(matrix, source_host=host or None,
                         only_when_replicating=request.args.get("all") != "1")
     out["source_hosts"] = available
+
+    # Backups, for the selected source host only: they live where the guest
+    # runs, and reading them means one network call per backup storage -- doing
+    # that for every registered host would multiply a cost the user already
+    # noticed on this page.
+    if host:
+        entry = _find_host(host)
+        if entry:
+            try:
+                from app.backups import host_backup_states, merge_backups
+                vmids = [str(g.get("vmid")) for g in (out.get("guests") or [])
+                         if g.get("source_host") == host and g.get("vmid")]
+                res = host_backup_states(entry, vmids=vmids)
+                merge_backups(out, res["states"], source_host=host)
+                out["backup_unreadable"] = res["unreadable"]
+                out["backup_readable"] = res["readable"]
+                out["backup_error"] = res["error"]
+                out["backup_warn_hours"] = res["warn_hours"]
+                out["backup_crit_hours"] = res["crit_hours"]
+            except Exception as e:
+                # The replication picture is still worth showing without it.
+                log.warning("inventory: backup collection failed for %s: %s", host, e)
+                out["backup_error"] = str(e)[:300]
+                out["backup_readable"] = False
     return jsonify(out)
 
 

@@ -1018,7 +1018,34 @@ async function addHost() {
     if (r.success) {
         loadHostSelector();
         viewHosts();
+        const role = (r.identity && r.identity.role) || "";
+        if (role.split("+").includes("pbs")) _showPbsAccessNote(addr);
     }
+}
+
+// Shown once, right after a PBS is added -- the moment the user is actually
+// thinking about how this tool reaches their backup server.
+//
+// A backup server is supposed to survive the compromise of the machines it
+// backs up. Root SSH from this tool inverts that: whoever holds the tool's key
+// could delete every backup. The datastore side needs no shell at all, so it
+// will move to a read-only API token; SSH stays only for what a token cannot
+// do -- ZFS pools, SMART, ARC, host-config backup of the PBS itself.
+function _showPbsAccessNote(addr) {
+    const body = h("div", { style: "font-size:13px;line-height:1.6" });
+    body.appendChild(h("p", { style: "margin-top:0" }, t("pbs_note_intro", addr)));
+    body.appendChild(h("p", {}, t("pbs_note_why")));
+    body.appendChild(h("p", { style: "margin-bottom:4px" }, t("pbs_note_cmds")));
+    const cmds = "proxmox-backup-manager user generate-token monitor@pbs zfstool\n" +
+        "proxmox-backup-manager acl update / Audit --auth-id 'monitor@pbs!zfstool'\n" +
+        "proxmox-backup-manager acl update /datastore DatastoreAudit --auth-id 'monitor@pbs!zfstool'";
+    body.appendChild(h("pre", {
+        style: "background:var(--bg-secondary,rgba(127,127,127,0.1));padding:10px;" +
+               "border-radius:6px;font-size:11px;overflow-x:auto;white-space:pre",
+    }, cmds));
+    body.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-bottom:0" },
+        t("pbs_note_ssh_still")));
+    openModal(t("pbs_note_title"), body.outerHTML, null);
 }
 
 async function testHost(addr) {
@@ -2500,15 +2527,64 @@ function _replBadge(entry) {
     return h("span", { className: "badge " + m.cls, title, style: "font-weight:700" }, m.icon);
 }
 
+// Backup status pill, twin of _replBadge. Replication and backup protect
+// against different things -- a dead disk versus ransomware or a wrong rm -- so
+// they get their own column instead of one merged verdict.
+// `unknown` (grey) means the storages could not be listed. That is deliberately
+// NOT red: a PBS that is down would otherwise put a fault on every healthy
+// guest, and an alert that cries wolf gets ignored.
+function _backupBadge(entry) {
+    if (!entry) return h("span", { className: "muted", title: t("bk_state_unknown"), style: "font-size:13px" }, "–");
+    const map = {
+        green: { cls: "badge-online", icon: "✓" },
+        yellow: { cls: "badge-warning", icon: "⚠" },
+        red: { cls: "badge-danger", icon: "✗" },
+        unknown: { cls: "badge-stopped", icon: "?" },
+    };
+    const m = map[entry.state] || map.unknown;
+    const parts = [t("bk_reason_" + (entry.reason || "unknown"))];
+    if (entry.age_seconds != null) parts.push(t("bk_age", _formatAge(entry.age_seconds)));
+    if (entry.count > 1) parts.push(t("bk_count", String(entry.count)));
+    if ((entry.storages || []).length) parts.push(entry.storages.join(", "));
+    return h("span", {
+        className: "badge " + m.cls,
+        title: parts.join(" · "),
+        style: "font-weight:700",
+    }, m.icon);
+}
+
+// Names the storages that could not be listed, with their error. Returns null
+// when everything was readable, so callers can just skip it.
+function _backupUnreadableNote(bk) {
+    if (!bk) return null;
+    const bad = bk.unreadable || [];
+    if (!bad.length && bk.readable !== false) return null;
+    const lines = bad.map(u => `${u.storage}: ${u.error}`);
+    if (!lines.length && bk.error) lines.push(bk.error);
+    return h("div", {
+        className: "card-body",
+        style: "padding-top:10px;padding-bottom:0;font-size:12px;color:var(--text-secondary)",
+    }, [
+        h("span", { className: "badge badge-stopped", style: "margin-right:6px" }, "?"),
+        h("span", {}, t("bk_unreadable_note")),
+        lines.length
+            ? h("div", { style: "font-family:monospace;font-size:11px;margin-top:4px" },
+                lines.join(" · "))
+            : null,
+    ]);
+}
+
 async function viewGuests() {
     if (!requireHost()) return;
     setContent(loading());
-    const [guests, pools, repl] = await Promise.all([
+    const [guests, pools, repl, bk] = await Promise.all([
         API.get(`/api/pve/guests?host=${currentHost}`),
         API.get(`/api/pools?host=${currentHost}`),
         API.get(`/api/pve/guest-replication?host=${encodeURIComponent(currentHost)}`).catch(() => ({ states: {} })),
+        API.get(`/api/pve/guest-backups?host=${encodeURIComponent(currentHost)}`).catch(() => ({ states: {} })),
     ]);
     const replStates = (repl && repl.states) || {};
+    const bkStates = (bk && bk.states) || {};
 
     const all = [...(guests.vms || []), ...(guests.cts || [])];
     const container = h("div");
@@ -2527,13 +2603,18 @@ async function viewGuests() {
     // Guest table
     const tableCard = h("div", { className: "card" });
     tableCard.appendChild(h("div", { className: "card-header" }, t("all_guests")));
+    // Why the backup column is grey, if it is. Without this the "?" pills look
+    // like a bug in the tool rather than a storage that did not answer.
+    const bkNote = _backupUnreadableNote(bk);
+    if (bkNote) tableCard.appendChild(bkNote);
     if (all.length === 0) {
         tableCard.appendChild(h("div", { className: "empty-state" }, t("no_guests")));
     } else {
         const table = h("table");
         table.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("vmid")), h("th", {}, t("name")), h("th", {}, t("type")),
-            h("th", {}, t("status")), h("th", {}, t("repl_col")), h("th", {}, t("actions")),
+            h("th", {}, t("status")), h("th", {}, t("repl_col")),
+            h("th", {}, t("backup_col")), h("th", {}, t("actions")),
         ])));
         const tbody = h("tbody");
         for (const g of all) {
@@ -2543,6 +2624,7 @@ async function viewGuests() {
             tr.appendChild(h("td", {}, g.type === "qemu" ? "VM" : "LXC"));
             const sTd = h("td"); sTd.appendChild(statusBadge(g.status)); tr.appendChild(sTd);
             const rTd = h("td"); rTd.appendChild(_replBadge(replStates[String(g.vmid)])); tr.appendChild(rTd);
+            const bTd = h("td"); bTd.appendChild(_backupBadge(bkStates[String(g.vmid)])); tr.appendChild(bTd);
             const actTd = h("td");
             const bg = h("div", { className: "btn-group" });
             // Lifecycle: status-dependent (start when stopped; graceful
@@ -5711,6 +5793,10 @@ async function viewInventory() {
     tiles.appendChild(tile(t("inv_no_copy"), noCopy, noCopy === 0));
     tiles.appendChild(tile(t("inv_mismatch"), mismatch, mismatch === 0));
     tiles.appendChild(tile(t("inv_snapshots"), m.snapshot_count || 0));
+    if (m.backup_states_present) {
+        const noBackup = m.backup_at_risk_count || 0;
+        tiles.appendChild(tile(t("inv_no_backup"), noBackup, noBackup === 0));
+    }
     container.appendChild(tiles);
 
     // AI report
@@ -5745,6 +5831,11 @@ async function viewInventory() {
     // Matrix
     const card = h("div", { className: "card" });
     card.appendChild(h("div", { className: "card-header" }, t("inv_matrix")));
+    const invBkNote = _backupUnreadableNote({
+        unreadable: m.backup_unreadable, readable: m.backup_readable,
+        error: m.backup_error,
+    });
+    if (invBkNote) card.appendChild(invBkNote);
     if (!guests.length) {
         card.appendChild(h("div", { className: "empty-state" },
             t("inv_empty").replace("{h}", currentHost)));
@@ -5754,7 +5845,8 @@ async function viewInventory() {
     const table = h("table");
     table.appendChild(h("thead", {}, h("tr", {}, [
         h("th", {}, t("inv_guest")), h("th", {}, t("inv_source")),
-        h("th", {}, t("inv_copies")), h("th", {}, t("inv_state")),
+        h("th", {}, t("inv_copies")), h("th", {}, t("backup_col")),
+        h("th", {}, t("inv_state")),
     ])));
     const tbody = h("tbody");
     for (const g of guests) {
@@ -5790,6 +5882,23 @@ async function viewInventory() {
                 g.no_snapshots ? t("inv_none_at_all") : t("inv_none")));
         }
         tr.appendChild(copyTd);
+
+        // Backup: the other half of the protection picture. A guest with three
+        // copies and no backup survives a dead disk but not ransomware, and
+        // that is invisible until the two sit side by side.
+        const bkTd = h("td", { style: "font-size:12px" });
+        if (g.backup) {
+            bkTd.appendChild(_backupBadge(g.backup));
+            const detail = g.backup.age_seconds != null
+                ? t("bk_age", _formatAge(g.backup.age_seconds))
+                : t("bk_reason_" + (g.backup.reason || "unknown"));
+            bkTd.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-top:2px" },
+                detail + ((g.backup.storages || []).length
+                    ? " · " + g.backup.storages.join(", ") : "")));
+        } else {
+            bkTd.appendChild(h("span", { className: "muted", title: t("bk_state_unknown") }, "–"));
+        }
+        tr.appendChild(bkTd);
 
         const stTd = h("td", { style: "font-size:12px" });
         if (g.config_mismatch) {
@@ -6991,17 +7100,28 @@ async function viewNotifications() {
     const thBody = h("div", { className: "card-body" });
     thBody.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" },
         t("thresholds_intro")));
-    const numInp = (id, val) => {
+    const numInp = (id, val, max = "100") => {
         const i = h("input", { type: "number", className: "form-input", id,
-                               min: "1", max: "100", style: "max-width:120px" });
+                               min: "1", max, style: "max-width:120px" });
         i.value = String(val);
         return i;
     };
+    const thField = (label, input) => h("div", {}, [
+        h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
+            label),
+        input,
+    ]);
     thBody.appendChild(h("div", { style: "display:flex;gap:16px;flex-wrap:wrap" }, [
         h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
             t("threshold_warn")), numInp("cap-warn", th.capacity_warn_pct ?? 70)]),
         h("div", {}, [h("label", { style: "display:block;font-size:12px;color:var(--text-secondary);margin-bottom:3px" },
             t("threshold_crit")), numInp("cap-crit", th.capacity_crit_pct ?? 80)]),
+    ]));
+    thBody.appendChild(h("p", { className: "muted", style: "font-size:12px;margin:14px 0 6px" },
+        t("threshold_backup_intro")));
+    thBody.appendChild(h("div", { style: "display:flex;gap:16px;flex-wrap:wrap" }, [
+        thField(t("threshold_bk_warn"), numInp("bk-warn", th.backup_warn_hours ?? 36, "8760")),
+        thField(t("threshold_bk_crit"), numInp("bk-crit", th.backup_crit_hours ?? 168, "8760")),
     ]));
     thCard.appendChild(thBody);
     container.appendChild(thCard);
@@ -7096,6 +7216,8 @@ async function viewNotifications() {
             thresholds: {
                 capacity_warn_pct: parseInt(document.getElementById("cap-warn").value) || 70,
                 capacity_crit_pct: parseInt(document.getElementById("cap-crit").value) || 80,
+                backup_warn_hours: parseInt(document.getElementById("bk-warn").value) || 36,
+                backup_crit_hours: parseInt(document.getElementById("bk-crit").value) || 168,
             },
         };
         const r = await API.post("/api/notifications/config", newConfig);
