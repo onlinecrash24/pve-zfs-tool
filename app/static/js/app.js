@@ -905,7 +905,7 @@ async function renderAllHostBackups(mount) {
         const qs = "?host=" + encodeURIComponent(it.host_address);
         const dlBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("hb_download"));
         dlBtn.onclick = () => window.open("/api/host-backup/download" + qs + "&file=" + encodeURIComponent(it.filename), "_blank");
-        const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete"));
+        const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete_btn"));
         delBtn.onclick = async () => {
             if (!confirm(t("hb_delete_confirm"))) return;
             const dr = await API.post("/api/host-backup/delete" + qs, { filename: it.filename });
@@ -1140,7 +1140,7 @@ function openHostBackupModal(host) {
             items.forEach(it => {
                 const dlBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("hb_download"));
                 dlBtn.onclick = () => window.open("/api/host-backup/download" + qs + "&file=" + encodeURIComponent(it.filename), "_blank");
-                const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete"));
+                const delBtn = h("button", { className: "btn btn-sm btn-danger" }, t("delete_btn"));
                 delBtn.onclick = async () => {
                     if (!confirm(t("hb_delete_confirm"))) return;
                     const dr = await API.post("/api/host-backup/delete" + qs, { filename: it.filename });
@@ -2415,7 +2415,7 @@ async function viewSnapshotCheck() {
             body.appendChild(h("div", { style: "margin-top:12px;font-weight:600;color:var(--warning)" },
                 `⚠️ ${t("stale_snapshots") || "Stale Snapshots"} (${info.stale_datasets.length})`));
             const tbl = _buildTable(
-                [t("dataset") || "Dataset", t("age") || "Age", t("threshold") || "Threshold"],
+                [t("dataset_label") || "Dataset", t("age") || "Age", t("threshold") || "Threshold"],
                 info.stale_datasets.filter(s => !s.note).map(s => [s.dataset, s.age, s.threshold])
             );
             body.appendChild(tbl);
@@ -2426,7 +2426,7 @@ async function viewSnapshotCheck() {
             body.appendChild(h("div", { style: "margin-top:12px;font-weight:600;color:var(--danger)" },
                 `❌ ${t("gaps_found") || "Gaps Found"} (${info.gaps.length})`));
             const tbl = _buildTable(
-                [t("dataset") || "Dataset", t("gap") || "Gap", t("threshold") || "Threshold"],
+                [t("dataset_label") || "Dataset", t("gap") || "Gap", t("threshold") || "Threshold"],
                 info.gaps.filter(g => !g.note).map(g => [g.dataset, `${g.gap_hours}h`, `${g.threshold_hours}h`])
             );
             body.appendChild(tbl);
@@ -2437,7 +2437,7 @@ async function viewSnapshotCheck() {
             body.appendChild(h("div", { style: "margin-top:12px;font-weight:600;color:var(--text-secondary)" },
                 `ℹ️ ${t("count_mismatch") || "Count Mismatch"} (${info.count_mismatches.length})`));
             const tbl = _buildTable(
-                [t("dataset") || "Dataset", t("actual") || "Actual", t("configured") || "Configured"],
+                [t("dataset_label") || "Dataset", t("actual") || "Actual", t("configured") || "Configured"],
                 info.count_mismatches.filter(m => !m.note).map(m => [m.dataset, `${m.actual}`, `${m.configured}`])
             );
             body.appendChild(tbl);
@@ -2482,7 +2482,7 @@ async function viewSnapshotCheck() {
             `📋 ${t("manual_snapshots") || "Manual Snapshots"} (${manual.total_count} in ${manual.dataset_count} Datasets)`));
         const msBody = h("div", { className: "card-body" });
         const tbl = _buildTable(
-            [t("dataset") || "Dataset", t("name") || "Name", t("age") || "Age"],
+            [t("dataset_label") || "Dataset", t("name") || "Name", t("age") || "Age"],
             (manual.examples || []).map(s => [s.dataset, s.name, s.age])
         );
         msBody.appendChild(tbl);
