@@ -747,7 +747,7 @@ async function viewHosts() {
         const table = h("table");
         table.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("name")), h("th", {}, t("address")), h("th", {}, t("port")),
-            h("th", {}, t("user")), h("th", {}, t("hi_product")),
+            h("th", {}, t("user")), h("th", {}, "PVE"), h("th", {}, "PBS"),
             h("th", {}, t("status")), h("th", {}, t("actions")),
         ])));
         const tbody = h("tbody");
@@ -757,11 +757,13 @@ async function viewHosts() {
             tr.appendChild(h("td", {}, host.address));
             tr.appendChild(h("td", {}, String(host.port)));
             tr.appendChild(h("td", {}, host.user));
-            // Product cell: the stored role renders instantly, the async probe
-            // below refreshes it (and the version) without blocking the table.
-            const productTd = h("td", { id: `product-${host.address}` });
-            productTd.appendChild(_productBadge(host));
-            tr.appendChild(productTd);
+            // Product cells: the stored role renders instantly, the async probe
+            // below refreshes them (and the versions) without blocking the table.
+            for (const kind of ["pve", "pbs"]) {
+                const td = h("td", { id: `prod-${kind}-${host.address}` });
+                td.appendChild(_productBadge(kind, host));
+                tr.appendChild(td);
+            }
             const statusTd = h("td");
             statusTd.appendChild(h("span", { className: "badge badge-stopped", id: `status-${host.address}`,
                 "data-standby": host.standby ? "1" : "" }, t("unknown")));
@@ -828,23 +830,22 @@ async function viewHosts() {
     }
 }
 
-// Product (PVE / PBS / PVE+PBS) badge for a host row. Roles are stored in
+// One cell per product, so a host running both shows BOTH versions -- the
+// single combined badge could only ever carry one of them. Roles are stored in
 // hosts.json at add time, so this renders without waiting for SSH; a host added
-// before the detection existed has no role and shows as unknown until probed.
-function _productBadge(host) {
+// before the detection existed (or forced in while unreachable) has no role and
+// shows a dash in both columns until a probe succeeds.
+function _productBadge(kind, host) {
     const role = host.role || "unknown";
-    const label = {
-        "pve": "PVE", "pbs": "PBS", "pve+pbs": "PVE+PBS",
-    }[role] || t("unknown");
-    const cls = role === "unknown" ? "badge badge-stopped" : "badge badge-online";
-    const version = role === "pbs" ? host.pbs_version : host.pve_version;
-    const span = h("span", { className: cls }, label);
-    if (role === "pve+pbs" && host.pve_version && host.pbs_version) {
-        span.title = `PVE ${host.pve_version} / PBS ${host.pbs_version}`;
-    } else if (version) {
-        span.title = version;
+    const present = role.split("+").includes(kind);
+    const version = kind === "pbs" ? host.pbs_version : host.pve_version;
+    if (!present) {
+        const dash = h("span", { style: "color:var(--text-secondary)" }, "—");
+        if (role === "unknown") dash.title = t("hi_not_identified");
+        return dash;
     }
-    const wrap = h("span", {}, [span]);
+    const cls = kind === "pbs" ? "badge badge-warning" : "badge badge-online";
+    const wrap = h("span", {}, [h("span", { className: cls }, kind.toUpperCase())]);
     if (version) {
         wrap.appendChild(h("span", {
             style: "margin-left:6px;font-size:11px;color:var(--text-secondary)",
@@ -854,20 +855,26 @@ function _productBadge(host) {
 }
 
 async function _probeHostProduct(addr) {
-    const cell = document.getElementById(`product-${addr}`);
-    if (!cell) return;
+    const cells = {
+        pve: document.getElementById(`prod-pve-${addr}`),
+        pbs: document.getElementById(`prod-pbs-${addr}`),
+    };
+    if (!cells.pve && !cells.pbs) return;
     let identity;
     try {
         const r = await API.post("/api/hosts/identify", { address: addr });
         identity = r && r.identity;
     } catch (e) { return; }
     if (!identity || !identity.reachable) return;   // keep the stored value
-    cell.innerHTML = "";
-    cell.appendChild(_productBadge({
-        role: identity.role,
-        pve_version: identity.pve_version,
-        pbs_version: identity.pbs_version,
-    }));
+    for (const kind of ["pve", "pbs"]) {
+        if (!cells[kind]) continue;
+        cells[kind].innerHTML = "";
+        cells[kind].appendChild(_productBadge(kind, {
+            role: identity.role,
+            pve_version: identity.pve_version,
+            pbs_version: identity.pbs_version,
+        }));
+    }
 }
 
 // Consolidated table of every stored host-config backup across all hosts.
