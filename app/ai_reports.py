@@ -1052,7 +1052,8 @@ proves the copy descends from that source.
 Write in this structure:
 
 ## 1. Overview
-How many guests, how many have no second copy at all, how many are behind.
+How many guests, how many have no second copy at all, how many are behind, and
+how many have no usable backup.
 
 ## 2. Per host
 For each source host, list its guests as: VMID, name, type, then one line per
@@ -1060,8 +1061,10 @@ copy -- which host, how many snapshots, how far behind, how many snapshots of
 the source it is missing. Say plainly which copy is the live one.
 
 ## 3. Findings
-Guests without any copy (a single failure destroys them), copies that stopped
-advancing, and any config_mismatch entry -- a host configured as a replication
+Guests with neither a copy nor a backup first -- they have no second line of
+defence of any kind. Then guests without any copy (a single failure destroys
+them), guests whose backup is missing, stale or failed verification, copies that
+stopped advancing, and any config_mismatch entry -- a host configured as a replication
 target that holds the NEWEST snapshots means replication reversed or stopped,
 and the "source" you would restore from may not be the one you think.
 
@@ -1072,11 +1075,22 @@ Rules: lag_seconds is the age difference to the source, not an error by itself -
 a replica running every 15 minutes is normally a few minutes behind. Judge it
 against that cadence. Do not invent numbers; use only what the data contains.
 
+Backups: a guest may carry a `backup` field with state (green/yellow/red/
+unknown), reason, age, count and the storages holding it. Replication and backup
+protect against different things: a second ZFS copy survives a dead disk, a
+backup survives ransomware, a deleted pool and a wrong command -- replication
+faithfully copies all three to every replica. A guest with three copies and no
+backup is therefore not safe, and that combination is worth naming plainly.
+state "unknown" means the backup storages could not be listed: say that, and do
+not report it as a missing backup. A guest with NO `backup` field was not
+examined for backups at all -- write nothing about its backup situation.
+
 Scope: this report covers ONE source host and the hosts holding copies of its
 guests -- source_host and copy_hosts. Other machines in the environment were not
 examined here, so write nothing about them: no counting of hosts, no remarks
-about missing or silent hosts, no speculation about offsite or backup targets.
-A host that does not appear in the data is outside this report, not a finding.
+about missing or silent hosts, no speculation about offsite targets, and nothing
+about backup storages beyond what the backup fields actually contain. A host that
+does not appear in the data is outside this report, not a finding.
 """
 
 REPLICATION_PROMPT_DE = """Du dokumentierst die Sicherungslage einer
@@ -1088,7 +1102,8 @@ anderen Hosts benannt, zugeordnet über die ZFS-Snapshot-GUID -- eine GUID
 Schreibe in dieser Struktur:
 
 ## 1. Überblick
-Wie viele Gäste, wie viele ohne zweite Kopie, wie viele im Rückstand.
+Wie viele Gäste, wie viele ohne zweite Kopie, wie viele im Rückstand, und wie
+viele ohne brauchbares Backup.
 
 ## 2. Je Host
 Für jeden Quell-Host dessen Gäste: VMID, Name, Typ, danach je Kopie eine Zeile
@@ -1096,8 +1111,11 @@ Für jeden Quell-Host dessen Gäste: VMID, Name, Typ, danach je Kopie eine Zeile
 Quelle fehlen. Benenne klar, welche Kopie die aktive ist.
 
 ## 3. Befunde
-Gäste ohne jede Kopie (ein einzelner Ausfall vernichtet sie), Kopien die nicht
-mehr nachziehen, und jeder config_mismatch -- ein als Replikationsziel
+Zuerst Gäste, die weder eine Kopie noch ein Backup haben -- sie haben überhaupt
+keine zweite Verteidigungslinie. Dann Gäste ohne jede Kopie (ein einzelner
+Ausfall vernichtet sie), Gäste deren Backup fehlt, veraltet ist oder die
+Verifikation nicht bestanden hat, Kopien die nicht mehr nachziehen, und jeder
+config_mismatch -- ein als Replikationsziel
 konfigurierter Host, der die NEUESTEN Snapshots hält, bedeutet umgekehrte oder
 gestoppte Replikation, und die vermeintliche Quelle für einen Restore ist
 womöglich nicht die richtige.
@@ -1110,12 +1128,24 @@ Fehler -- ein Replikat mit 15-Minuten-Takt liegt normalerweise ein paar Minuten
 zurück. Bewerte den Rückstand an diesem Takt. Erfinde keine Zahlen, nutze nur
 was in den Daten steht.
 
+Backups: Ein Gast kann ein Feld `backup` tragen, mit Zustand (green/yellow/red/
+unknown), Grund, Alter, Anzahl und den Storages, die es halten. Replikation und
+Backup schützen gegen Verschiedenes: eine zweite ZFS-Kopie übersteht eine
+kaputte Platte, ein Backup übersteht Verschlüsselung, einen gelöschten Pool und
+einen falschen Befehl -- alle drei repliziert ZFS getreulich auf jedes Replikat.
+Ein Gast mit drei Kopien und ohne Backup ist deshalb nicht sicher, und diese
+Kombination gehört klar benannt. Zustand "unknown" bedeutet, dass die
+Backup-Storages nicht gelesen werden konnten: sage das, und melde es nicht als
+fehlendes Backup. Ein Gast OHNE `backup`-Feld wurde gar nicht auf Backups
+untersucht -- schreibe nichts über seine Backup-Lage.
+
 Umfang: Dieser Bericht behandelt EINEN Quell-Host und die Hosts, die Kopien
 seiner Gäste halten -- source_host und copy_hosts. Andere Maschinen der Umgebung
 wurden hier nicht untersucht, schreibe daher nichts über sie: kein Zählen von
 Hosts, keine Bemerkungen über fehlende oder stumme Hosts, keine Vermutungen über
-Offsite- oder Backup-Ziele. Ein Host, der nicht in den Daten vorkommt, liegt
-außerhalb dieses Berichts und ist kein Befund.
+Offsite-Ziele, und nichts über Backup-Storages, was nicht in den backup-Feldern
+steht. Ein Host, der nicht in den Daten vorkommt, liegt außerhalb dieses Berichts
+und ist kein Befund.
 
 Schreibe den gesamten Bericht auf Deutsch.
 """
@@ -1154,7 +1184,31 @@ def generate_replication_report(lang_override=None, source_host=None):
                           if source_host else
                           "No replicated guests found on any host")}
 
+    # Backup state, read through the source host's PVE storage layer. Only for a
+    # scoped report: backups live where the guest runs, so there is no single
+    # host to ask when the report covers everything. A failure here must not
+    # cost the replication report -- the guests simply carry no backup field,
+    # and the prompt is told to stay silent about what was not examined.
+    backup_unreadable = []
+    if source_host:
+        try:
+            from app.backups import host_backup_states, merge_backups
+            vmids = [str(g.get("vmid")) for g in matrix["guests"]
+                     if g.get("source_host") == source_host and g.get("vmid")]
+            host_entry = next((h for h in hosts
+                               if h.get("address") == source_host), None)
+            if host_entry:
+                res = host_backup_states(host_entry, vmids=vmids)
+                if res["readable"]:
+                    merge_backups(matrix, res["states"], source_host=source_host)
+                backup_unreadable = res["unreadable"]
+        except Exception as e:
+            log.warning("replication report: backup read failed for %s: %s",
+                        source_host, e)
+
     payload = condense_for_report(matrix)
+    if backup_unreadable:
+        payload["backup_storages_unreadable"] = backup_unreadable
     payload["source_host"] = source_host or ""
     # ONLY the hosts this report is about: the source and whoever holds a copy
     # of its guests. Handing over the full host list made the model write about

@@ -71,9 +71,14 @@ DEFAULT_CONFIG = {
     # before it is actually full -- fragmentation rises and the allocator
     # switches strategy -- and snapshots can eat the remaining space quickly,
     # so the default warns early rather than at the last moment.
+    # Pool fill levels, plus how old a guest's newest backup may get. A daily
+    # backup job that misses one run should warn; a whole week without a backup
+    # is a different kind of problem.
     "thresholds": {
         "capacity_warn_pct": 70,
         "capacity_crit_pct": 80,
+        "backup_warn_hours": 36,
+        "backup_crit_hours": 168,
     },
 }
 

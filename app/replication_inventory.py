@@ -389,11 +389,23 @@ def condense_for_report(matrix: Dict[str, Any], max_guests: int = 120) -> Dict[s
             "copy_count": g["copy_count"],
             "config_mismatch": g["config_mismatch"],
         })
+        # Backups only when they were actually read for this guest. An absent
+        # field has to stay absent so the report cannot mistake "not examined"
+        # for "not backed up".
+        bk = g.get("backup")
+        if bk:
+            out[-1]["backup"] = {
+                "state": bk.get("state"), "reason": bk.get("reason"),
+                "age_seconds": bk.get("age_seconds"), "count": bk.get("count"),
+                "storages": bk.get("storages") or [],
+            }
     return {
         "guests": out,
         "guest_count": len(guests),
         "truncated": len(guests) > max_guests,
         "guests_without_copy": sum(1 for g in guests if g["copy_count"] == 0),
+        "guests_without_backup": sum(
+            1 for g in guests if (g.get("backup") or {}).get("state") == "red"),
     }
 
 
