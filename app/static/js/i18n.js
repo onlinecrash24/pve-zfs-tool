@@ -495,8 +495,8 @@ const TRANSLATIONS = {
         key_selected: "Key selected \u2014 press Ctrl+C to copy",
 
         // Hosts
-        host_management: "Host Management",
-        host_subtitle: "Add and manage Proxmox VE hosts.",
+        host_management: "Proxmox Host Management",
+        host_subtitle: "Add and manage PVE and PBS hosts.",
         add_new_host: "Add New Host",
         address: "Address",
         port: "Port",
@@ -1720,8 +1720,8 @@ const TRANSLATIONS = {
         key_selected: "Key markiert \u2014 Strg+C zum Kopieren dr\u00fccken",
 
         // Hosts
-        host_management: "Host-Verwaltung",
-        host_subtitle: "Proxmox VE Hosts hinzuf\u00fcgen und verwalten.",
+        host_management: "Proxmox Host Verwaltung",
+        host_subtitle: "PVE und PBS Hosts hinzuf\u00fcgen und verwalten.",
         add_new_host: "Neuen Host hinzuf\u00fcgen",
         address: "Adresse",
         port: "Port",
