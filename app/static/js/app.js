@@ -5778,8 +5778,11 @@ async function viewInventory() {
     const noCopy = m.without_copy_count || 0;
     const mismatch = guests.filter(g => g.config_mismatch).length;
 
-    // Summary tiles
-    const tiles = h("div", { className: "grid grid-4", style: "gap:12px;margin-bottom:16px" });
+    // Summary tiles. One row -- backup sits right next to "no copy", the
+    // replication-gap tile it mirrors, so the two kinds of missing protection
+    // read together instead of backup trailing off on its own. Column count
+    // matches the actual tile count: with backup data absent that's 4, and a
+    // 5-column grid would leave a visible gap at the end of the row.
     const tile = (label, value, ok) => {
         const c = h("div", { className: "stat-card" });
         c.appendChild(h("div", { className: "stat-label" }, label));
@@ -5789,14 +5792,18 @@ async function viewInventory() {
         }, String(value)));
         return c;
     };
-    tiles.appendChild(tile(t("inv_guests"), m.replicated_count || 0));
-    tiles.appendChild(tile(t("inv_no_copy"), noCopy, noCopy === 0));
-    tiles.appendChild(tile(t("inv_mismatch"), mismatch, mismatch === 0));
-    tiles.appendChild(tile(t("inv_snapshots"), m.snapshot_count || 0));
+    const tileDefs = [
+        [t("inv_guests"), m.replicated_count || 0],
+        [t("inv_no_copy"), noCopy, noCopy === 0],
+    ];
     if (m.backup_states_present) {
         const noBackup = m.backup_at_risk_count || 0;
-        tiles.appendChild(tile(t("inv_no_backup"), noBackup, noBackup === 0));
+        tileDefs.push([t("inv_no_backup"), noBackup, noBackup === 0]);
     }
+    tileDefs.push([t("inv_mismatch"), mismatch, mismatch === 0]);
+    tileDefs.push([t("inv_snapshots"), m.snapshot_count || 0]);
+    const tiles = h("div", { className: `grid grid-${tileDefs.length}`, style: "gap:12px;margin-bottom:16px" });
+    for (const [label, value, ok] of tileDefs) tiles.appendChild(tile(label, value, ok));
     container.appendChild(tiles);
 
     // AI report
