@@ -5907,12 +5907,33 @@ async function viewInventory() {
         }
         tr.appendChild(bkTd);
 
+        // Overall state: replication and backup are two independent lines of
+        // defence, so the verdict combines both instead of judging on copies
+        // alone. Backup is only factored in where it was actually read
+        // (g.backup present with a known state) -- on a host where backups
+        // were never examined, every guest still falls back to the old
+        // copy-only judgement, so nothing changes for setups without backup
+        // storage configured.
+        const hasCopy = g.copy_count > 0;
+        const bkKnown = !!g.backup && g.backup.state !== "unknown";
+        const bkMissing = bkKnown && g.backup.state === "red";
+        const bkPresent = bkKnown && g.backup.state !== "red";
+
         const stTd = h("td", { style: "font-size:12px" });
         if (g.config_mismatch) {
             stTd.appendChild(h("span", { className: "badge badge-warning", title: g.config_mismatch }, "⚠"));
             stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" }, t("inv_mismatch_hint")));
-        } else if (g.copy_count === 0) {
+        } else if (!hasCopy && bkPresent) {
+            // No ZFS copy, but a real backup exists -- that IS a working
+            // second line of defence, just not a replication-shaped one.
+            stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
+        } else if (!hasCopy) {
             stTd.appendChild(h("span", { className: "badge badge-danger" }, t("inv_at_risk")));
+        } else if (hasCopy && bkMissing) {
+            // Replicated, but the backup read came back "no backup" -- only
+            // one of the two protections is in place.
+            stTd.appendChild(h("span", { className: "badge badge-warning" }, t("inv_no_backup_warn")));
+            stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" }, t("inv_no_backup_hint")));
         } else {
             stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
         }
