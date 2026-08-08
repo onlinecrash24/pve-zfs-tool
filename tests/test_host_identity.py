@@ -42,7 +42,10 @@ def test_pbs_server():
     assert i["pbs_version"] == "3.2.7"
     assert i["pve_version"] is None
     assert i["has_datastore_cfg"] is True
-    assert hid.is_supported(i)
+    # Correctly identified as Proxmox software, but not something this tool
+    # manages: every feature reads through a PVE node. See admission().
+    assert hid.is_proxmox(i) is True
+    assert hid.is_supported(i) is False
 
 
 def test_pve_with_backup_server_installed_is_both():
@@ -191,9 +194,22 @@ def _identity(role, reachable=True):
     return {"role": role, "reachable": reachable}
 
 
-def test_proxmox_hosts_are_admitted():
-    for role in (hid.ROLE_PVE, hid.ROLE_PBS, hid.ROLE_BOTH):
+def test_pve_hosts_are_admitted_with_or_without_pbs_alongside():
+    for role in (hid.ROLE_PVE, hid.ROLE_BOTH):
         assert hid.admission(_identity(role)) == (True, None)
+
+
+def test_a_standalone_backup_server_is_refused():
+    # Nothing here reads from a backup server -- the backup state comes from
+    # the PVE node's own storage layer -- so registering one would buy only
+    # root SSH into the machine that should survive the compromise of the
+    # systems it backs up.
+    assert hid.admission(_identity(hid.ROLE_PBS)) == (False, "pbs_only")
+
+
+def test_force_does_not_override_a_standalone_backup_server():
+    # Deliberate policy, not a connection problem: there is nothing to retry.
+    assert hid.admission(_identity(hid.ROLE_PBS), force=True) == (False, "pbs_only")
 
 
 def test_a_non_proxmox_host_is_refused():
@@ -204,6 +220,16 @@ def test_force_does_not_override_a_proven_non_proxmox_host():
     # The host answered and has neither product. That is an answer, not a
     # failure, so there is nothing for the user to override.
     assert hid.admission(_identity(hid.ROLE_UNKNOWN), force=True) == (False, "not_proxmox")
+
+
+def test_an_unreachable_host_is_never_refused_as_pbs_only():
+    # The role field can say "pbs" on a host that never answered (a stored role
+    # from an earlier probe). Refusing THAT as a standalone backup server would
+    # be a verdict on data nobody just collected -- it stays the overridable
+    # "unverified" case.
+    unreachable_pbs = _identity(hid.ROLE_PBS, reachable=False)
+    assert hid.admission(unreachable_pbs) == (False, "unverified")
+    assert hid.admission(unreachable_pbs, force=True) == (True, None)
 
 
 def test_an_unreachable_host_is_refused_but_overridable():

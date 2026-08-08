@@ -359,14 +359,19 @@ def api_hosts():
 
 @app.route("/api/hosts", methods=["POST"])
 def api_add_host():
-    """Register a host -- but only a Proxmox one.
+    """Register a host -- but only a Proxmox VE one.
 
-    The product is probed before the host is stored: PVE, PBS or both are
-    accepted, anything else is refused. The two ways this can go wrong are kept
-    apart on purpose, because they call for opposite reactions:
+    The product is probed before the host is stored. PVE is required, with or
+    without PBS installed alongside; the three ways this can go wrong are kept
+    apart on purpose, because they call for different reactions:
 
-    ``not_proxmox``  the host answered and has neither product -- a real answer,
+    ``pbs_only``     a standalone Proxmox Backup Server. Real Proxmox software,
+                     but nothing here reads from a backup server, so registering
+                     it would buy only root SSH into the one machine that should
+                     survive the compromise of the systems it backs up. Refused,
                      and no ``force`` overrides it.
+    ``not_proxmox``  the host answered and has no Proxmox product at all -- also
+                     a real answer, also not overridable.
     ``unverified``   the host could not be asked at all (SSH key not installed
                      yet, machine powered off -- the tool explicitly supports
                      hosts that are offline most of the time). That is not proof
@@ -396,12 +401,18 @@ def api_add_host():
         audit_log("host.add", target=addr, success=False, host=addr,
                   details={"name": name, "user": user, "rejected": code,
                            "error": identity.get("error")})
+        messages = {
+            "pbs_only": ("This is a standalone Proxmox Backup Server. "
+                         "Add the Proxmox VE nodes instead -- their backup state "
+                         "is read through them, so the backup server itself does "
+                         "not need to be reachable from here."),
+            "not_proxmox": "Host is neither a Proxmox VE nor a Proxmox Backup Server",
+        }
         return jsonify({
             "success": False,
             "code": code,
-            "message": ("Host is neither a Proxmox VE nor a Proxmox Backup Server"
-                        if code == "not_proxmox"
-                        else f"Could not determine the product: {identity.get('error')}"),
+            "message": messages.get(
+                code, f"Could not determine the product: {identity.get('error')}"),
             "identity": identity,
         }), 400
 

@@ -192,9 +192,19 @@ def persisted_fields(identity):
     }
 
 
-def is_supported(identity):
-    """Whether the tool manages this host: PVE, PBS, or both -- nothing else."""
+def is_proxmox(identity):
+    """Whether the probe found any Proxmox product at all. Says nothing about
+    whether the tool will manage it -- see ``admission``."""
     return identity.get("role") in (ROLE_PVE, ROLE_PBS, ROLE_BOTH)
+
+
+def is_supported(identity):
+    """Whether the tool manages this host. Needs PVE: every feature here reads
+    through a PVE node, including the backup state (which asks the node's own
+    storage layer, never the backup server). A standalone PBS offers nothing to
+    manage -- see ``admission`` for why that is a refusal rather than an empty
+    host entry."""
+    return identity.get("role") in (ROLE_PVE, ROLE_BOTH)
 
 
 def admission(identity, force=False):
@@ -202,15 +212,27 @@ def admission(identity, force=False):
 
     The policy, in one place because it is the whole point of the feature:
 
-    * PVE / PBS / both -> in.
-    * The host answered and is neither -> ``not_proxmox``, and ``force`` does
-      NOT override it. The tool manages Proxmox hosts; a file server in the list
-      would only produce failing commands and misleading dashboards.
+    * PVE, or PVE with PBS installed alongside -> in.
+    * A standalone PBS -> ``pbs_only``, and ``force`` does NOT override it.
+      Nothing here reads from a backup server: the backup state comes from the
+      PVE node's own storage layer. So the only thing registering a PBS would
+      buy is generic ZFS/SMART monitoring -- over root SSH to the one machine
+      whose entire value lies in *not* sharing credentials with the systems it
+      backs up. A backup server should survive their compromise; handing this
+      tool a key inverts that, for no feature in return.
+    * The host answered and is not Proxmox at all -> ``not_proxmox``, ``force``
+      does not override it either. A file server in the list would only produce
+      failing commands and misleading dashboards.
     * The host could not be asked -> ``unverified``. Nothing was established, so
-      this is overridable: the SSH key may not be installed yet, and hosts that
+      this IS overridable: the SSH key may not be installed yet, and hosts that
       are powered off most of the time are a supported case (standby). Such a
       host is stored with role ``unknown`` and identified on the next probe.
+
+    Both refusals of a reachable host are statements of fact, not connection
+    trouble, which is why neither yields to ``force``.
     """
+    if identity.get("reachable") and identity.get("role") == ROLE_PBS:
+        return False, "pbs_only"
     if is_supported(identity):
         return True, None
     if identity.get("reachable"):

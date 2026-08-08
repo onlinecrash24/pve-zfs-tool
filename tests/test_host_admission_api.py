@@ -56,11 +56,40 @@ def test_a_pve_host_is_added_with_its_role(client, monkeypatch):
     assert stored["pve_version"] == "8.2.4"
 
 
-def test_a_pbs_host_is_added(client, monkeypatch):
+def test_a_standalone_backup_server_is_refused(client, monkeypatch):
+    # Real Proxmox software, but nothing here reads from a backup server, so
+    # registering it would buy only root SSH into the machine that should
+    # survive the compromise of the systems it backs up.
     _identity(monkeypatch, "PBS_BIN=1\nPBS_PKG=3.2.7-1\nPROBE_OK=1\n")
     r = _post(client, {"name": "pbs01", "address": "10.0.0.2"})
+    assert r.status_code == 400
+    body = r.get_json()
+    assert body["success"] is False
+    assert body["code"] == "pbs_only"
+    # The message must not claim it is "not Proxmox" -- it plainly is.
+    assert "Backup Server" in body["message"]
+    assert sm.load_hosts() == []
+
+
+def test_force_cannot_smuggle_in_a_standalone_backup_server(client, monkeypatch):
+    # Deliberate policy, not a connection problem: nothing to retry.
+    _identity(monkeypatch, "PBS_BIN=1\nPBS_PKG=3.2.7-1\nPROBE_OK=1\n")
+    r = _post(client, {"name": "pbs01", "address": "10.0.0.2", "force": True})
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "pbs_only"
+    assert sm.load_hosts() == []
+
+
+def test_a_pve_node_with_pbs_installed_is_added(client, monkeypatch):
+    # The co-located case stays supported -- it is still a PVE node, and every
+    # feature reads through it. Only the standalone backup server is refused.
+    _identity(monkeypatch,
+              "PVE_BIN=1\nPVE_PKG=8.2.4-1\nPBS_BIN=1\nPBS_PKG=3.2.7-1\nPROBE_OK=1\n")
+    r = _post(client, {"name": "pve-bk", "address": "10.0.0.2"})
     assert r.get_json()["success"] is True
-    assert sm.load_hosts()[0]["role"] == "pbs"
+    stored = sm.load_hosts()[0]
+    assert stored["role"] == "pve+pbs"
+    assert stored["pve_version"] == "8.2.4"
 
 
 def test_a_plain_linux_box_is_refused(client, monkeypatch):
@@ -115,14 +144,14 @@ def test_identify_upgrades_a_stored_role(client, monkeypatch):
 
 def test_identify_keeps_the_stored_role_when_the_host_is_down(client, monkeypatch):
     # An offline host must not lose the role it was identified with -- the Hosts
-    # view would otherwise show every powered-off backup server as unknown.
-    _identity(monkeypatch, "PBS_BIN=1\nPBS_PKG=3.2.7-1\nPROBE_OK=1\n")
-    _post(client, {"name": "pbs01", "address": "10.0.0.8"})
+    # view would otherwise show every powered-off node as unknown.
+    _identity(monkeypatch, "PVE_BIN=1\nPVE_PKG=8.2.4-1\nPROBE_OK=1\n")
+    _post(client, {"name": "pve1", "address": "10.0.0.8"})
     _unreachable(monkeypatch)
     r = client.post("/api/hosts/identify", json={"address": "10.0.0.8"},
                     headers={"X-CSRF-Token": "tok"})
     assert r.get_json()["identity"]["reachable"] is False
-    assert sm.load_hosts()[0]["role"] == "pbs"
+    assert sm.load_hosts()[0]["role"] == "pve"
 
 
 def test_identify_rejects_an_unknown_address(client, monkeypatch):

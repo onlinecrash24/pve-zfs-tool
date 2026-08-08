@@ -747,7 +747,7 @@ async function viewHosts() {
         const table = h("table");
         table.appendChild(h("thead", {}, h("tr", {}, [
             h("th", {}, t("name")), h("th", {}, t("address")), h("th", {}, t("port")),
-            h("th", {}, t("user")), h("th", {}, "PVE"), h("th", {}, "PBS"),
+            h("th", {}, t("user")), h("th", {}, "PVE"),
             h("th", {}, t("status")), h("th", {}, t("actions")),
         ])));
         const tbody = h("tbody");
@@ -757,13 +757,11 @@ async function viewHosts() {
             tr.appendChild(h("td", {}, host.address));
             tr.appendChild(h("td", {}, String(host.port)));
             tr.appendChild(h("td", {}, host.user));
-            // Product cells: the stored role renders instantly, the async probe
-            // below refreshes them (and the versions) without blocking the table.
-            for (const kind of ["pve", "pbs"]) {
-                const td = h("td", { id: `prod-${kind}-${host.address}` });
-                td.appendChild(_productBadge(kind, host));
-                tr.appendChild(td);
-            }
+            // Product cell: the stored role renders instantly, the async probe
+            // below refreshes it (and the version) without blocking the table.
+            const prodTd = h("td", { id: `prod-pve-${host.address}` });
+            prodTd.appendChild(_productBadge(host));
+            tr.appendChild(prodTd);
             const statusTd = h("td");
             statusTd.appendChild(h("span", { className: "badge badge-stopped", id: `status-${host.address}`,
                 "data-standby": host.standby ? "1" : "" }, t("unknown")));
@@ -830,51 +828,42 @@ async function viewHosts() {
     }
 }
 
-// One cell per product, so a host running both shows BOTH versions -- the
-// single combined badge could only ever carry one of them. Roles are stored in
-// hosts.json at add time, so this renders without waiting for SSH; a host added
-// before the detection existed (or forced in while unreachable) has no role and
-// shows a dash in both columns until a probe succeeds.
-function _productBadge(kind, host) {
+// PVE version badge. Only PVE is shown: every host here has it (a standalone
+// PBS cannot be registered), and a PBS installed alongside changes nothing
+// about what this tool does with the node. Roles are stored in hosts.json at
+// add time, so this renders without waiting for SSH; a host added before the
+// detection existed (or forced in while unreachable) has no role and shows a
+// dash until a probe succeeds.
+function _productBadge(host) {
     const role = host.role || "unknown";
-    const present = role.split("+").includes(kind);
-    const version = kind === "pbs" ? host.pbs_version : host.pve_version;
-    if (!present) {
+    if (!role.split("+").includes("pve")) {
         const dash = h("span", { style: "color:var(--text-secondary)" }, "—");
         if (role === "unknown") dash.title = t("hi_not_identified");
         return dash;
     }
-    const cls = kind === "pbs" ? "badge badge-warning" : "badge badge-online";
-    const wrap = h("span", {}, [h("span", { className: cls }, kind.toUpperCase())]);
-    if (version) {
+    const wrap = h("span", {}, [h("span", { className: "badge badge-online" }, "PVE")]);
+    if (host.pve_version) {
         wrap.appendChild(h("span", {
             style: "margin-left:6px;font-size:11px;color:var(--text-secondary)",
-        }, version));
+        }, host.pve_version));
     }
     return wrap;
 }
 
 async function _probeHostProduct(addr) {
-    const cells = {
-        pve: document.getElementById(`prod-pve-${addr}`),
-        pbs: document.getElementById(`prod-pbs-${addr}`),
-    };
-    if (!cells.pve && !cells.pbs) return;
+    const cell = document.getElementById(`prod-pve-${addr}`);
+    if (!cell) return;
     let identity;
     try {
         const r = await API.post("/api/hosts/identify", { address: addr });
         identity = r && r.identity;
     } catch (e) { return; }
     if (!identity || !identity.reachable) return;   // keep the stored value
-    for (const kind of ["pve", "pbs"]) {
-        if (!cells[kind]) continue;
-        cells[kind].innerHTML = "";
-        cells[kind].appendChild(_productBadge(kind, {
-            role: identity.role,
-            pve_version: identity.pve_version,
-            pbs_version: identity.pbs_version,
-        }));
-    }
+    cell.innerHTML = "";
+    cell.appendChild(_productBadge({
+        role: identity.role,
+        pve_version: identity.pve_version,
+    }));
 }
 
 // Consolidated table of every stored host-config backup across all hosts.
@@ -1001,10 +990,15 @@ async function addHost() {
         if (btn) { btn.disabled = false; btn.textContent = t("add_host"); }
     }
 
-    // Refused because the host has neither product: a real answer, nothing to
-    // override. Refused because it could not be asked: offer to add anyway --
-    // an unreachable host is not proof that it is not a Proxmox host, and this
-    // tool deliberately supports hosts that are powered off most of the time.
+    // Two refusals of a reachable host, both statements of fact with nothing to
+    // override: a standalone backup server, or no Proxmox product at all.
+    // Refused because it could not be asked is different -- offer to add anyway,
+    // since an unreachable host is no proof of anything and this tool
+    // deliberately supports hosts that are powered off most of the time.
+    if (!r.success && r.code === "pbs_only") {
+        toast(t("hi_reject_pbs_only", addr), "error");
+        return;
+    }
     if (!r.success && r.code === "not_proxmox") {
         toast(t("hi_reject_not_proxmox", addr), "error");
         return;
@@ -1019,33 +1013,22 @@ async function addHost() {
         loadHostSelector();
         viewHosts();
         const role = (r.identity && r.identity.role) || "";
-        if (role.split("+").includes("pbs")) _showPbsAccessNote(addr);
+        if (role.split("+").includes("pbs")) _showPbsColocatedNote(addr);
     }
 }
 
-// Shown once, right after a PBS is added -- the moment the user is actually
-// thinking about how this tool reaches their backup server.
-//
-// A backup server is supposed to survive the compromise of the machines it
-// backs up. Root SSH from this tool inverts that: whoever holds the tool's key
-// could delete every backup. The datastore side needs no shell at all, so it
-// will move to a read-only API token; SSH stays only for what a token cannot
-// do -- ZFS pools, SMART, ARC, host-config backup of the PBS itself.
-function _showPbsAccessNote(addr) {
+// Shown once, right after a node that has PBS installed alongside PVE is added.
+// Reaching it by SSH is no new risk -- managing PVE nodes that way is what this
+// tool does. The observation is about someone else's architecture: a backup
+// server sharing a machine with the node it backs up shares that machine's
+// fate, so a failure or compromise takes the backups with it. Since only a
+// node with PVE can be registered at all, this can only ever be the
+// co-located case.
+function _showPbsColocatedNote(addr) {
     const body = h("div", { style: "font-size:13px;line-height:1.6" });
-    body.appendChild(h("p", { style: "margin-top:0" }, t("pbs_note_intro", addr)));
-    body.appendChild(h("p", {}, t("pbs_note_why")));
-    body.appendChild(h("p", { style: "margin-bottom:4px" }, t("pbs_note_cmds")));
-    const cmds = "proxmox-backup-manager user generate-token monitor@pbs zfstool\n" +
-        "proxmox-backup-manager acl update / Audit --auth-id 'monitor@pbs!zfstool'\n" +
-        "proxmox-backup-manager acl update /datastore DatastoreAudit --auth-id 'monitor@pbs!zfstool'";
-    body.appendChild(h("pre", {
-        style: "background:var(--bg-secondary,rgba(127,127,127,0.1));padding:10px;" +
-               "border-radius:6px;font-size:11px;overflow-x:auto;white-space:pre",
-    }, cmds));
-    body.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-bottom:0" },
-        t("pbs_note_ssh_still")));
-    openModal(t("pbs_note_title"), body.outerHTML, null);
+    body.appendChild(h("p", { style: "margin-top:0" }, t("pbs_colocated_intro", addr)));
+    body.appendChild(h("p", { style: "margin-bottom:0" }, t("pbs_colocated_risk")));
+    openModal(t("pbs_colocated_title"), body.outerHTML, null);
 }
 
 async function testHost(addr) {
