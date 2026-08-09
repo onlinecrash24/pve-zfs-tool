@@ -396,11 +396,27 @@ def condense_for_report(matrix: Dict[str, Any], max_guests: int = 120) -> Dict[s
                 "age_seconds": bk.get("age_seconds"), "count": bk.get("count"),
                 "storages": bk.get("storages") or [],
             }
+        # A gap somebody declared deliberate. Passed on so the report can tell
+        # a decision apart from an oversight -- and stops reporting the same
+        # accepted risk as critical on every single run.
+        exc = g.get("exception")
+        if exc:
+            out[-1]["exception"] = {
+                "no_backup": bool(exc.get("no_backup")),
+                "no_replication": bool(exc.get("no_replication")),
+                "reason": exc.get("reason", ""),
+                "documented": bool(exc.get("documented")),
+            }
+        if g.get("stale_exception"):
+            out[-1]["exception_no_longer_matches"] = g["stale_exception"]
+        if g.get("protection"):
+            out[-1]["protection"] = g["protection"]
     return {
         "guests": out,
         "guest_count": len(guests),
         "truncated": len(guests) > max_guests,
         "guests_without_copy": sum(1 for g in guests if g["copy_count"] == 0),
+        "declared_exceptions": sum(1 for g in guests if g.get("exception")),
         "guests_without_backup": sum(
             1 for g in guests if (g.get("backup") or {}).get("state") == "red"),
     }

@@ -592,3 +592,110 @@ def test_a_disabled_storage_among_several_is_reported_not_read(monkeypatch):
     data = b.collect_backups({"address": "h"})
     assert [v["vmid"] for v in data["volumes"]] == ["100"]
     assert data["unreadable"] == [{"storage": "old-nfs", "error": "disabled"}]
+
+
+# --- declared exceptions --------------------------------------------------
+
+def _exc(backup=False, replication=False):
+    return {"no_backup": backup, "no_replication": replication}
+
+
+def test_both_gaps_declared_is_accepted():
+    g = _guest(copies=0, backup=b.STATE_BAD)
+    g["exception"] = _exc(backup=True, replication=True)
+    assert b.protection_state(g) == "accepted"
+
+
+def test_declaring_only_one_gap_leaves_the_other_open():
+    # Excusing the missing backup while the guest also has no replica would
+    # read as approved when half of it never was.
+    g = _guest(copies=0, backup=b.STATE_BAD)
+    g["exception"] = _exc(backup=True)
+    assert b.protection_state(g) == "crit"
+    g["exception"] = _exc(replication=True)
+    assert b.protection_state(g) == "crit"
+
+
+def test_replicated_without_a_backup_can_be_declared():
+    # The common case: replicated, deliberately not backed up.
+    g = _guest(copies=1, backup=b.STATE_BAD)
+    assert b.protection_state(g) == "warn"
+    g["exception"] = _exc(backup=True)
+    assert b.protection_state(g) == "accepted"
+
+
+def test_a_backed_up_guest_declared_needing_no_replica_is_simply_ok():
+    # The backup already protects it; the declaration changes nothing.
+    g = _guest(copies=0, backup=b.STATE_OK)
+    g["exception"] = _exc(replication=True)
+    assert b.protection_state(g) == "ok"
+
+
+def test_a_declaration_for_the_wrong_gap_does_not_excuse_anything():
+    g = _guest(copies=1, backup=b.STATE_BAD)
+    g["exception"] = _exc(replication=True)      # says nothing about backups
+    assert b.protection_state(g) == "warn"
+
+
+def test_a_config_mismatch_still_outranks_a_declaration():
+    g = _guest(copies=1, backup=b.STATE_BAD, mismatch="x")
+    g["exception"] = _exc(backup=True)
+    assert b.protection_state(g) == "warn"
+
+
+@pytest.mark.parametrize("backup_state", [None, b.STATE_UNKNOWN])
+def test_without_backup_knowledge_a_replication_declaration_is_enough(backup_state):
+    # Both mean the same thing: nothing is known about this guest's backups --
+    # either the host has no backup storage at all, or its storages could not be
+    # listed. The judgement then falls back to copies alone, and the only gap
+    # that judgement can see is declared. Reporting critical here would be
+    # claiming a fault that was never established, which is precisely the
+    # permanent false alarm this feature exists to remove; the unknown itself
+    # stays visible in the backup column and in the unreadable-storage note.
+    g = _guest(copies=0, backup=backup_state)
+    g["exception"] = _exc(replication=True)
+    assert b.protection_state(g) == "accepted"
+
+
+def test_without_backup_knowledge_and_no_declaration_it_stays_critical():
+    # Unchanged from before exceptions existed: no copy, nothing known about
+    # backups, nobody said it was intended.
+    assert b.protection_state(_guest(copies=0, backup=None)) == "crit"
+    assert b.protection_state(_guest(copies=0, backup=b.STATE_UNKNOWN)) == "crit"
+
+
+def test_accepted_counts_as_ok_for_the_host_verdict():
+    accepted = _guest(copies=1, backup=b.STATE_BAD)
+    accepted["exception"] = _exc(backup=True)
+    assert b.overall_verdict([accepted]) == "ok"
+    assert b.overall_verdict([accepted, _guest(copies=0, backup=b.STATE_BAD)]) == "crit"
+
+
+# --- declarations reality has outgrown ------------------------------------
+
+def test_a_declaration_that_no_longer_matches_is_reported():
+    g = _guest(copies=1, backup=b.STATE_OK)
+    g["exception"] = _exc(backup=True)           # but it IS being backed up
+    assert b.stale_exception(g) == "backup"
+
+
+def test_a_replication_declaration_on_a_replicated_guest_is_stale():
+    g = _guest(copies=2, backup=b.STATE_OK)
+    g["exception"] = _exc(replication=True)
+    assert b.stale_exception(g) == "replication"
+
+
+def test_a_declaration_that_still_holds_is_not_stale():
+    g = _guest(copies=1, backup=b.STATE_BAD)
+    g["exception"] = _exc(backup=True)
+    assert b.stale_exception(g) == ""
+
+
+def test_no_declaration_means_nothing_to_go_stale():
+    assert b.stale_exception(_guest(copies=1, backup=b.STATE_OK)) == ""
+
+
+def test_an_unreadable_backup_does_not_make_a_declaration_look_stale():
+    g = _guest(copies=0, backup=b.STATE_UNKNOWN)
+    g["exception"] = _exc(backup=True)
+    assert b.stale_exception(g) == ""

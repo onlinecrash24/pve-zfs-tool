@@ -523,13 +523,18 @@ def merge_backups(matrix: Dict[str, Any], states: Dict[str, Dict[str, Any]],
 # ---------------------------------------------------------------------------
 
 def protection_state(guest: Dict[str, Any]) -> str:
-    """One guest's overall protection -- ``ok`` / ``warn`` / ``crit``.
+    """One guest's overall protection -- ``ok`` / ``accepted`` / ``warn`` / ``crit``.
 
     Replication and backup are independent lines of defence and the verdict is
     about how many of them actually hold. A guest with a replica but no backup
     survives a dead disk and nothing else; a guest with a backup but no replica
     is genuinely covered, just not by replication. Judging on copies alone
     reported the first as healthy and the second as at-risk -- both backwards.
+
+    ``accepted`` is a gap somebody declared deliberate (see guest_intent): not a
+    finding, but deliberately NOT ``ok`` either -- an unprotected guest is not
+    the same thing as a protected one, even when that is fine. A declaration
+    only excuses the gap it names; the other one stays open.
 
     A guest whose backups were never examined (no ``backup`` field, or state
     ``unknown``) falls back to the copy-only judgement, so a host without
@@ -541,19 +546,40 @@ def protection_state(guest: Dict[str, Any]) -> str:
     bk = guest.get("backup") or {}
     state = bk.get("state")
     known = bool(bk) and state != STATE_UNKNOWN
+    has_backup = known and state != STATE_BAD
+
+    exc = guest.get("exception") or {}
+    ok_without_backup = bool(exc.get("no_backup"))
+    ok_without_copy = bool(exc.get("no_replication"))
 
     if guest.get("config_mismatch"):
         return "warn"
+    if not has_copy and not has_backup:
+        # Nothing protects this guest. Only a declaration covering BOTH gaps
+        # makes that acceptable -- excusing one while the other stands open
+        # would read as approved when half of it never was.
+        if ok_without_backup and ok_without_copy:
+            return "accepted"
+        # Backups that could not be read are not a gap anybody declared; keep
+        # the old copy-only judgement rather than excusing an unknown.
+        if not known and ok_without_copy:
+            return "accepted"
+        return "crit"
     if not has_copy:
         # A working backup IS a second line of defence, even without a replica.
-        return "ok" if (known and state != STATE_BAD) else "crit"
+        return "ok"
     if known and state == STATE_BAD:
-        return "warn"
+        return "accepted" if ok_without_backup else "warn"
     return "ok"
 
 
 def overall_verdict(guests: List[Dict[str, Any]]) -> str:
-    """Worst per-guest protection state across a host: ``ok``/``warn``/``crit``."""
+    """Worst per-guest protection state across a host: ``ok``/``warn``/``crit``.
+
+    ``accepted`` counts as ok -- a declared exception is not a finding, which is
+    the whole point of declaring it. It stays visible per guest and in the
+    report's own section, so nothing is swept away.
+    """
     worst = "ok"
     for g in guests or []:
         s = protection_state(g)
@@ -562,3 +588,24 @@ def overall_verdict(guests: List[Dict[str, Any]]) -> str:
         if s == "warn":
             worst = "warn"
     return worst
+
+
+def stale_exception(guest: Dict[str, Any]) -> str:
+    """A declaration that reality has outgrown, or '' if there is none.
+
+    Somebody declared "needs no backup" and the guest has been getting backups
+    ever since; the note is now a lie waiting to mislead the next person who
+    reads it. Cheap to spot, and exactly the sort of leftover nobody goes
+    looking for.
+    """
+    exc = guest.get("exception") or {}
+    if not exc:
+        return ""
+    bk = guest.get("backup") or {}
+    known = bool(bk) and bk.get("state") != STATE_UNKNOWN
+    has_backup = known and bk.get("state") != STATE_BAD
+    if exc.get("no_backup") and has_backup:
+        return "backup"
+    if exc.get("no_replication") and (guest.get("copy_count") or 0) > 0:
+        return "replication"
+    return ""

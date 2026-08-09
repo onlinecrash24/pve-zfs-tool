@@ -238,3 +238,99 @@ def test_the_prompt_asks_for_an_assessment_not_just_counts(monkeypatch):
     assert "Overall state" in sys
     # The instruction that stops it reading a backup-only host as a failure.
     assert "backs up every guest is in good shape" in sys
+
+
+# --- declared exceptions in the report ------------------------------------
+
+def _run_with_exceptions(monkeypatch, matrix, backup_result, exceptions):
+    seen = {}
+
+    def fake_llm(messages):
+        seen["system"] = messages[0]["content"]
+        seen["user"] = messages[1]["content"]
+        return {"success": True, "content": "## 1. Overall state\nfine", "usage": {}}
+
+    monkeypatch.setattr(ar, "load_config",
+                        lambda: {"provider": "openai", "openai": {"model": "m"},
+                                 "report_language": "en"})
+    monkeypatch.setattr("app.ssh_manager.load_hosts", lambda: [{"address": "h-solo"}])
+    monkeypatch.setattr("app.replication_inventory.collect_inventory",
+                        lambda hosts, progress=None: matrix)
+    monkeypatch.setattr("app.backups.host_backup_states",
+                        lambda host, vmids=None, cache_ttl=300: backup_result)
+    monkeypatch.setattr("app.guest_intent.collect_exceptions",
+                        lambda host, cache_ttl=300: {"exceptions": exceptions,
+                                                     "readable": True, "error": ""})
+    monkeypatch.setattr(ar, "call_llm", fake_llm)
+    monkeypatch.setattr(ar, "_add_report", lambda r: None)
+    res = ar.generate_replication_report(lang_override="en", source_host="h-solo")
+    assert res["success"], res
+    body = seen["user"]
+    payload = json.loads(body[body.index("{"):body.rindex("}") + 1])
+    return seen, payload, res
+
+
+def _no_backups(vmids):
+    return {"states": {v: {"state": "red", "reason": "none", "count": 0,
+                           "age_seconds": None, "storages": []} for v in vmids},
+            "unreadable": [], "readable": True, "error": "", "node": "n",
+            "storages": [], "warn_hours": 36, "crit_hours": 168}
+
+
+def test_a_declared_guest_stops_counting_as_critical(monkeypatch):
+    # The whole point: an accepted risk must not be filed as a critical finding
+    # on every single run, or people stop reading the report.
+    _, payload, res = _run_with_exceptions(
+        monkeypatch, _unreplicated_matrix(), _no_backups(["200", "201", "202"]),
+        {v: {"no_backup": True, "no_replication": True,
+             "reason": "Wegwerf-Container", "documented": True}
+         for v in ("200", "201", "202")})
+    assert res["report"]["verdict"] == "ok"
+    assert res["report"]["critical_findings"] == 0
+    assert payload["declared_exceptions"] == 3
+
+
+def test_the_declaration_and_its_reason_reach_the_model(monkeypatch):
+    _, payload, _ = _run_with_exceptions(
+        monkeypatch, _unreplicated_matrix(), _no_backups(["200", "201", "202"]),
+        {"200": {"no_backup": True, "no_replication": True,
+                 "reason": "Wegwerf-Container", "documented": True}})
+    g = [x for x in payload["guests"] if x["vmid"] == "200"][0]
+    assert g["exception"]["reason"] == "Wegwerf-Container"
+    assert g["exception"]["documented"] is True
+    assert g["protection"] == "accepted"
+
+
+def test_an_undeclared_guest_beside_declared_ones_still_counts(monkeypatch):
+    # Declaring some must not quieten the rest.
+    _, _, res = _run_with_exceptions(
+        monkeypatch, _unreplicated_matrix(), _no_backups(["200", "201", "202"]),
+        {"200": {"no_backup": True, "no_replication": True, "reason": "x",
+                 "documented": True}})
+    assert res["report"]["verdict"] == "crit"
+    assert res["report"]["critical_findings"] == 2
+
+
+def test_a_stale_declaration_is_handed_over_as_such(monkeypatch):
+    backed_up = {"states": {"200": {"state": "green", "reason": "ok",
+                                    "age_seconds": 3600, "count": 5,
+                                    "storages": ["pbs-main"]}},
+                 "unreadable": [], "readable": True, "error": "", "node": "n",
+                 "storages": [], "warn_hours": 36, "crit_hours": 168}
+    _, payload, _ = _run_with_exceptions(
+        monkeypatch, _unreplicated_matrix(), backed_up,
+        {"200": {"no_backup": True, "no_replication": False, "reason": "alt",
+                 "documented": True}})
+    g = [x for x in payload["guests"] if x["vmid"] == "200"][0]
+    assert g["exception_no_longer_matches"] == "backup"
+
+
+def test_the_prompt_forbids_filing_exceptions_as_findings(monkeypatch):
+    seen, _, _ = _run_with_exceptions(
+        monkeypatch, _unreplicated_matrix(), _no_backups(["200", "201", "202"]), {})
+    sys = " ".join(seen["system"].split())
+    assert "Declared exceptions:" in sys
+    assert "NOT findings" in sys
+    # ... but they must stay visible, or an exception nobody reviews becomes a hole
+    assert "section of their own" in sys
+    assert "documented: false" in sys

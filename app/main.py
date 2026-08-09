@@ -1062,6 +1062,43 @@ def api_pve_guest_backups():
     return jsonify(host_backup_states(host, vmids=vmids))
 
 
+@app.route("/api/pve/guest-exceptions", methods=["GET"])
+@login_required
+def api_guest_exceptions_get():
+    """Guests declared as deliberately unprotected, with their reasons."""
+    from app.guest_intent import collect_exceptions
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(collect_exceptions(host))
+
+
+@app.route("/api/pve/guest-exceptions", methods=["POST"])
+@login_required
+def api_guest_exceptions_set():
+    """Declare (or withdraw) a guest's exception.
+
+    ``kinds`` is the complete desired state -- a kind left out has its tag
+    removed, so unchecking a box actually withdraws that exception. The tag is
+    written into the guest's PVE config, the reason is kept here.
+    """
+    from app.guest_intent import set_exception
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    vmid = str(data.get("vmid") or "").strip()
+    kinds = data.get("kinds") or []
+    res = set_exception(host, vmid, kinds,
+                        reason=data.get("reason", ""),
+                        by=session.get("user") or "")
+    audit_log("guest.exception.set", target=f"{host['address']}/{vmid}",
+              host=host["address"], success=res.get("success", False),
+              details={"kinds": kinds, "reason": (data.get("reason") or "")[:200],
+                       "error": res.get("error", "")})
+    return jsonify(res), (200 if res.get("success") else 400)
+
+
 @app.route("/api/pve/guest-action", methods=["POST"])
 @login_required
 def api_pve_guest_action():
@@ -2515,6 +2552,35 @@ def collect_matrix_task(progress_cb, host):
                 log.warning("inventory: backup collection failed for %s: %s", host, e)
                 out["backup_error"] = str(e)[:300]
                 out["backup_readable"] = False
+            try:
+                # Declared exceptions last, so a guest carries both its facts
+                # and the decision made about them.
+                from app.guest_intent import collect_exceptions
+                progress_cb("exceptions")
+                exc = collect_exceptions(entry)
+                for g in out.get("guests") or []:
+                    if g.get("source_host") != host:
+                        continue
+                    e_rec = exc["exceptions"].get(str(g.get("vmid") or ""))
+                    if e_rec:
+                        g["exception"] = e_rec
+            except Exception as e:
+                # Without them every guest simply keeps its plain verdict --
+                # the safe direction, since a failed read must never excuse a
+                # gap nobody declared.
+                log.warning("inventory: exception read failed for %s: %s", host, e)
+
+    # Decide each guest's overall protection HERE rather than in the browser.
+    # The rule -- two independent defences, one declared exception excusing only
+    # the gap it names -- used to be written twice, once in Python for the
+    # report and once in JavaScript for the table, and two copies of a rule that
+    # keeps growing drift apart. One authority, rendered by both.
+    from app.backups import protection_state, stale_exception
+    for g in out.get("guests") or []:
+        g["protection"] = protection_state(g)
+        stale = stale_exception(g)
+        if stale:
+            g["stale_exception"] = stale
     progress_cb("done")
     return out
 

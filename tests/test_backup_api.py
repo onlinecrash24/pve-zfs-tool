@@ -21,6 +21,12 @@ def client(monkeypatch):
     monkeypatch.setattr(m, "audit_log", lambda *a, **k: None)
     monkeypatch.setattr(m, "_find_host",
                         lambda addr: {"address": addr} if addr else None)
+    # The matrix also reads declared exceptions, which is its own SSH call in
+    # its own module. Left unstubbed it attempts a real connection and the test
+    # waits out the TCP timeout.
+    monkeypatch.setattr("app.guest_intent.collect_exceptions",
+                        lambda host, cache_ttl=300: {"exceptions": {},
+                                                     "readable": True, "error": ""})
     m.app.config["TESTING"] = True
     c = m.app.test_client()
     with c.session_transaction() as s:
@@ -239,3 +245,108 @@ def test_progress_is_reported_per_host(client, monkeypatch):
     msgs = [e["msg"] for e in rec["log"]]
     assert "hosts 1/2 10.0.0.1" in msgs
     assert "hosts 2/2 10.0.0.2" in msgs
+
+
+# --- declared exceptions ---------------------------------------------------
+
+def test_exceptions_are_listed_for_a_host(client, monkeypatch):
+    monkeypatch.setattr("app.guest_intent.collect_exceptions",
+                        lambda host, cache_ttl=300: {
+                            "exceptions": {"253": {"no_backup": True,
+                                                   "no_replication": False,
+                                                   "reason": "Testcontainer",
+                                                   "documented": True}},
+                            "readable": True, "error": ""})
+    body = client.get("/api/pve/guest-exceptions?host=10.0.0.1").get_json()
+    assert body["exceptions"]["253"]["no_backup"] is True
+    assert body["exceptions"]["253"]["reason"] == "Testcontainer"
+
+
+def test_declaring_an_exception_reaches_the_module(client, monkeypatch):
+    seen = {}
+
+    def fake_set(host, vmid, kinds, reason="", by=""):
+        seen.update(host=host["address"], vmid=vmid, kinds=kinds, reason=reason)
+        return {"success": True, "tags": ["no-backup"], "kinds": kinds}
+
+    monkeypatch.setattr("app.guest_intent.set_exception", fake_set)
+    r = client.post("/api/pve/guest-exceptions?host=10.0.0.1",
+                    json={"vmid": "253", "kinds": ["backup"], "reason": "Wegwerf"},
+                    headers={"X-CSRF-Token": "tok"})
+    assert r.status_code == 200
+    assert r.get_json()["success"] is True
+    assert seen == {"host": "10.0.0.1", "vmid": "253", "kinds": ["backup"],
+                    "reason": "Wegwerf"}
+
+
+def test_a_refused_declaration_comes_back_as_a_client_error(client, monkeypatch):
+    monkeypatch.setattr("app.guest_intent.set_exception",
+                        lambda host, vmid, kinds, reason="", by="": {
+                            "success": False, "error": "guest 999 not found on this host"})
+    r = client.post("/api/pve/guest-exceptions?host=10.0.0.1",
+                    json={"vmid": "999", "kinds": ["backup"]},
+                    headers={"X-CSRF-Token": "tok"})
+    assert r.status_code == 400
+    assert "not found" in r.get_json()["error"]
+
+
+def test_declaring_requires_the_csrf_token(client, monkeypatch):
+    monkeypatch.setattr("app.guest_intent.set_exception",
+                        lambda *a, **k: {"success": True})
+    r = client.post("/api/pve/guest-exceptions?host=10.0.0.1",
+                    json={"vmid": "253", "kinds": ["backup"]})
+    assert r.status_code == 403
+
+
+def test_the_matrix_carries_declared_exceptions(client, monkeypatch):
+    matrix = {"guests": [{"vmid": "253", "source_host": "10.0.0.1",
+                          "copies": [], "copy_count": 0}], "hosts": ["10.0.0.1"]}
+    monkeypatch.setattr("app.replication_inventory.collect_inventory",
+                        lambda hosts, progress=None: dict(matrix))
+    monkeypatch.setattr("app.replication_inventory.filter_matrix",
+                        lambda mx, source_host=None: dict(mx))
+    monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: [])
+    monkeypatch.setattr(m, "load_hosts", lambda: [{"address": "10.0.0.1"}])
+    monkeypatch.setattr("app.backups.host_backup_states",
+                        lambda host, vmids=None, cache_ttl=300: {
+                            "states": {"253": {"state": "red", "reason": "none"}},
+                            "unreadable": [], "readable": True, "error": "",
+                            "node": "n", "warn_hours": 36, "crit_hours": 168})
+    monkeypatch.setattr("app.guest_intent.collect_exceptions",
+                        lambda host, cache_ttl=300: {
+                            "exceptions": {"253": {"no_backup": True,
+                                                   "no_replication": True,
+                                                   "reason": "gewollt",
+                                                   "documented": True}},
+                            "readable": True, "error": ""})
+    body = _matrix_via_task(client, "10.0.0.1")
+    g = body["guests"][0]
+    assert g["exception"]["no_backup"] is True
+    # No copy and no backup, but both gaps declared -- not a finding.
+    assert b.protection_state(g) == "accepted"
+
+
+def test_a_failed_exception_read_leaves_the_matrix_intact(client, monkeypatch):
+    # The safe direction: guests keep their plain verdict rather than a failed
+    # read excusing a gap nobody declared.
+    matrix = {"guests": [{"vmid": "253", "source_host": "10.0.0.1",
+                          "copies": [], "copy_count": 0}], "hosts": ["10.0.0.1"]}
+    monkeypatch.setattr("app.replication_inventory.collect_inventory",
+                        lambda hosts, progress=None: dict(matrix))
+    monkeypatch.setattr("app.replication_inventory.filter_matrix",
+                        lambda mx, source_host=None: dict(mx))
+    monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: [])
+    monkeypatch.setattr(m, "load_hosts", lambda: [{"address": "10.0.0.1"}])
+    monkeypatch.setattr("app.backups.host_backup_states",
+                        lambda host, vmids=None, cache_ttl=300: {
+                            "states": {}, "unreadable": [], "readable": True,
+                            "error": "", "node": "n", "warn_hours": 36,
+                            "crit_hours": 168})
+
+    def boom(host, cache_ttl=300):
+        raise RuntimeError("ssh gone")
+    monkeypatch.setattr("app.guest_intent.collect_exceptions", boom)
+
+    body = _matrix_via_task(client, "10.0.0.1")
+    assert body["guests"][0]["vmid"] == "253"
+    assert "exception" not in body["guests"][0]

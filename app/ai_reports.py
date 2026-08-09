@@ -1091,6 +1091,16 @@ state "unknown" means the backup storages could not be listed: say that, and do
 not report it as a missing backup. A guest with NO `backup` field was not
 examined for backups at all -- write nothing about its backup situation.
 
+Declared exceptions: a guest may carry an `exception` field -- somebody
+deliberately decided it needs no backup, no replica, or neither, and recorded
+why. Those are NOT findings; do not list them among the risks, and do not
+recommend fixing them. Give them a short section of their own instead, naming
+each guest and its reason, because an exception nobody ever reviews quietly
+becomes a hole. `documented: false` means the tag was set in PVE without a
+reason being recorded -- worth saying so, so somebody can supply one. A guest
+with `exception_no_longer_matches` was declared as needing no backup (or no
+replica) but has one now: the declaration is stale and should be withdrawn.
+
 Scope: this report covers ONE source host and the hosts holding copies of its
 guests -- source_host and copy_hosts. Other machines in the environment were not
 examined here, so write nothing about them: no counting of hosts, no remarks
@@ -1152,6 +1162,17 @@ Backup-Storages nicht gelesen werden konnten: sage das, und melde es nicht als
 fehlendes Backup. Ein Gast OHNE `backup`-Feld wurde gar nicht auf Backups
 untersucht -- schreibe nichts über seine Backup-Lage.
 
+Erklärte Ausnahmen: Ein Gast kann ein Feld `exception` tragen -- jemand hat
+bewusst entschieden, dass er kein Backup, kein Replikat oder beides nicht
+braucht, und den Grund festgehalten. Das sind KEINE Befunde; führe sie nicht
+unter den Risiken auf und empfiehl nicht, sie zu beheben. Gib ihnen stattdessen
+einen kurzen eigenen Abschnitt mit Gast und Begründung, denn eine Ausnahme, die
+niemand mehr überprüft, wird still zur Lücke. `documented: false` heißt, das Tag
+wurde in PVE ohne festgehaltene Begründung gesetzt -- das gehört erwähnt, damit
+jemand sie nachträgt. Ein Gast mit `exception_no_longer_matches` wurde als
+„braucht kein Backup“ (bzw. kein Replikat) erklärt, hat aber inzwischen eines:
+Die Erklärung ist überholt und sollte zurückgezogen werden.
+
 Umfang: Dieser Bericht behandelt EINEN Quell-Host und die Hosts, die Kopien
 seiner Gäste halten -- source_host und copy_hosts. Andere Maschinen der Umgebung
 wurden hier nicht untersucht, schreibe daher nichts über sie: kein Zählen von
@@ -1207,12 +1228,14 @@ def generate_replication_report(lang_override=None, source_host=None):
     # and the prompt is told to stay silent about what was not examined.
     backup_unreadable = []
     if source_host:
+        # Resolved once, outside the try blocks below: both of them need it,
+        # and a failure in the first must not leave the second undefined.
+        host_entry = next((h for h in hosts
+                           if h.get("address") == source_host), None)
         try:
             from app.backups import host_backup_states, merge_backups
             vmids = [str(g.get("vmid")) for g in matrix["guests"]
                      if g.get("source_host") == source_host and g.get("vmid")]
-            host_entry = next((h for h in hosts
-                               if h.get("address") == source_host), None)
             if host_entry:
                 res = host_backup_states(host_entry, vmids=vmids)
                 if res["readable"]:
@@ -1221,6 +1244,29 @@ def generate_replication_report(lang_override=None, source_host=None):
         except Exception as e:
             log.warning("replication report: backup read failed for %s: %s",
                         source_host, e)
+        try:
+            # Deliberate gaps, so the report stops filing the same accepted
+            # risk as a critical finding on every single run.
+            from app.guest_intent import collect_exceptions
+            exc = collect_exceptions(host_entry) if host_entry else {"exceptions": {}}
+            for g in matrix["guests"]:
+                if g.get("source_host") != source_host:
+                    continue
+                rec = exc["exceptions"].get(str(g.get("vmid") or ""))
+                if rec:
+                    g["exception"] = rec
+        except Exception as e:
+            log.warning("replication report: exception read failed for %s: %s",
+                        source_host, e)
+
+    # One authority for the verdict, shared with the overview -- the rule is
+    # written once, in backups.py, and both the table and the report render it.
+    from app.backups import protection_state, stale_exception
+    for g in matrix["guests"]:
+        g["protection"] = protection_state(g)
+        stale = stale_exception(g)
+        if stale:
+            g["stale_exception"] = stale
 
     payload = condense_for_report(matrix)
     if backup_unreadable:
