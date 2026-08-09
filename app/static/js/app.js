@@ -5730,6 +5730,28 @@ const _CR_CATS = ["guests", "network", "storage", "apt", "access", "ssh", "firew
 // Correlated by ZFS snapshot guid: a guid survives send/recv, so datasets
 // sharing guids are the same lineage regardless of their names or pools, and
 // the host holding the newest snapshot is the source.
+// Status pill for one replica, the twin of _backupBadge -- the two columns
+// stand side by side and should be readable the same way, at a glance.
+//
+// The verdict is in_sync, which the backend already computes label-aware:
+// snapshot labels the copy is configured never to receive (frequent, usually)
+// do not count as missing, so a healthy filtered replica stays green instead of
+// permanently showing a gap it was never meant to close.
+function _replicaBadge(copy) {
+    const missing = copy.missing_from_source || 0;
+    const ok = copy.in_sync !== undefined ? copy.in_sync : missing === 0;
+    const parts = [ok ? t("inv_repl_in_sync") : t("inv_repl_behind", String(missing))];
+    if (copy.lag_seconds != null) parts.push(t("inv_behind") + " " + _formatAge(copy.lag_seconds));
+    if ((copy.excluded_labels || []).length) {
+        parts.push(t("inv_not_replicated") + ": " + copy.excluded_labels.join(", "));
+    }
+    return h("span", {
+        className: "badge " + (ok ? "badge-online" : "badge-warning"),
+        title: parts.join(" · "),
+        style: "font-weight:700",
+    }, ok ? "✓" : "⚠");
+}
+
 async function viewInventory() {
     setContent(loading());
     const container = h("div");
@@ -5868,15 +5890,23 @@ async function viewInventory() {
             // like a fault on a perfectly healthy copy.
             const excl = (c.excluded_labels || []).length
                 ? ` · ${t("inv_not_replicated")}: ${c.excluded_labels.join(", ")}` : "";
-            copyTd.appendChild(h("div", { style: "margin-bottom:2px" }, [
+            // Pill on its own line with the detail underneath, laid out like
+            // the Backup column beside it -- the two read as one pattern
+            // instead of one badge floating in a sentence and one above it.
+            const row = h("div", { style: "margin-bottom:6px" });
+            row.appendChild(_replicaBadge(c));
+            row.appendChild(h("div", { style: "margin-top:2px" }, [
                 h("span", {}, c.host + " "),
                 h("span", { className: "muted", style: "font-size:11px" },
                     `${c.snapshot_count} ${t("inv_snaps_short")} · ${t("inv_behind")} ${lag}` +
                     (bad ? ` · ${c.missing_from_source} ${t("inv_missing")}` : "") + excl),
             ]));
+            copyTd.appendChild(row);
         });
         if (g.copy_count === 0) {
-            copyTd.appendChild(h("span", { style: "color:var(--error,#f44336)" },
+            copyTd.appendChild(h("span", { className: "badge badge-danger",
+                                           style: "font-weight:700" }, "✗"));
+            copyTd.appendChild(h("div", { style: "color:var(--error,#f44336);margin-top:2px" },
                 g.no_snapshots ? t("inv_none_at_all") : t("inv_none")));
         }
         tr.appendChild(copyTd);
