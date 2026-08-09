@@ -116,6 +116,26 @@ def test_thresholds_travel_with_the_response(client, monkeypatch):
     assert body["warn_hours"] == 36 and body["crit_hours"] == 168
 
 
+def _matrix_via_task(client, host):
+    """Start the collection and wait for the task, returning its result.
+
+    The endpoint no longer answers with the matrix: on a real estate the
+    collection outlasts gunicorn's request timeout, so it runs as a background
+    task and the client polls /api/replication/task.
+    """
+    import time
+    from app.tasks import get_task
+    started = client.get("/api/inventory/matrix?host=" + host).get_json()
+    assert started["task_id"], started
+    for _ in range(200):                       # 10s ceiling; stubs finish instantly
+        rec = get_task(started["task_id"])
+        if rec and rec["status"] != "running":
+            assert rec["status"] == "done", rec.get("error")
+            return rec["result"]
+        time.sleep(0.05)
+    raise AssertionError("collection task did not finish")
+
+
 def test_matrix_attaches_backups_for_the_selected_host_only(client, monkeypatch):
     import time
     now = int(time.time())
@@ -124,7 +144,7 @@ def test_matrix_attaches_backups_for_the_selected_host_only(client, monkeypatch)
         {"vmid": "200", "source_host": "10.0.0.2", "copies": [], "copy_count": 0},
     ], "hosts": ["10.0.0.1", "10.0.0.2"]}
     monkeypatch.setattr("app.replication_inventory.collect_inventory",
-                        lambda hosts: dict(matrix))
+                        lambda hosts, progress=None: dict(matrix))
     monkeypatch.setattr("app.replication_inventory.filter_matrix",
                         lambda mx, source_host=None: dict(mx))
     monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: ["10.0.0.1"])
@@ -136,7 +156,7 @@ def test_matrix_attaches_backups_for_the_selected_host_only(client, monkeypatch)
                                       "stdout": _pbs_content("100", now - 3600)},
         "jobs.cfg": {"success": True, "stdout": JOBS_ALL, "stderr": ""},
     })
-    body = client.get("/api/inventory/matrix?host=10.0.0.1").get_json()
+    body = _matrix_via_task(client, "10.0.0.1")
     guests = {g["vmid"]: g for g in body["guests"]}
     assert guests["100"]["backup"]["state"] == "green"
     assert "backup" not in guests["200"]        # other host, not read here
@@ -149,7 +169,7 @@ def test_matrix_still_renders_when_the_backup_read_explodes(client, monkeypatch)
     matrix = {"guests": [{"vmid": "100", "source_host": "10.0.0.1",
                           "copies": [], "copy_count": 0}], "hosts": ["10.0.0.1"]}
     monkeypatch.setattr("app.replication_inventory.collect_inventory",
-                        lambda hosts: dict(matrix))
+                        lambda hosts, progress=None: dict(matrix))
     monkeypatch.setattr("app.replication_inventory.filter_matrix",
                         lambda mx, source_host=None: dict(mx))
     monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: [])
@@ -159,7 +179,63 @@ def test_matrix_still_renders_when_the_backup_read_explodes(client, monkeypatch)
         raise RuntimeError("ssh gone")
     monkeypatch.setattr("app.backups.host_backup_states", boom)
 
-    body = client.get("/api/inventory/matrix?host=10.0.0.1").get_json()
+    body = _matrix_via_task(client, "10.0.0.1")
     assert body["guests"][0]["vmid"] == "100"
     assert body["backup_readable"] is False
     assert "ssh gone" in body["backup_error"]
+
+
+def test_the_endpoint_answers_immediately_with_a_task_id(client, monkeypatch):
+    # The point of the change: the HTTP request must return without waiting for
+    # the collection, however long that takes. A slow collector here would have
+    # blocked the old endpoint past gunicorn's 300s ceiling.
+    import threading
+    import time
+    release = threading.Event()
+
+    def slow_collect(hosts, progress=None):
+        release.wait(10)
+        return {"guests": [], "hosts": []}
+
+    monkeypatch.setattr("app.replication_inventory.collect_inventory", slow_collect)
+    monkeypatch.setattr("app.replication_inventory.filter_matrix",
+                        lambda mx, source_host=None: dict(mx))
+    monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: [])
+    monkeypatch.setattr(m, "load_hosts", lambda: [{"address": "10.0.0.1"}])
+
+    t0 = time.time()
+    body = client.get("/api/inventory/matrix?host=10.0.0.1").get_json()
+    elapsed = time.time() - t0
+    assert body["task_id"]
+    assert elapsed < 2, f"endpoint blocked for {elapsed:.1f}s"
+    release.set()
+
+
+def test_progress_is_reported_per_host(client, monkeypatch):
+    # A blank page for two minutes reads as a hang; the task has to say where
+    # it is.
+    from app.tasks import get_task
+    import time
+    seen = []
+
+    def collect(hosts, progress=None):
+        if progress:
+            progress("1/2 10.0.0.1")
+            progress("2/2 10.0.0.2")
+        return {"guests": [], "hosts": []}
+
+    monkeypatch.setattr("app.replication_inventory.collect_inventory", collect)
+    monkeypatch.setattr("app.replication_inventory.filter_matrix",
+                        lambda mx, source_host=None: dict(mx))
+    monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: [])
+    monkeypatch.setattr(m, "load_hosts", lambda: [])
+
+    started = client.get("/api/inventory/matrix").get_json()
+    for _ in range(200):
+        rec = get_task(started["task_id"])
+        if rec and rec["status"] != "running":
+            break
+        time.sleep(0.05)
+    msgs = [e["msg"] for e in rec["log"]]
+    assert "hosts 1/2 10.0.0.1" in msgs
+    assert "hosts 2/2 10.0.0.2" in msgs

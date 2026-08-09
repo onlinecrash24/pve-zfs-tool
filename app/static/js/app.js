@@ -5752,30 +5752,66 @@ function _replicaBadge(copy) {
     }, ok ? "✓" : "⚠");
 }
 
+// Collect the overview's data as a background task and resolve with the matrix.
+//
+// This used to be one blocking GET. On a real estate the inventory alone takes
+// minutes and the per-storage backup calls add more, while gunicorn cuts the
+// request at 300s and answers with an HTML error page -- which this code then
+// tried to parse as JSON, producing "Unexpected token '<'". A higher timeout
+// would only move the cliff, so the work runs off the request thread now and
+// reports progress while it does.
+async function _collectInventory(host, onProgress) {
+    const start = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(host));
+    if (!start || !start.task_id) throw new Error((start && start.error) || t("failed"));
+    return await new Promise((resolve, reject) => {
+        pollReplicationTask(start.task_id, {
+            onTick: rec => { if (onProgress) onProgress(rec.progress || ""); },
+            onDone: rec => resolve(rec.result || {}),
+            onError: msg => reject(new Error(msg)),
+        });
+    });
+}
+
 async function viewInventory() {
-    setContent(loading());
-    const container = h("div");
-    container.appendChild(h("div", { className: "page-header" }, [
+    const header = () => h("div", { className: "page-header" }, [
         h("h2", {}, t("inv_title")),
         h("p", {}, t("inv_subtitle")),
-    ]));
+    ]);
 
     if (!currentHost) {
-        container.appendChild(h("div", { className: "card" },
+        const c = h("div");
+        c.appendChild(header());
+        c.appendChild(h("div", { className: "card" },
             h("div", { className: "card-body" }, t("select_host_first"))));
-        setContent(container); return;
+        setContent(c); return;
     }
+
+    // Progress card while the task runs -- a blank page for two minutes reads
+    // as a hang, which is how this looked before the timeout was diagnosed.
+    const waiting = h("div");
+    waiting.appendChild(header());
+    const progress = h("span", {}, t("inv_collecting"));
+    waiting.appendChild(h("div", { className: "card" },
+        h("div", { className: "card-body" }, progress)));
+    setContent(waiting);
 
     let m;
     try {
         // Scoped to the selected host AS SOURCE: with hosts replicating to each
         // other, an unscoped view lists every guest twice, once per direction.
-        m = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(currentHost));
+        m = await _collectInventory(currentHost, (p) => {
+            progress.textContent = p ? t("inv_collecting_at", p) : t("inv_collecting");
+        });
     } catch (e) {
-        container.appendChild(h("div", { className: "card" },
+        const c = h("div");
+        c.appendChild(header());
+        c.appendChild(h("div", { className: "card" },
             h("div", { className: "card-body" }, e.message || t("failed"))));
-        setContent(container); return;
+        setContent(c); return;
     }
+
+    const container = h("div");
+    container.appendChild(header());
 
     // Every guest of the selected host, replicated ones first, then the ones
     // without a copy. The page used to be blank for a host that replicated

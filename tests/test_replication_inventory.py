@@ -351,6 +351,27 @@ def test_hosts_are_collected_in_parallel(monkeypatch):
     assert peak[0] > 1
 
 
+def test_progress_is_reported_once_per_host(monkeypatch):
+    # The collection runs as a background task now, and a caller who waits a
+    # minute deserves to see how far it has got.
+    monkeypatch.setattr(ri, "_collect_one_host",
+                        lambda h: {"address": h["address"], "rows": [],
+                                   "guests": [], "configs": []})
+    seen = []
+    hosts = [{"address": f"h{i}"} for i in range(3)]
+    ri.collect_inventory(hosts, progress=seen.append)
+    assert seen == ["1/3 h0", "2/3 h1", "3/3 h2"]
+
+
+def test_the_progress_callback_does_not_change_the_result(monkeypatch):
+    monkeypatch.setattr(ri, "_collect_one_host",
+                        lambda h: {"address": h["address"], "rows": [],
+                                   "guests": [], "configs": []})
+    hosts = [{"address": "h1"}, {"address": "h2"}]
+    assert ri.collect_inventory(hosts) == ri.collect_inventory(hosts,
+                                                               progress=lambda m: None)
+
+
 def test_collect_inventory_without_hosts():
     got = ri.collect_inventory([])
     assert got["guests"] == [] and got["snapshot_count"] == 0

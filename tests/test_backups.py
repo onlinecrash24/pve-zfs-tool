@@ -513,3 +513,82 @@ def test_a_fully_backed_up_host_that_replicates_nothing_reports_ok():
     guests = [dict(_guest(copies=0, backup=b.STATE_OK), vmid=str(i))
               for i in range(200, 205)]
     assert b.overall_verdict(guests) == "ok"
+
+
+# --- several storages: the parallel read path -----------------------------
+
+def _multi_storage_router(responses):
+    """Thread-safe canned router -- the parallel path calls this concurrently."""
+    def run(host, command, timeout=30, cache_ttl=0):
+        for needle, result in responses.items():
+            if needle in command:
+                return result
+        return {"success": False, "stdout": "", "stderr": "unexpected: " + command}
+    return run
+
+
+THREE_STORAGES = json.dumps([
+    {"storage": "pbs-main", "type": "pbs", "enabled": 1, "active": 1},
+    {"storage": "nfs-bk", "type": "nfs", "enabled": 1, "active": 1},
+    {"storage": "local", "type": "dir", "enabled": 1, "active": 1},
+])
+
+
+def test_volumes_from_every_storage_are_collected(monkeypatch):
+    # Serially, three storages at a 120s timeout each could outlast the whole
+    # request budget on their own; they are read in parallel now, and nothing
+    # may be dropped in the process.
+    monkeypatch.setattr(b, "run_command", _multi_storage_router({
+        "hostname": {"success": True, "stdout": "pve251\n", "stderr": ""},
+        "/storage --content backup": {"success": True, "stdout": THREE_STORAGES,
+                                      "stderr": ""},
+        "/storage/pbs-main/content": {"success": True, "stderr": "", "stdout": json.dumps(
+            [_pbs_vol("100", int(NOW - HOUR))])},
+        "/storage/nfs-bk/content": {"success": True, "stderr": "", "stdout": json.dumps(
+            [_dir_vol("101", int(NOW - 2 * HOUR))])},
+        "/storage/local/content": {"success": True, "stderr": "", "stdout": json.dumps(
+            [_dir_vol("102", int(NOW - 3 * HOUR))])},
+        "jobs.cfg": {"success": True, "stdout": JOBS_CFG, "stderr": ""},
+    }))
+    data = b.collect_backups({"address": "h"})
+    assert data["readable"] is True
+    assert sorted(v["vmid"] for v in data["volumes"]) == ["100", "101", "102"]
+    assert sorted(v["storage"] for v in data["volumes"]) == ["local", "nfs-bk", "pbs-main"]
+    assert data["unreadable"] == []
+
+
+def test_one_failing_storage_does_not_take_the_others_with_it(monkeypatch):
+    monkeypatch.setattr(b, "run_command", _multi_storage_router({
+        "hostname": {"success": True, "stdout": "pve251\n", "stderr": ""},
+        "/storage --content backup": {"success": True, "stdout": THREE_STORAGES,
+                                      "stderr": ""},
+        "/storage/pbs-main/content": {"success": False, "stdout": "",
+                                      "stderr": "connection refused"},
+        "/storage/nfs-bk/content": {"success": True, "stderr": "", "stdout": json.dumps(
+            [_dir_vol("101", int(NOW - 2 * HOUR))])},
+        "/storage/local/content": {"success": True, "stderr": "", "stdout": json.dumps(
+            [_dir_vol("102", int(NOW - 3 * HOUR))])},
+        "jobs.cfg": {"success": True, "stdout": JOBS_CFG, "stderr": ""},
+    }))
+    data = b.collect_backups({"address": "h"})
+    # The two that answered still count, and the one that did not is named.
+    assert data["readable"] is True
+    assert sorted(v["vmid"] for v in data["volumes"]) == ["101", "102"]
+    assert data["unreadable"] == [{"storage": "pbs-main", "error": "connection refused"}]
+
+
+def test_a_disabled_storage_among_several_is_reported_not_read(monkeypatch):
+    storages = json.dumps([
+        {"storage": "pbs-main", "type": "pbs", "enabled": 1, "active": 1},
+        {"storage": "old-nfs", "type": "nfs", "enabled": 0, "active": 0},
+    ])
+    monkeypatch.setattr(b, "run_command", _multi_storage_router({
+        "hostname": {"success": True, "stdout": "pve251\n", "stderr": ""},
+        "/storage --content backup": {"success": True, "stdout": storages, "stderr": ""},
+        "/storage/pbs-main/content": {"success": True, "stderr": "", "stdout": json.dumps(
+            [_pbs_vol("100", int(NOW - HOUR))])},
+        "jobs.cfg": {"success": True, "stdout": JOBS_CFG, "stderr": ""},
+    }))
+    data = b.collect_backups({"address": "h"})
+    assert [v["vmid"] for v in data["volumes"]] == ["100"]
+    assert data["unreadable"] == [{"storage": "old-nfs", "error": "disabled"}]

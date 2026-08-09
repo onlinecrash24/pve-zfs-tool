@@ -590,10 +590,15 @@ def list_auto_snap_disabled(host: Dict[str, Any]) -> Dict[str, Any]:
     return {"datasets": out}
 
 
-def list_configs(host: Dict[str, Any]) -> Dict[str, Any]:
+def list_configs(host: Dict[str, Any], cache_ttl: int = 0) -> Dict[str, Any]:
     """Enumerate per-source config files in /etc/bashclub.
 
     Returns ``{configs: [{path, source, target, exists}], default_exists: bool}``.
+
+    ``cache_ttl`` is for read-only callers that run this on every host of an
+    estate (the backup overview): replication configs change by hand, so
+    re-reading them on every page view buys nothing. Callers that act on the
+    result leave it at 0.
     """
     cmd = (
         f"for f in {shlex.quote(CONFIG_DIR)}/*.conf; do "
@@ -601,7 +606,7 @@ def list_configs(host: Dict[str, Any]) -> Dict[str, Any]:
         f"  echo __FILE__ $f; cat $f; echo __END__; "
         f"done 2>/dev/null"
     )
-    r = run_command(host, cmd, timeout=15)
+    r = run_command(host, cmd, timeout=15, cache_ttl=cache_ttl)
     out: List[Dict[str, Any]] = []
     if r["success"] and r["stdout"]:
         cur = None

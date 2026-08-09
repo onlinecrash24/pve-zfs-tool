@@ -2467,33 +2467,40 @@ def api_dr_restore_category():
 # Backup overview: which host holds the original, where are the copies
 # ---------------------------------------------------------------------------
 
-@app.route("/api/inventory/matrix")
-@login_required
-def api_inventory_matrix():
-    """Per-guest source and copies across all hosts, correlated by snapshot guid.
+def collect_matrix_task(progress_cb, host):
+    """The backup overview's data, gathered off the request thread.
 
-    zfs send/recv preserves the guid, so datasets sharing guids are the same
-    lineage regardless of their names or pools; the host holding the newest
-    snapshot is the source."""
+    Snapshots from every host, correlated by guid (zfs send/recv preserves it,
+    so datasets sharing guids are the same lineage regardless of names or
+    pools), then the selected host's backups merged in.
+
+    This used to run inside the HTTP request and could not finish on a real
+    estate: the inventory alone may take minutes, and the per-storage backup
+    calls add more on top, while gunicorn cuts the request at 300s and returns
+    an HTML error page -- which the client then tried to parse as JSON
+    ("Unexpected token '<'"). Raising the timeout would only move the cliff,
+    so the work moved to a background task instead: no deadline, and the user
+    watches it progress.
+    """
     from app.replication_inventory import (collect_inventory, filter_matrix,
                                            source_hosts)
-    matrix = collect_inventory(load_hosts())
+    progress_cb("inventory")
+    matrix = collect_inventory(load_hosts(), progress=lambda m: progress_cb("hosts " + m))
     available = source_hosts(matrix)
     # Scoped to one source host: showing both directions at once lists every
     # replicated guest twice, once per side.
-    host = (request.args.get("host") or "").strip()
     out = filter_matrix(matrix, source_host=host or None)
     out["source_hosts"] = available
 
     # Backups, for the selected source host only: they live where the guest
     # runs, and reading them means one network call per backup storage -- doing
-    # that for every registered host would multiply a cost the user already
-    # noticed on this page.
+    # that for every registered host would multiply the cost for nothing.
     if host:
         entry = _find_host(host)
         if entry:
             try:
                 from app.backups import host_backup_states, merge_backups
+                progress_cb("backups")
                 vmids = [str(g.get("vmid")) for g in (out.get("guests") or [])
                          if g.get("source_host") == host and g.get("vmid")]
                 res = host_backup_states(entry, vmids=vmids)
@@ -2508,7 +2515,25 @@ def api_inventory_matrix():
                 log.warning("inventory: backup collection failed for %s: %s", host, e)
                 out["backup_error"] = str(e)[:300]
                 out["backup_readable"] = False
-    return jsonify(out)
+    progress_cb("done")
+    return out
+
+
+@app.route("/api/inventory/matrix")
+@login_required
+def api_inventory_matrix():
+    """Start the collection and hand back a task id.
+
+    Polled through /api/replication/task, which is generic despite its name --
+    app.replication re-exports get_task from app.tasks, so any task started via
+    start_task can be read there. The AI report button on this very page
+    already uses it.
+    """
+    from app.tasks import start_task
+    host = (request.args.get("host") or "").strip()
+    task_id = start_task("inventory-matrix", collect_matrix_task, host,
+                         prefix="inv")
+    return jsonify({"success": True, "task_id": task_id})
 
 
 # ---------------------------------------------------------------------------

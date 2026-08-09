@@ -24,7 +24,7 @@ unit tested without touching a host.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.snaptags import extract_tag
 from app.ssh_manager import run_command
@@ -449,14 +449,15 @@ def _collect_one_host(h: Dict[str, Any]) -> Dict[str, Any]:
         out["configs"] = [
             {"target_host": addr, "source": c.get("source", ""),
              "target": c.get("target", "")}
-            for c in (list_configs(h).get("configs") or [])
+            for c in (list_configs(h, cache_ttl=300).get("configs") or [])
         ]
     except Exception:
         pass
     return out
 
 
-def collect_inventory(hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
+def collect_inventory(hosts: List[Dict[str, Any]],
+                      progress: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """Gather snapshots, guests and replication configs from every host.
 
     Hosts are queried in parallel: sequentially, the wait is the sum of every
@@ -464,6 +465,11 @@ def collect_inventory(hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
     gunicorn request timeout and return an HTML error page instead of JSON.
     run_command keeps its SSH connections thread-local, so each worker gets its
     own connection and they do not interfere.
+
+    ``progress`` is called once per finished host with a human-readable line.
+    The collection now runs inside a background task rather than an HTTP
+    request, and a caller who waits a minute deserves to see that something is
+    happening. Optional, so the report path stays untouched.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -474,7 +480,11 @@ def collect_inventory(hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
     unreachable: List[str] = []
 
     if hosts:
+        total = len(hosts)
+        done = 0
         with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as pool:
+            # pool.map yields in submission order, so a plain counter is an
+            # honest "n of m" -- it counts results consumed, not threads started.
             for res in pool.map(_collect_one_host, hosts):
                 addr = res["address"]
                 per_host[addr] = res["rows"]
@@ -482,6 +492,9 @@ def collect_inventory(hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
                 configured.extend(res["configs"])
                 if not res["rows"]:
                     unreachable.append(addr)
+                done += 1
+                if progress:
+                    progress(f"{done}/{total} {addr}")
 
     matrix = build_matrix(per_host, guests_by_host, configured)
     matrix["hosts"] = list(per_host.keys())

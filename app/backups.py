@@ -421,13 +421,10 @@ def collect_backups(host: Dict[str, Any], node: str = "",
         return out
     out["storages"] = storages
 
-    for st in storages:
+    def _read_storage(st):
+        """One storage's volumes, or the reason it could not be listed."""
         if not st["enabled"] or not st["active"]:
-            out["unreadable"].append({
-                "storage": st["storage"],
-                "error": "disabled" if not st["enabled"] else "inactive",
-            })
-            continue
+            return st, None, ("disabled" if not st["enabled"] else "inactive")
         cr = run_command(
             host,
             f"pvesh get /nodes/{shlex.quote(node)}/storage/{shlex.quote(st['storage'])}"
@@ -435,11 +432,28 @@ def collect_backups(host: Dict[str, Any], node: str = "",
             timeout=120, cache_ttl=cache_ttl)
         vols = parse_backup_content(cr.get("stdout", ""), st["storage"], st["type"])
         if not vols and not cr.get("success"):
-            out["unreadable"].append({
-                "storage": st["storage"],
-                "error": ((cr.get("stderr") or cr.get("stdout") or "").strip()
-                          .splitlines() or ["no answer"])[0][:300],
-            })
+            return st, None, ((cr.get("stderr") or cr.get("stdout") or "").strip()
+                              .splitlines() or ["no answer"])[0][:300]
+        return st, vols, None
+
+    # In parallel: each of these is an independent network round trip that the
+    # PVE node makes to the backup server, and a PBS listing a large datastore
+    # takes seconds. Serially, three storages at a 120s timeout each could
+    # outlast the whole request budget on their own. run_command keeps its SSH
+    # connections thread-local, so every worker opens its own session to the
+    # same host -- the same construction collect_inventory uses across hosts,
+    # and four concurrent sessions sit well below sshd's MaxSessions of 10.
+    workers = min(4, len(storages))
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_read_storage, storages))
+    else:
+        results = [_read_storage(st) for st in storages]
+
+    for st, vols, error in results:
+        if error is not None:
+            out["unreadable"].append({"storage": st["storage"], "error": error})
             continue
         out["readable"] = True
         out["volumes"].extend(vols)
