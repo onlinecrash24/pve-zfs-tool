@@ -5890,18 +5890,23 @@ async function viewInventory() {
             // like a fault on a perfectly healthy copy.
             const excl = (c.excluded_labels || []).length
                 ? ` · ${t("inv_not_replicated")}: ${c.excluded_labels.join(", ")}` : "";
-            copyTd.appendChild(h("div", { style: "margin-bottom:2px" }, [
-                _replicaBadge(c),
-                h("span", {}, " " + c.host + " "),
+            // Pill on its own line with the detail underneath, laid out like
+            // the Backup column beside it -- the two read as one pattern
+            // instead of one badge floating in a sentence and one above it.
+            const row = h("div", { style: "margin-bottom:6px" });
+            row.appendChild(_replicaBadge(c));
+            row.appendChild(h("div", { style: "margin-top:2px" }, [
+                h("span", {}, c.host + " "),
                 h("span", { className: "muted", style: "font-size:11px" },
                     `${c.snapshot_count} ${t("inv_snaps_short")} · ${t("inv_behind")} ${lag}` +
                     (bad ? ` · ${c.missing_from_source} ${t("inv_missing")}` : "") + excl),
             ]));
+            copyTd.appendChild(row);
         });
         if (g.copy_count === 0) {
             copyTd.appendChild(h("span", { className: "badge badge-danger",
-                                           style: "font-weight:700;margin-right:6px" }, "✗"));
-            copyTd.appendChild(h("span", { style: "color:var(--error,#f44336)" },
+                                           style: "font-weight:700" }, "✗"));
+            copyTd.appendChild(h("div", { style: "color:var(--error,#f44336);margin-top:2px" },
                 g.no_snapshots ? t("inv_none_at_all") : t("inv_none")));
         }
         tr.appendChild(copyTd);
