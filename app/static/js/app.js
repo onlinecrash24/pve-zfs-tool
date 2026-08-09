@@ -5752,30 +5752,119 @@ function _replicaBadge(copy) {
     }, ok ? "✓" : "⚠");
 }
 
+// Collect the overview's data as a background task and resolve with the matrix.
+//
+// This used to be one blocking GET. On a real estate the inventory alone takes
+// minutes and the per-storage backup calls add more, while gunicorn cuts the
+// request at 300s and answers with an HTML error page -- which this code then
+// tried to parse as JSON, producing "Unexpected token '<'". A higher timeout
+// would only move the cliff, so the work runs off the request thread now and
+// reports progress while it does.
+async function _collectInventory(host, onProgress) {
+    const start = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(host));
+    if (!start || !start.task_id) throw new Error((start && start.error) || t("failed"));
+    return await new Promise((resolve, reject) => {
+        pollReplicationTask(start.task_id, {
+            onTick: rec => { if (onProgress) onProgress(rec.progress || ""); },
+            onDone: rec => resolve(rec.result || {}),
+            onError: msg => reject(new Error(msg)),
+        });
+    });
+}
+
+// Declare a guest as deliberately unprotected -- or withdraw that.
+//
+// The checkboxes are the complete desired state, not a set of additions: a box
+// left unticked has its PVE tag removed, so withdrawing works through the same
+// dialog that granted it. The reason is what a review six months from now
+// actually needs; the tag alone cannot carry it.
+function _openExceptionDialog(g) {
+    const exc = g.exception || {};
+    const label = `${g.vmid || "?"} ${g.guest_name ? "— " + g.guest_name : ""}`;
+    const body = h("div");
+    body.appendChild(h("p", { className: "muted", style: "font-size:12px;margin-top:0" },
+        t("inv_exc_intro")));
+
+    const cbBackup = h("input", { type: "checkbox", id: "exc-backup" });
+    const cbRepl = h("input", { type: "checkbox", id: "exc-repl" });
+    if (exc.no_backup) cbBackup.setAttribute("checked", "checked");
+    if (exc.no_replication) cbRepl.setAttribute("checked", "checked");
+    const row = (cb, text) => h("label", {
+        style: "display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:6px",
+    }, [cb, h("span", {}, text)]);
+    body.appendChild(row(cbBackup, t("inv_exc_no_backup")));
+    body.appendChild(row(cbRepl, t("inv_exc_no_replication")));
+
+    body.appendChild(h("label", { style: "display:block;font-size:12px;margin-top:10px" },
+        t("inv_exc_reason")));
+    const reason = h("input", { className: "form-control", id: "exc-reason",
+                                style: "margin-top:4px" });
+    reason.value = exc.reason || "";
+    body.appendChild(reason);
+
+    // The confirm button lives in the modal footer, where openModal wires the
+    // listener itself -- the body goes in as HTML, so a handler attached to a
+    // button built here would be dropped on the way in.
+    const save = async () => {
+        const kinds = [];
+        if (document.getElementById("exc-backup").checked) kinds.push("backup");
+        if (document.getElementById("exc-repl").checked) kinds.push("replication");
+        try {
+            const r = await API.post(
+                "/api/pve/guest-exceptions?host=" + encodeURIComponent(currentHost),
+                { vmid: String(g.vmid), kinds,
+                  reason: document.getElementById("exc-reason").value });
+            if (!r.success) throw new Error(r.error || t("failed"));
+            toast(kinds.length ? t("inv_exc_saved") : t("inv_exc_withdrawn"), "success");
+            closeModal();
+            viewInventory();
+        } catch (e) {
+            toast(e.message || t("failed"), "error");
+        }
+    };
+    openModal(t("inv_exc_title") + ": " + label, body.outerHTML, save);
+}
+
 async function viewInventory() {
-    setContent(loading());
-    const container = h("div");
-    container.appendChild(h("div", { className: "page-header" }, [
+    const header = () => h("div", { className: "page-header" }, [
         h("h2", {}, t("inv_title")),
         h("p", {}, t("inv_subtitle")),
-    ]));
+    ]);
 
     if (!currentHost) {
-        container.appendChild(h("div", { className: "card" },
+        const c = h("div");
+        c.appendChild(header());
+        c.appendChild(h("div", { className: "card" },
             h("div", { className: "card-body" }, t("select_host_first"))));
-        setContent(container); return;
+        setContent(c); return;
     }
+
+    // Progress card while the task runs -- a blank page for two minutes reads
+    // as a hang, which is how this looked before the timeout was diagnosed.
+    const waiting = h("div");
+    waiting.appendChild(header());
+    const progress = h("span", {}, t("inv_collecting"));
+    waiting.appendChild(h("div", { className: "card" },
+        h("div", { className: "card-body" }, progress)));
+    setContent(waiting);
 
     let m;
     try {
         // Scoped to the selected host AS SOURCE: with hosts replicating to each
         // other, an unscoped view lists every guest twice, once per direction.
-        m = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(currentHost));
+        m = await _collectInventory(currentHost, (p) => {
+            progress.textContent = p ? t("inv_collecting_at", p) : t("inv_collecting");
+        });
     } catch (e) {
-        container.appendChild(h("div", { className: "card" },
+        const c = h("div");
+        c.appendChild(header());
+        c.appendChild(h("div", { className: "card" },
             h("div", { className: "card-body" }, e.message || t("failed"))));
-        setContent(container); return;
+        setContent(c); return;
     }
+
+    const container = h("div");
+    container.appendChild(header());
 
     // Every guest of the selected host, replicated ones first, then the ones
     // without a copy. The page used to be blank for a host that replicated
@@ -5866,7 +5955,7 @@ async function viewInventory() {
     table.appendChild(h("thead", {}, h("tr", {}, [
         h("th", {}, t("inv_guest")), h("th", {}, t("inv_source")),
         h("th", {}, t("inv_copies")), h("th", {}, t("backup_col")),
-        h("th", {}, t("inv_state")),
+        h("th", {}, t("inv_state")), h("th", {}, t("actions")),
     ])));
     const tbody = h("tbody");
     for (const g of guests) {
@@ -5928,27 +6017,30 @@ async function viewInventory() {
         }
         tr.appendChild(bkTd);
 
-        // Overall state: replication and backup are two independent lines of
-        // defence, so the verdict combines both instead of judging on copies
-        // alone. Backup is only factored in where it was actually read
-        // (g.backup present with a known state) -- on a host where backups
-        // were never examined, every guest still falls back to the old
-        // copy-only judgement, so nothing changes for setups without backup
-        // storage configured.
+        // Overall state comes from the backend (backups.protection_state): two
+        // independent defences, with a declared exception excusing only the gap
+        // it names. The rule used to live here as well as in Python and the two
+        // copies drifted; now this only renders the verdict.
         const hasCopy = g.copy_count > 0;
         const bkKnown = !!g.backup && g.backup.state !== "unknown";
         const bkMissing = bkKnown && g.backup.state === "red";
-        const bkPresent = bkKnown && g.backup.state !== "red";
+        const prot = g.protection || (hasCopy ? "ok" : "crit");
 
         const stTd = h("td", { style: "font-size:12px" });
         if (g.config_mismatch) {
             stTd.appendChild(h("span", { className: "badge badge-warning", title: g.config_mismatch }, "⚠"));
             stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" }, t("inv_mismatch_hint")));
-        } else if (!hasCopy && bkPresent) {
-            // No ZFS copy, but a real backup exists -- that IS a working
-            // second line of defence, just not a replication-shaped one.
-            stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
-        } else if (!hasCopy) {
+        } else if (prot === "accepted") {
+            // Deliberately unprotected. Grey, not green -- an unprotected guest
+            // is not a protected one, even when that is fine.
+            const exc = g.exception || {};
+            stTd.appendChild(h("span", {
+                className: "badge badge-stopped",
+                title: exc.reason || t("inv_exc_undocumented"),
+            }, t("inv_exc_accepted")));
+            stTd.appendChild(h("div", { className: "muted", style: "font-size:11px" },
+                exc.reason || t("inv_exc_undocumented")));
+        } else if (prot === "crit") {
             stTd.appendChild(h("span", { className: "badge badge-danger" }, t("inv_at_risk")));
         } else if (hasCopy && bkMissing) {
             // Replicated, but the backup read came back "no backup" -- only
@@ -5958,7 +6050,22 @@ async function viewInventory() {
         } else {
             stTd.appendChild(h("span", { className: "badge badge-online" }, t("inv_ok")));
         }
+        // A declaration reality has outgrown: "needs no backup" on a guest that
+        // has been getting backups for months. The note is now a lie waiting to
+        // mislead whoever reads it next.
+        if (g.stale_exception) {
+            stTd.appendChild(h("div", {
+                style: "color:var(--warning,#d29922);font-size:11px;margin-top:2px",
+            }, t("inv_exc_stale")));
+        }
         tr.appendChild(stTd);
+
+        const actTd = h("td");
+        actTd.appendChild(h("button", {
+            className: "btn btn-sm",
+            onClick: () => _openExceptionDialog(g),
+        }, t("inv_exc_btn")));
+        tr.appendChild(actTd);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
