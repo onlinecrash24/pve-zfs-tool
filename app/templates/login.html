@@ -37,6 +37,23 @@
             max-width: 100%;
             margin: 0 auto 32px;
         }
+        .login-footer {
+            margin-top: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .login-footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+        }
+        .login-footer a:hover {
+            color: var(--accent);
+            text-decoration: underline;
+        }
         .login-card .form-group {
             margin-bottom: 16px;
         }
@@ -107,6 +124,10 @@
                 <button type="submit" class="login-btn" id="login-btn">Login</button>
                 <div class="login-error" id="login-error"></div>
             </form>
+            <div class="login-footer">
+                <a href="https://github.com/onlinecrash24/pve-zfs-tool" target="_blank" rel="noopener noreferrer">MIT License</a>
+                <span>{{ app_version }}</span>
+            </div>
         </div>
     </div>
     <script>
