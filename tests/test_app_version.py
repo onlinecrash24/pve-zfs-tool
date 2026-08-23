@@ -7,6 +7,7 @@ and a build that is not a release says so.
 """
 
 import os
+import re
 
 import pytest
 
@@ -49,6 +50,24 @@ def test_the_login_page_shows_it(client, monkeypatch):
     monkeypatch.setenv("APP_VERSION", "v1.2.3")
     body = client.get("/login").get_data(as_text=True)
     assert "v1.2.3" in body
+
+
+def test_the_login_footer_links_to_the_repository(client):
+    # The login page is where somebody who did not deploy this lands. A link
+    # out is the only way from there to "what is this and who wrote it".
+    body = client.get("/login").get_data(as_text=True)
+    assert "https://github.com/onlinecrash24/pve-zfs-tool" in body
+    assert "MIT License" in body
+
+
+def test_the_outbound_link_cannot_reach_back(client):
+    # target=_blank without noopener hands the opened page a reference to this
+    # one -- on a login screen of all places. Checked on the anchor itself, so
+    # a noopener sitting on some other element would not satisfy it.
+    body = client.get("/login").get_data(as_text=True)
+    anchor = re.search(r"<a [^>]*github\.com/onlinecrash24[^>]*>", body).group(0)
+    assert 'target="_blank"' in anchor
+    assert "noopener" in anchor
 
 
 def test_the_home_page_gets_it_as_a_global(client, monkeypatch):
