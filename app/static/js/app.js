@@ -228,9 +228,17 @@ async function viewHome() {
 
     const container = h("div");
 
-    // Header
+    // Header. The version sits next to the title so the first question in any
+    // bug report -- "which version are you on?" -- is answered before it is
+    // asked. Baked into the image by CI, so it cannot claim a release it is not.
+    const title = h("h2", {}, t("home_title"));
+    if (window.ZFS_VERSION) {
+        title.appendChild(h("span", {
+            style: "margin-left:10px;font-size:13px;font-weight:400;color:var(--text-secondary)",
+        }, window.ZFS_VERSION));
+    }
     container.appendChild(h("div", { className: "page-header" }, [
-        h("h2", {}, t("home_title")),
+        title,
         h("p", {}, t("home_subtitle")),
     ]));
 

@@ -137,7 +137,10 @@
     <!-- Toast -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script>window.ZFS_DEFAULT_LANG = "{{ default_lang }}";</script>
+    <script>
+        window.ZFS_DEFAULT_LANG = "{{ default_lang }}";
+        window.ZFS_VERSION = "{{ app_version }}";
+    </script>
     <script src="/static/js/i18n.js?v={{ asset_v }}"></script>
     <script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>

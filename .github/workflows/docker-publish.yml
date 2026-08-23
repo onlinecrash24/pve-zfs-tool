@@ -114,6 +114,9 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The tag on a release build (v1.2.3), the branch name otherwise.
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Optional: Multi-Arch (amd64 + arm64, z.B. für Raspberry Pi)
@@ -130,3 +133,6 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The tag on a release build (v1.2.3), the branch name otherwise.
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}

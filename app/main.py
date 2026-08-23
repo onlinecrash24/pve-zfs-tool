@@ -300,9 +300,19 @@ def asset_version():
     return _ASSET_VER["v"]
 
 
+def app_version():
+    """The release this build came from, or ``dev``.
+
+    Baked into the image by CI as a build arg (the git tag), so it cannot drift
+    from the release it claims to be. A source build or a dev-branch image says
+    ``dev`` -- which is the truth, not a placeholder to be filled in later.
+    """
+    return (os.environ.get("APP_VERSION") or "dev").strip() or "dev"
+
+
 @app.context_processor
 def _inject_asset_version():
-    return {"asset_v": asset_version()}
+    return {"asset_v": asset_version(), "app_version": app_version()}
 
 
 @app.route("/")
