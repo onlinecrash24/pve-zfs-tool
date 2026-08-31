@@ -92,6 +92,10 @@ Schlüsselrotation per Klick, die den neuen Schlüssel überall ausrollt, bevor 
 alte entfernt wird, und Schutz gegen Path Traversal im Datei-Browser. Die
 vollständige Liste steht in [FEATURES_DE.md](FEATURES_DE.md#sicherheit).
 
+[SECURITY.md](SECURITY.md) nennt die Meldestelle für Schwachstellen, was als
+solche gilt und welche Schwächen heute bekannt und in Kauf genommen sind
+(englisch). [CHANGELOG.md](CHANGELOG.md) enthält alle Releases.
+
 ## Quick Start
 
 ### Option 1: Docker Compose mit GHCR-Image (empfohlen)
@@ -132,6 +136,28 @@ docker compose up -d
 git clone https://github.com/onlinecrash24/pve-zfs-tool.git
 cd pve-zfs-tool
 docker compose up -d --build
+```
+
+### Health-Check
+
+Das Image bringt einen Health-Check mit, `docker ps` meldet also `healthy` bzw.
+`unhealthy` statt nur `Up`. Compose übernimmt ihn aus dem Image — in der eigenen
+`docker-compose.yml` ist nichts zu ergänzen.
+
+Abgefragt wird alle 30 s `/login`. Dieser Pfad rendert eine echte Seite, ein
+Treffer heißt also, dass die Anwendung bedient, und nicht bloß, dass der Port
+offen ist. Der erste Check wartet 20 s auf den Start, drei Fehlschläge in Folge
+markieren den Container als `unhealthy`.
+
+Wichtig zu wissen: Docker startet einen ungesunden Container nicht von selbst
+neu. `restart: unless-stopped` deckt einen Absturz ab; auf „läuft, antwortet
+aber nicht" zu reagieren, braucht einen Orchestrator oder einen Watchdog. Gratis
+bekommt man dagegen eine Abhängigkeitsschranke:
+
+```yaml
+depends_on:
+  zfs-tool:
+    condition: service_healthy
 ```
 
 ---

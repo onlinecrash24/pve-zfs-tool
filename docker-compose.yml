@@ -9,9 +9,12 @@ services:
       - ssh-keys:/root/.ssh
       - zfs-data:/app/data
     environment:
-      - SECRET_KEY=change-me-in-production
-      - ADMIN_USER=admin
-      - ADMIN_PASSWORD=password
+      # The application refuses to treat these as real: it warns loudly at
+      # startup and replaces a placeholder SECRET_KEY with a random one on
+      # every restart, which logs everyone out until you set your own.
+      - SECRET_KEY=your-secret-key-here       # CHANGE THIS!
+      - ADMIN_USER=admin                      # CHANGE THIS!
+      - ADMIN_PASSWORD=your-strong-password   # CHANGE THIS!
       - FORCE_HTTPS=true  # HTTPS behind reverse proxy
       - TZ=Europe/Berlin  # Timezone (e.g. Europe/Berlin, UTC, America/New_York)
       - DEFAULT_LANG=de   # Default UI language for new visitors: de or en (user can still switch)

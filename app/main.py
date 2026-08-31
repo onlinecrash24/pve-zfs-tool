@@ -94,14 +94,47 @@ if os.environ.get("FORCE_HTTPS", "").lower() in ("1", "true", "yes"):
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "password")
 
+# Placeholder values that ship somewhere in this repository -- the code
+# fallbacks, the compose file, and the README's copy-paste block.
+#
+# Matching on the code default alone was not enough: the compose file said
+# SECRET_KEY=change-me-in-production and the README said your-secret-key-here,
+# so neither warned, and anyone who ran them unedited got a FIXED, publicly
+# known session key in silence. A placeholder must never be quieter than the
+# default it stands in for.
+PLACEHOLDER_SECRET_KEYS = frozenset({
+    "", "dev-key-change-me", "change-me-in-production", "your-secret-key-here",
+    "changeme", "change-me", "secret", "supersecret",
+})
+PLACEHOLDER_PASSWORDS = frozenset({
+    "", "password", "your-strong-password", "your-password-here",
+    "changeme", "change-me", "admin", "secret",
+})
+
+
+def is_placeholder_secret_key(value):
+    """True if nobody actually chose this SECRET_KEY."""
+    return (value or "").strip() in PLACEHOLDER_SECRET_KEYS
+
+
+def is_placeholder_password(value):
+    """True if nobody actually chose this ADMIN_PASSWORD.
+
+    Judged on the password alone: a strong password under the name `admin` is
+    fine, while a shipped placeholder under any name is not.
+    """
+    return (value or "").strip() in PLACEHOLDER_PASSWORDS
+
+
 # Startup security checks
-if app.secret_key == "dev-key-change-me":
-    log.critical("SECRET_KEY is using the insecure default! Set a strong SECRET_KEY environment variable.")
+if is_placeholder_secret_key(app.secret_key):
+    log.critical("SECRET_KEY is a placeholder or unset! Set a strong SECRET_KEY environment variable.")
     # Auto-generate a random key so sessions are at least unpredictable
     app.secret_key = secrets.token_hex(32)
-    log.warning("Auto-generated random SECRET_KEY for this session (will change on restart).")
-if ADMIN_USER == "admin" and ADMIN_PASSWORD == "password":
-    log.warning("Using default credentials (admin/password)! Change ADMIN_USER and ADMIN_PASSWORD environment variables.")
+    log.warning("Auto-generated random SECRET_KEY for this session (will change on restart, logging everyone out).")
+if is_placeholder_password(ADMIN_PASSWORD):
+    log.warning("ADMIN_PASSWORD is a placeholder or default value! Anyone who has read this "
+                "repository knows it. Set ADMIN_USER and ADMIN_PASSWORD environment variables.")
 
 # Rate limiting for login attempts
 _login_attempts = {}  # IP -> {"count": int, "last": float}

@@ -155,18 +155,13 @@ jobs:
     permissions:
       contents: write     # required to create the release
 
+    # No checkout: the tag message is read from the API, which is the only
+    # place it survives intact. See the comment in the step below.
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          # The default shallow checkout fetches the commit but not the tag
-          # OBJECT, so its message would come back empty and every release
-          # would silently fall back to generated notes.
-          fetch-depth: 0
-
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -174,11 +169,28 @@ jobs:
             echo "Release $TAG already exists -- leaving it untouched."
             exit 0
           fi
-          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" > notes.md
-          # contents:body is empty for a one-line or lightweight tag. Checked
-          # with whitespace stripped so a stray newline does not read as prose.
-          body=$(git tag -l --format='%(contents:body)' "$TAG" | tr -d '[:space:]')
-          if [ -n "$body" ]; then
+          # Read the tag message from the API rather than from a clone.
+          # actions/checkout materialises the tag as a LIGHTWEIGHT ref, and
+          # git's %(contents) then resolves to the COMMIT message without
+          # complaining -- which is how the first run of this job published
+          # v0.9.921 carrying the merge commit text instead of the tag's own
+          # notes. A local dry-run cannot reproduce it, because a tag created
+          # locally really is annotated.
+          #
+          # Plain assignments, so set -e aborts the job when the API call
+          # fails. Inside a test or a pipeline that failure is swallowed and
+          # the release quietly gets generated notes -- the same silent
+          # degradation this step exists to prevent.
+          obj_type=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" -q .object.type)
+          obj_sha=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" -q .object.sha)
+          : > notes.md
+          if [ "$obj_type" = "tag" ]; then
+            gh api "repos/$GH_REPO/git/tags/$obj_sha" -q .message > notes.md
+          fi
+          # Line 1 is the subject; prose lives below it. A lightweight tag, or
+          # an annotated one carrying only a subject, still gets a release --
+          # from generated notes rather than nothing at all.
+          if [ -n "$(sed -n '2,$p' notes.md | tr -d '[:space:]')" ]; then
             gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag
           else
             echo "Tag $TAG carries no message body -- generating notes from commits."
