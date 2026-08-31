@@ -92,6 +92,10 @@ Schlüsselrotation per Klick, die den neuen Schlüssel überall ausrollt, bevor 
 alte entfernt wird, und Schutz gegen Path Traversal im Datei-Browser. Die
 vollständige Liste steht in [FEATURES_DE.md](FEATURES_DE.md#sicherheit).
 
+[SECURITY.md](SECURITY.md) nennt die Meldestelle für Schwachstellen, was als
+solche gilt und welche Schwächen heute bekannt und in Kauf genommen sind
+(englisch). [CHANGELOG.md](CHANGELOG.md) enthält alle Releases.
+
 ## Quick Start
 
 ### Option 1: Docker Compose mit GHCR-Image (empfohlen)

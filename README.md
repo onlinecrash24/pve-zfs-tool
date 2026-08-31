@@ -90,6 +90,10 @@ key rotation that deploys the new key everywhere before removing the old one,
 and path-traversal protection on the file browser. The full list is in
 [FEATURES.md](FEATURES.md#security).
 
+[SECURITY.md](SECURITY.md) says where to report a vulnerability, what counts as
+one, and which weaknesses are known and accepted today.
+[CHANGELOG.md](CHANGELOG.md) has every release.
+
 ## Quick Start
 
 ### Option 1: Docker Compose with GHCR Image (recommended)
