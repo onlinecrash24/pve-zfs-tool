@@ -7,6 +7,32 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.923 -- 2026-08-31
+
+v0.9.923 — the German feature list says the same as the English one
+
+A documentation release. No behaviour changes.
+
+"Custom Report Logo" existed only in the English feature list — the last of the
+entries that had drifted apart, and, like the four restored before it, a
+feature that had been specified in German in the first place. Both files now
+list 149 features, with no section differing.
+
+The guard is the point. Two long prose files diverge in silence, and this
+drifted twice within a day before anyone counted. A test now compares the
+bullet count **per section** rather than as one total, so an entry added to one
+section and dropped from another cannot cancel out into a pass. A further test
+asserts the files are still shaped the way that comparison reads them —
+otherwise a reformat away from the current headings would quietly reduce it to
+zero sections equalling zero sections.
+
+Verified by deleting the restored bullet again and watching the test name the
+exact section.
+
+CHANGELOG.md regenerated, now covering 32 releases. It can never contain the
+release that ships it, so it trails the newest tag by one until regenerated
+with `tools/gen_changelog.py`.
+
 ## v0.9.922 -- 2026-08-31
 
 v0.9.922 — the placeholders were disarming the warning
