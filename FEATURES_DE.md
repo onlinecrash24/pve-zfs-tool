@@ -74,7 +74,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Replikat-Erkennung** -- Scannt jeden registrierten Host nach Replikat-Wurzeln und listet die replizierten Datasets samt ihren Snapshots
 - **Flexibles Ziel** -- Registrierten Host wählen oder freie Adresse/Port/User angeben (ein neu aufgesetzter Host hat evtl. eine neue IP); das Ziel-Dataset ist mit dem Original-Quellpfad vorbelegt
 - **Snapshot-Auswahl** -- Neuesten Replikat-Snapshot (Standard) oder einen älteren senden; `zfs send -R` nimmt alle Unterhierarchien und Properties mit
-- **Abgesichertes Force** -- Optionales `zfs recv -F` (Rollback passend zum Stream) ist standardmäßig aus und hinter einer Bestätigung verriegelt
+- **Abgesichertes Force** -- Optionales `zfs recv -F` (Rollback passend zum Stream) ist standardmäßig aus und verlangt ein Häkchen *und* eine Bestätigung, die das Dataset benennt. Was tatsächlich schützt, steht aber nicht im Browser: Der Server **verweigert** ein erzwungenes Receive, solange das Ziel noch eigene Snapshots hat — denn dann sieht die Quelle intakt aus, und Erzwingen würde Live-Daten zerstören. Diese Weigerung gilt auch für einen direkten API-Aufruf, der die Oberfläche nie berührt hat
 - **Hintergrund-Task** -- Das (ggf. stundenlange) Zurücksenden läuft als Hintergrund-Job mit Live-Fortschritt, die Oberfläche bleibt bedienbar
 - **Datei-Wiederherstellung** -- Einzelne Dateien werden über die bestehende Snapshots-Ansicht wiederhergestellt (beliebigen Replikat-Snapshot read-only mounten, durchsuchen, ansehen, wiederherstellen)
 

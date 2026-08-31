@@ -62,3 +62,34 @@ def test_every_runtime_prefix_has_variants():
     for p in prefixes:
         assert any(k.startswith(p) and k != p for k in defined), \
             f"no translations for the {p}* family"
+
+
+def test_every_notification_event_can_be_switched_off():
+    """A notification the user cannot turn off is worse than a missing one.
+
+    ``send_notification`` gates on ``config["events"][key]``, and the settings
+    page builds its checkboxes from a hand-written ``eventLabels`` map. Nothing
+    tied the two together, so an event added to the registry without a matching
+    map entry fires forever with no way to stop it -- silently, because the
+    other i18n tests only check that keys the UI *uses* exist, never that every
+    event the backend can emit is reachable from the UI.
+
+    That has now happened twice (``trim_started``/``trim_finished`` shipped in
+    v0.9.920, ``ai_report`` before it), which is what makes this a test.
+    """
+    from app.notifications import DEFAULT_CONFIG
+
+    events = sorted(DEFAULT_CONFIG["events"])
+    defined = set(_key_counts())
+
+    labels = re.search(r"eventLabels\s*=\s*\{(.*?)\n    \};", _read("app.js"), re.S)
+    assert labels, "eventLabels map not found -- did the settings view move?"
+    mapped = set(re.findall(r"^\s+([a-z_]+):", labels.group(1), re.M))
+
+    missing_label = [e for e in events if e not in mapped]
+    missing_text = [e for e in events if f"ev_{e}" not in defined]
+    assert not missing_label, (
+        "notification events with no checkbox in the settings page (they can "
+        "never be switched off): " + ", ".join(missing_label))
+    assert not missing_text, (
+        "notification events with no ev_* translation: " + ", ".join(missing_text))

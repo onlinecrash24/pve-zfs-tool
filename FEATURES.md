@@ -74,7 +74,7 @@ start at the [README](README.md).
 - **Replica Discovery** -- Scans every registered host for replica roots and lists the replicated datasets and their snapshots
 - **Flexible Target** -- Pick a registered host or a free-form address/port/user (a rebuilt host may have a new IP); the destination dataset defaults to the original source path
 - **Snapshot Choice** -- Send the newest replica snapshot (default) or any older one; `zfs send -R` carries all descendants and properties
-- **Guarded Force** -- Optional `zfs recv -F` (rollback to match the stream) is off by default and gated behind a typed confirmation
+- **Guarded Force** -- Optional `zfs recv -F` (rollback to match the stream) is off by default and needs both a checkbox and a confirmation naming the dataset. The part that actually protects you is not in the browser: the server **refuses** a forced receive while the destination still holds snapshots of its own, because that means the source looks intact and forcing would destroy live data. That refusal also stands for a direct API call that never went through the UI
 - **Background Task** -- The (potentially multi-hour) resend runs as a background job with live progress, so the UI stays responsive
 - **File-Level Recovery** -- Individual files are restored through the existing Snapshots view (mount any replica snapshot read-only, browse, preview, restore)
 

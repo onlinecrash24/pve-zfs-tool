@@ -7299,6 +7299,8 @@ async function viewNotifications() {
     const eventLabels = {
         scrub_started: t("ev_scrub_started"),
         scrub_finished: t("ev_scrub_finished"),
+        trim_started: t("ev_trim_started"),
+        trim_finished: t("ev_trim_finished"),
         rollback: t("ev_rollback"),
         snapshot_created: t("ev_snapshot_created"),
         snapshot_deleted: t("ev_snapshot_deleted"),
@@ -7306,6 +7308,7 @@ async function viewNotifications() {
         health_warning: t("ev_health_warning"),
         host_offline: t("ev_host_offline"),
         auto_snapshot: t("ev_auto_snapshot"),
+        ai_report: t("ev_ai_report"),
         replication_lag: t("ev_replication_lag"),
         host_backup_failed: t("ev_host_backup_failed"),
     };
