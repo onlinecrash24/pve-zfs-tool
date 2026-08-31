@@ -136,3 +136,51 @@ jobs:
           # The tag on a release build (v1.2.3), the branch name otherwise.
           build-args: |
             APP_VERSION=${{ github.ref_name }}
+
+  # Publish the GitHub release for a tag build.
+  #
+  # This used to be a manual step, and v0.9.920 shipped with a tag and an
+  # image but no release page because someone forgot. Runs after the image so
+  # the release never points at a version that failed to build.
+  #
+  # The notes come from the ANNOTATED TAG's own message. That keeps them
+  # deliberately authored at the moment of tagging instead of degrading into a
+  # generated commit list -- and it means `git show <tag>` and the release page
+  # say the same thing. A tag with only a subject line still produces a
+  # release, via --generate-notes, rather than nothing at all.
+  release:
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # required to create the release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          # The default shallow checkout fetches the commit but not the tag
+          # OBJECT, so its message would come back empty and every release
+          # would silently fall back to generated notes.
+          fetch-depth: 0
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists -- leaving it untouched."
+            exit 0
+          fi
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" > notes.md
+          # contents:body is empty for a one-line or lightweight tag. Checked
+          # with whitespace stripped so a stray newline does not read as prose.
+          body=$(git tag -l --format='%(contents:body)' "$TAG" | tr -d '[:space:]')
+          if [ -n "$body" ]; then
+            gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag
+          else
+            echo "Tag $TAG carries no message body -- generating notes from commits."
+            gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
+          fi
