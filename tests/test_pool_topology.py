@@ -264,3 +264,131 @@ def test_summarize_of_a_healthy_pool():
 
 def test_summarize_of_an_unknown_pool_is_empty_not_an_error():
     assert pt.summarize({}, "nope") == {"vdevs": [], "findings": [], "worst": "ok"}
+
+
+# --- verbatim output from four live hosts ---------------------------------
+#
+# Every fixture above indents with tabs; real `zpool status` on these PVE nodes
+# indents with eight spaces. The parser reads relative depth, so both work --
+# but nothing held that down, and a parser that only ever saw tabs is one
+# formatting change away from silently finding no vdevs at all. These are
+# pasted unmodified from the hosts, including the alignment padding that grows
+# with the longest device name.
+
+REAL_MIRRORED_BOOT = """  pool: rpool
+ state: ONLINE
+  scan: scrub repaired 0B in 00:16:03 with 0 errors on Sun Aug  9 00:40:04 2026
+config:
+
+        NAME                                                   STATE     READ WRITE CKSUM
+        rpool                                                  ONLINE       0     0     0
+          mirror-0                                             ONLINE       0     0     0
+            ata-KINGSTON_SEDC600ME960G_50026B72836874A3-part3  ONLINE       0     0     0
+            ata-KINGSTON_SEDC600ME960G_50026B72836875DE-part3  ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+REAL_SINGLE_DISK_BOOT = """  pool: rpool
+ state: ONLINE
+  scan: scrub repaired 0B in 00:05:46 with 0 errors on Sun Aug  9 00:29:47 2026
+config:
+
+        NAME        STATE     READ WRITE CKSUM
+        rpool       ONLINE       0     0     0
+          sdb3      ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+REAL_MIRROR_WITH_LOG_AND_CACHE = """  pool: tank
+ state: ONLINE
+  scan: scrub repaired 0B in 02:27:59 with 0 errors on Sun Aug  9 02:52:01 2026
+config:
+
+        NAME                                                STATE     READ WRITE CKSUM
+        tank                                                ONLINE       0     0     0
+          mirror-0                                          ONLINE       0     0     0
+            sdc                                             ONLINE       0     0     0
+            sdd                                             ONLINE       0     0     0
+        logs
+          ata-INTEL_SSDSC2BB480G4_CVWL422101EU480QGN-part3  ONLINE       0     0     0
+        cache
+          ata-INTEL_SSDSC2BB480G4_CVWL422101EU480QGN-part4  ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+REAL_TWO_POOLS_ONE_DOCUMENT = """  pool: rpool
+ state: ONLINE
+  scan: scrub repaired 0B in 00:26:11 with 0 errors on Sun Aug  9 00:50:12 2026
+config:
+
+        NAME                                                   STATE     READ WRITE CKSUM
+        rpool                                                  ONLINE       0     0     0
+          mirror-0                                             ONLINE       0     0     0
+            ata-KINGSTON_SEDC600ME960G_50026B7283687597-part3  ONLINE       0     0     0
+            ata-KINGSTON_SEDC600ME960G_50026B7283687619-part3  ONLINE       0     0     0
+        cache
+          nvme-eui.49313736333832374ce0001837312020-part1      ONLINE       0     0     0
+
+errors: No known data errors
+
+  pool: tankhdd
+ state: ONLINE
+  scan: scrub repaired 0B in 00:04:08 with 0 errors on Sun Aug  9 00:28:10 2026
+config:
+
+        NAME                                               STATE     READ WRITE CKSUM
+        tankhdd                                            ONLINE       0     0     0
+          mirror-0                                         ONLINE       0     0     0
+            ata-ST4000VN006-3CW104_ZW63AS2Z                ONLINE       0     0     0
+            ata-ST4000VN006-3CW104_ZW63AJWW                ONLINE       0     0     0
+        cache
+          nvme-eui.49313736333832374ce0001837312020-part2  ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+
+def test_space_indented_output_parses_like_tab_indented():
+    topo = pt.parse_topology(REAL_MIRRORED_BOOT)
+    assert topo["rpool"] == [{"tier": "data", "name": "mirror-0",
+                              "redundancy": "mirror", "state": "ONLINE",
+                              "devices": [
+                                  "ata-KINGSTON_SEDC600ME960G_50026B72836874A3-part3",
+                                  "ata-KINGSTON_SEDC600ME960G_50026B72836875DE-part3"]}]
+    assert pt.redundancy_findings(topo) == []
+
+
+def test_a_real_single_disk_boot_pool_is_critical():
+    # Two of the four hosts boot from one disk. It is the single most common
+    # Proxmox install and it is still a pool that one device failure ends --
+    # the fleet's other two nodes mirror theirs, so it is not an unreachable bar.
+    topo = pt.parse_topology(REAL_SINGLE_DISK_BOOT)
+    assert topo["rpool"][0]["redundancy"] == "none"
+    findings = pt.redundancy_findings(topo)
+    assert [(f["severity"], f["tier"], f["vdev"]) for f in findings] == [
+        ("crit", "data", "sdb3")]
+
+
+def test_a_real_slog_and_l2arc_on_one_ssd():
+    # part3 is the SLOG, part4 the L2ARC -- the same physical SSD serving both.
+    # The bare SLOG warns (the pool survives losing it); the cache never does.
+    topo = pt.parse_topology(REAL_MIRROR_WITH_LOG_AND_CACHE)
+    assert [(v["tier"], v["redundancy"]) for v in topo["tank"]] == [
+        ("data", "mirror"), ("log", "none"), ("cache", "none")]
+    findings = pt.redundancy_findings(topo)
+    assert [(f["severity"], f["tier"]) for f in findings] == [("warn", "log")]
+    assert pt.summarize(topo, "tank")["worst"] == "warn"
+
+
+def test_two_real_pools_in_one_document_stay_apart():
+    topo = pt.parse_topology(REAL_TWO_POOLS_ONE_DOCUMENT)
+    assert sorted(topo) == ["rpool", "tankhdd"]
+    for pool in ("rpool", "tankhdd"):
+        assert [v["tier"] for v in topo[pool]] == ["data", "cache"]
+        assert pt.summarize(topo, pool)["worst"] == "ok"
+    # The same NVMe serves both pools; that is two cache vdevs, not one shared.
+    assert (topo["rpool"][1]["devices"][0]
+            != topo["tankhdd"][1]["devices"][0])
