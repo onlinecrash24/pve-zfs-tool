@@ -2,8 +2,15 @@
 
 ## Reporting a vulnerability
 
-Email **webmaster@onlinecrash24.de** with `pve-zfs-tool` in the subject.
-Please do not open a public issue for anything exploitable.
+Use GitHub's private vulnerability reporting:
+**[Report a vulnerability](https://github.com/onlinecrash24/pve-zfs-tool/security/advisories/new)**
+(Security tab → Report a vulnerability). It is private to you and the
+maintainer, and it keeps the report, the discussion, and the eventual advisory
+in one place.
+
+If you would rather not use GitHub, email **webmaster@onlinecrash24.de** with
+`pve-zfs-tool` in the subject. Either way, please do not open a public issue
+for anything exploitable.
 
 Useful to include, as far as you have it: the version (shown on the login page
 and the home page), what an attacker would need to already have, and the
@@ -67,8 +74,11 @@ it looks alarming and is the design.
 - **That the tool runs privileged commands on your hosts.** That is the whole
   feature. A logged-in user destroying a dataset is the product working.
 - **The default credentials** (`admin` / `password`) when they are left unset.
-  They are a fallback, the application warns loudly about them at startup, and
-  the shipped compose file does not contain them.
+  They are a documented fallback and the application warns loudly about them at
+  startup. Note that the repository's own `docker-compose.yml` — the one the
+  build-from-source path uses — still carries those literal values, while the
+  compose block in the README uses placeholders marked `CHANGE THIS!`. Setting
+  them is your job either way.
 - Anything that requires you to already hold the tool's private SSH key, the
   contents of the data volume, or a valid session.
 - Running the UI on a public network without HTTPS.

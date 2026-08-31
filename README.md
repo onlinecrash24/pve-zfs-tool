@@ -136,6 +136,28 @@ cd pve-zfs-tool
 docker compose up -d --build
 ```
 
+### Health check
+
+The image ships a health check, so `docker ps` reports `healthy` or `unhealthy`
+instead of only `Up`. Compose inherits it from the image — there is nothing to
+add to your `docker-compose.yml`.
+
+It requests `/login` every 30 s. That path renders a real page, so a pass means
+the application is serving rather than merely that the port is open. The first
+check is deferred 20 s to cover start-up, and three consecutive failures mark
+the container unhealthy.
+
+Worth knowing: Docker does not restart an unhealthy container by itself.
+`restart: unless-stopped` covers a crash; acting on unhealthy-but-running needs
+an orchestrator or a watchdog. What the status does give you for free is a
+dependency gate:
+
+```yaml
+depends_on:
+  zfs-tool:
+    condition: service_healthy
+```
+
 ---
 
 Open the web UI at `http://DOCKER-HOST-IP:5000`
