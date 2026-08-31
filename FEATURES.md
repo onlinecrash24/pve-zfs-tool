@@ -8,6 +8,8 @@ start at the [README](README.md).
 ## ZFS Pool Management
 - **Pool Overview** -- Status, IO statistics, health, fragmentation, dedup ratio; capacity and fragmentation carry a traffic light (green/orange/red)
 - **Pool Scrub** -- Start scrubs directly from the UI with automatic completion notification
+- **Pool Trim** -- Start a TRIM pass over the pool's SSDs with a completion notification, the once-through companion to the `autotrim` property (which releases blocks continuously as they are freed)
+- **Structure & Redundancy Check** -- The pool's vdev tiers (data, SLOG, L2ARC, special, dedup, spare) parsed out of `zpool status` and shown as a table, with a warning where one device failure would cost everything. An unmirrored **special** or **dedup** vdev holds metadata the rest of the pool cannot be read without: losing that single device loses the whole pool, and it reports ONLINE right up until it does. A striped pool of bare disks is flagged the same way; a lone SLOG only warns (the pool survives it), and L2ARC and spares are shown but never flagged. Announced once when it first appears, not on every cycle -- it is a structural fact, not an event
 - **Pool Upgrade** -- Automatically detects if a feature upgrade is available (green button), with confirmation before upgrading
 - **Pool History** -- View recent pool activity
 - **autotrim / autoexpand** -- Toggle both pool properties directly from the pool detail dialog (continuous TRIM on SSDs; automatic growth after replacing a device with a larger one)

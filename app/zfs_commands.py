@@ -213,6 +213,95 @@ def scrub_pool(host, pool_name):
     return result
 
 
+def trim_pool(host, pool_name):
+    """Start a TRIM pass over the pool's devices.
+
+    The companion to the `autotrim` property rather than a replacement for it:
+    autotrim releases blocks continuously as they are freed, while this walks
+    the whole pool once -- which is what a pool that ran for a long time
+    without autotrim actually needs. Scrub has had a button and a completion
+    notification for a long time; on SSDs this is the other half of routine
+    maintenance.
+    """
+    try:
+        pool_name = validate_pool_name(pool_name)
+    except ValueError as e:
+        return {"success": False, "stderr": str(e)}
+    result = run_command(host, f"zpool trim {pool_name}")
+    if result.get("success"):
+        _invalidate(host)
+    return result
+
+
+def parse_trim_state(status_text):
+    """What `zpool status -t` says about trimming, per device.
+
+    Returns ``{"active": bool, "devices": [{name, state, progress}]}``.
+    zpool appends a per-device note such as ``(trimming)``, ``(untrimmed)`` or
+    ``(trim unsupported)``; a pool of spinning disks reports the last of those
+    on every device, which is a fact about the hardware and not a finding.
+    """
+    devices = []
+    active = False
+    for line in (status_text or "").splitlines():
+        m = re.search(r"\(([^)]*trim[^)]*)\)", line, re.IGNORECASE)
+        if not m:
+            continue
+        note = m.group(1).strip()
+        name = line.strip().split()[0] if line.strip() else ""
+        pct = None
+        p = re.search(r"\(trimming\)?\s*(\d+(?:\.\d+)?)%", line, re.IGNORECASE)
+        if p:
+            pct = float(p.group(1))
+        if "trimming" in note.lower():
+            active = True
+        devices.append({"name": name, "state": note, "progress": pct})
+    return {"active": active, "devices": devices}
+
+
+_trim_monitors = {}   # key = "host_addr:pool" → threading.Thread
+_trim_lock = threading.Lock()
+
+
+def _monitor_trim(host, pool_name):
+    """Poll until the TRIM finishes, then say so once."""
+    pool_name = validate_pool_name(pool_name)
+    key = f"{host['address']}:{pool_name}"
+    try:
+        time.sleep(10)                     # let it start before the first look
+        for _ in range(1440):              # ~24 h at 60 s
+            result = run_command(host, f"zpool status -t {pool_name}")
+            if not result.get("success"):
+                log.warning("Trim monitor: failed to get pool status for %s", key)
+                return
+            if parse_trim_state(result.get("stdout", ""))["active"]:
+                time.sleep(60)
+                continue
+            from app.notifications import send_notification
+            send_notification(
+                "trim_finished",
+                "Trim Finished",
+                f"Pool: {pool_name}\nHost: {host.get('name')} ({host['address']})",
+            )
+            return
+    except Exception as e:
+        log.warning("Trim monitor for %s failed: %s", key, e)
+    finally:
+        with _trim_lock:
+            _trim_monitors.pop(key, None)
+
+
+def start_trim_monitor(host, pool_name):
+    """Watch a running TRIM in the background, one watcher per pool."""
+    key = f"{host['address']}:{pool_name}"
+    with _trim_lock:
+        if key in _trim_monitors and _trim_monitors[key].is_alive():
+            return
+        t = threading.Thread(target=_monitor_trim, args=(host, pool_name), daemon=True)
+        t.start()
+        _trim_monitors[key] = t
+
+
 def check_pool_upgrade(host, pool_name):
     """Check if a zpool feature upgrade is available."""
     try:

@@ -1391,6 +1391,8 @@ async function viewPools() {
         const bg = h("div", { className: "btn-group" });
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showPoolDetail(pool.name) }, t("details")));
         bg.appendChild(h("button", { className: "btn btn-sm btn-warning", onClick: () => scrubPool(pool.name) }, t("scrub")));
+        bg.appendChild(h("button", { className: "btn btn-sm", title: t("trim_hint"),
+                                     onClick: () => trimPool(pool.name) }, t("trim")));
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => showPoolHistory(pool.name) }, t("history")));
         const upgradeBtn = h("button", {
             className: "btn btn-sm",
@@ -1426,6 +1428,56 @@ async function viewPools() {
     }
 }
 
+// The pool's structure, and what each tier's loss would actually cost.
+//
+// `zpool status` shows all of this as text, but reading a device tree is not
+// the same as being told that the single NVMe under "special" holds the
+// metadata for every disk above it -- lose it and the whole pool goes, while
+// it reports ONLINE until the second it doesn't. That is the one thing the raw
+// output never says out loud.
+function _poolTopologyHtml(topo) {
+    if (!topo || !(topo.vdevs || []).length) return "";
+    const tierLabel = {
+        data: t("topo_tier_data"), log: t("topo_tier_log"),
+        cache: t("topo_tier_cache"), special: t("topo_tier_special"),
+        dedup: t("topo_tier_dedup"), spare: t("topo_tier_spare"),
+    };
+    const rows = topo.vdevs.map(v => {
+        const bad = (topo.findings || []).find(f => f.vdev === v.name && f.tier === v.tier);
+        const red = v.redundancy === "none"
+            ? `<span style="color:${bad ? (bad.severity === "crit" ? "var(--danger)" : "var(--warning,#d29922)") : "var(--text-secondary)"}">${escapeHtml(t("topo_no_redundancy"))}</span>`
+            : escapeHtml(v.redundancy);
+        return `<tr>
+            <td>${escapeHtml(tierLabel[v.tier] || v.tier)}</td>
+            <td style="font-family:monospace;font-size:12px">${escapeHtml(v.name)}</td>
+            <td>${red}</td>
+            <td style="font-family:monospace;font-size:11px;color:var(--text-secondary)">${escapeHtml((v.devices || []).join(", "))}</td>
+        </tr>`;
+    }).join("");
+
+    const notes = (topo.findings || []).map(f => {
+        const crit = f.severity === "crit";
+        const msg = f.reason === "pool_loss"
+            ? t("topo_warn_pool_loss", f.vdev, tierLabel[f.tier] || f.tier)
+            : t("topo_warn_sync_writes", f.vdev);
+        return `<div style="margin-top:8px;padding:10px;border-radius:6px;font-size:12px;
+             background:${crit ? "rgba(248,81,73,0.10)" : "rgba(210,153,34,0.10)"};
+             border:1px solid ${crit ? "var(--danger)" : "var(--warning,#d29922)"}">
+            <b style="color:${crit ? "var(--danger)" : "var(--warning,#d29922)"}">${crit ? "✗" : "⚠"}</b>
+            ${escapeHtml(msg)}</div>`;
+    }).join("");
+
+    return `
+        <h4 style="margin:16px 0 8px">${escapeHtml(t("topo_title"))}</h4>
+        <table><thead><tr>
+            <th>${escapeHtml(t("topo_col_tier"))}</th>
+            <th>${escapeHtml(t("topo_col_vdev"))}</th>
+            <th>${escapeHtml(t("topo_col_redundancy"))}</th>
+            <th>${escapeHtml(t("topo_col_devices"))}</th>
+        </tr></thead><tbody>${rows}</tbody></table>
+        ${notes}`;
+}
+
 async function showPoolDetail(pool) {
     const rendered = await openModalAsync(`Pool: ${pool}`, async () => {
         const qs = `host=${encodeURIComponent(currentHost)}&pool=${encodeURIComponent(pool)}`;
@@ -1450,6 +1502,7 @@ async function showPoolDetail(pool) {
         <h4 style="margin-bottom:8px">${escapeHtml(t("pool_props"))}</h4>
         ${propRow("autotrim", t("prop_autotrim"), t("prop_autotrim_hint"))}
         ${propRow("autoexpand", t("prop_autoexpand"), t("prop_autoexpand_hint"))}
+        ${_poolTopologyHtml(status.topology)}
         <h4 style="margin:16px 0 8px">${escapeHtml(t("pool_status"))}</h4>
         <pre class="output">${escapeHtml(status.stdout || status.stderr || t("no_data"))}</pre>
         <h4 style="margin:16px 0 8px">${escapeHtml(t("io_stats"))}</h4>
@@ -1476,6 +1529,16 @@ async function showPoolDetail(pool) {
             }
         });
     });
+}
+
+// The once-through companion to the autotrim property: autotrim releases
+// blocks as they are freed, this walks the whole pool -- which is what a pool
+// that ran for years without it actually needs.
+async function trimPool(pool) {
+    if (!confirm(t("trim_confirm", pool))) return;
+    const r = await API.post("/api/pools/trim", { host: currentHost, pool });
+    toast(r.success ? t("trim_started") : (r.stderr || r.error || t("trim_failed")),
+          r.success ? "success" : "error");
 }
 
 async function scrubPool(pool) {
@@ -5998,6 +6061,15 @@ async function viewInventory() {
                     `${c.snapshot_count} ${t("inv_snaps_short")} · ${t("inv_behind")} ${lag}` +
                     (bad ? ` · ${c.missing_from_source} ${t("inv_missing")}` : "") + excl),
             ]));
+            // A replica that is still snapshotted locally accumulates snapshots
+            // the source's retention never prunes. Only shown where
+            // zfs-auto-snapshot is actually scheduled on that host.
+            if (c.local_autosnap) {
+                row.appendChild(h("div", {
+                    style: "color:var(--warning,#d29922);font-size:11px;margin-top:2px",
+                    title: t("inv_repl_autosnap_hint"),
+                }, "⚠ " + t("inv_repl_autosnap")));
+            }
             copyTd.appendChild(row);
         });
         if (g.copy_count === 0) {

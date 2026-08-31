@@ -287,8 +287,12 @@ def _sample_and_monitor(host):
                 r = get_pool_status(host, pname)
                 if r.get("success"):
                     totals = parse_pool_errors(r.get("stdout", ""), pname)
+                    entry = pools_status.setdefault(pname, {})
                     if totals:
-                        pools_status[pname] = {"error_totals": totals}
+                        entry["error_totals"] = totals
+                    # The same output also carries the pool's layout, so the
+                    # topology check costs no extra call.
+                    entry["status_text"] = r.get("stdout", "")
             except Exception:
                 pass
 

@@ -56,6 +56,8 @@ DEFAULT_CONFIG = {
     "events": {
         "scrub_started": True,
         "scrub_finished": True,
+        "trim_started": True,
+        "trim_finished": True,
         "rollback": True,
         "snapshot_created": True,
         "snapshot_deleted": True,
