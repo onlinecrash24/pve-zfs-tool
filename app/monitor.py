@@ -209,7 +209,7 @@ def clear_host_state(address):
 
     Covers scope 'host' (key = the bare address) plus every per-object scope
     whose keys are prefixed 'address:' or 'address::' (pool_health, capacity,
-    pool_errors, stale_snap, repl). Returns the number of rows removed.
+    pool_errors, pool_topology, stale_snap, repl). Returns the number of rows removed.
     """
     # '_' is a LIKE wildcard and legal in hostnames — escape so 'my_host'
     # can't accidentally match 'myXhost:...'.
@@ -278,7 +278,7 @@ def clear_vanished_pool_state(host, pools):
     addr = host["address"]
     prefix = f"{addr}:"
     current = {p.get("name") for p in pools if p.get("name")}
-    for scope in ("pool_health", "capacity", "pool_errors"):
+    for scope in ("pool_health", "capacity", "pool_errors", "pool_topology"):
         for key, value in _state_keys(scope, prefix).items():
             pool_name = key[len(prefix):]
             if pool_name in current:
@@ -329,6 +329,54 @@ def check_pool_health(host, pools):
                 priority=4,
             )
         _state_set(scope, key, health, last_alert_ts=int(time.time()))
+
+
+def check_pool_topology(host, pools_status):
+    """Announce a pool built so that one device failure destroys all of it.
+
+    Reported once, when it first appears -- and then never again. This is a
+    structural fact, not an event: an unmirrored special vdev is exactly as
+    true tomorrow as today, and repeating it every cycle would be the kind of
+    permanent alarm people learn to filter out, taking the real ones with it.
+    It stays visible in the pool view for as long as it holds.
+
+    Fires only for the tiers whose loss costs the whole pool. A bare SLOG is
+    shown in the UI but not announced: the pool survives it, and this channel
+    is for things that end you.
+    """
+    from app.pool_topology import parse_topology, redundancy_findings
+    scope = "pool_topology"
+    for pool_name, status in (pools_status or {}).items():
+        text = (status or {}).get("status_text") if isinstance(status, dict) else None
+        if not text:
+            continue
+        findings = [f for f in redundancy_findings(parse_topology(text))
+                    if f["severity"] == "crit" and f["pool"] == pool_name]
+        # A stable fingerprint of the risk, so re-announcing happens when the
+        # layout actually changes -- not on every restart.
+        marker = ",".join(sorted(f"{f['tier']}:{f['vdev']}" for f in findings))
+        key = f"{host['address']}:{pool_name}"
+        prev, _ = _state_get(scope, key)
+        if prev == marker:
+            continue
+        _state_set(scope, key, marker, last_alert_ts=int(time.time()))
+        if not marker or prev is None:
+            # Nothing wrong, or first sight of this pool: record and stay quiet.
+            # Announcing on first sight would fire for every existing pool the
+            # moment this check ships.
+            continue
+        name = host.get("name") or host["address"]
+        vdevs = ", ".join(f["vdev"] for f in findings)
+        send_notification(
+            "health_warning",
+            f"Pool {pool_name}: no redundancy on {vdevs}",
+            f"Pool '{pool_name}' on {name} now has a vdev without redundancy: "
+            f"{vdevs}.\n\n"
+            f"These hold data the rest of the pool cannot be read without -- "
+            f"losing one of these devices loses the entire pool, and it will "
+            f"report ONLINE until it does.",
+            priority=8,
+        )
 
 
 def check_capacity(host, pools):
@@ -527,6 +575,10 @@ def _run_checks(host, pools, reachable, pools_status=None, pools_valid=False):
         check_pool_errors(host, pools_status or {})
     except Exception as e:
         log.warning("monitor: pool_errors check failed: %s", e)
+    try:
+        check_pool_topology(host, pools_status or {})
+    except Exception as e:
+        log.warning("monitor: pool_topology check failed: %s", e)
     try:
         check_auto_snapshots(host)
     except Exception as e:

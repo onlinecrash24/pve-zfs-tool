@@ -214,7 +214,8 @@ def compare_copy(source: Dict[str, Any], copy: Dict[str, Any]) -> Dict[str, Any]
 
 def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
                  guests_by_host: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-                 configured: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+                 configured: Optional[List[Dict[str, str]]] = None,
+                 autosnap: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """The full picture: one entry per guest disk with its source and copies.
 
     ``guests_by_host`` maps host address to ``get_pve_vms``/``get_pve_cts``
@@ -249,14 +250,23 @@ def build_matrix(per_host: Dict[str, List[Dict[str, Any]]],
             cmp_ = ({"shared_snapshots": c["snapshot_count"], "missing_from_source": 0,
                      "excluded_labels": [], "lag_seconds": 0, "in_sync": True}
                     if is_src else compare_copy(source, c))
-            rows.append({
+            row = {
                 "host": c["host"], "dataset": c["dataset"],
                 "is_source": is_src,
                 "snapshot_count": c["snapshot_count"],
                 "oldest": c["oldest"], "newest": c["newest"],
                 "newest_snapshot": c["newest_snapshot"],
                 **cmp_,
-            })
+            }
+            # A replica that is still being snapshotted locally piles up
+            # snapshots the source's retention will never prune. Only said
+            # where zfs-auto-snapshot is actually scheduled on that host --
+            # without it the missing opt-out property changes nothing.
+            if not is_src:
+                info = (autosnap or {}).get(c["host"]) or {}
+                if info.get("active"):
+                    row["local_autosnap"] = c["dataset"] not in (info.get("disabled") or set())
+            rows.append(row)
         rows.sort(key=lambda r: (not r["is_source"], r["host"]))
 
         entries.append({
@@ -450,12 +460,16 @@ def collect_host_snapshots(host: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _collect_one_host(h: Dict[str, Any]) -> Dict[str, Any]:
-    """Everything needed from a single host: snapshots, guests, configs."""
-    from app.zfs_commands import get_pve_vms, get_pve_cts
+    """Everything needed from a single host: snapshots, guests, configs, and
+    whether local auto-snapshots would touch its replicas."""
+    from app.zfs_commands import (get_pve_vms, get_pve_cts,
+                                  get_autosnap_disabled_datasets,
+                                  get_auto_snapshot_status)
     from app.replication import list_configs
 
     addr = h.get("address", "")
-    out = {"address": addr, "rows": [], "guests": [], "configs": []}
+    out = {"address": addr, "rows": [], "guests": [], "configs": [],
+           "autosnap_disabled": set(), "autosnap_active": False}
     out["rows"] = collect_host_snapshots(h)
     try:
         out["guests"] = list(get_pve_vms(h) or []) + list(get_pve_cts(h) or [])
@@ -467,6 +481,22 @@ def _collect_one_host(h: Dict[str, Any]) -> Dict[str, Any]:
              "target": c.get("target", "")}
             for c in (list_configs(h, cache_ttl=300).get("configs") or [])
         ]
+    except Exception:
+        pass
+    try:
+        # A replica that still gets snapshotted locally accumulates snapshots
+        # the source's retention will never prune -- and they pollute the very
+        # comparison this module performs. Both facts are needed to say so:
+        # which datasets opt out, and whether anything would snapshot them at
+        # all. Without an active zfs-auto-snapshot the missing property is
+        # harmless, so it must not be reported.
+        out["autosnap_disabled"] = get_autosnap_disabled_datasets(h) or set()
+        st = get_auto_snapshot_status(h) or {}
+        # Installed AND actually scheduled. The binary alone snapshots nothing;
+        # it is the cron entries that do, so both have to be there before a
+        # missing opt-out property means anything.
+        out["autosnap_active"] = bool(st.get("installed")) and bool(
+            st.get("retention_policy") or (st.get("cron_config") or "").strip())
     except Exception:
         pass
     return out
@@ -494,6 +524,7 @@ def collect_inventory(hosts: List[Dict[str, Any]],
     guests_by_host: Dict[str, List[Dict[str, Any]]] = {}
     configured: List[Dict[str, str]] = []
     unreachable: List[str] = []
+    autosnap: Dict[str, Dict[str, Any]] = {}
 
     if hosts:
         total = len(hosts)
@@ -506,13 +537,15 @@ def collect_inventory(hosts: List[Dict[str, Any]],
                 per_host[addr] = res["rows"]
                 guests_by_host[addr] = res["guests"]
                 configured.extend(res["configs"])
+                autosnap[addr] = {"disabled": res.get("autosnap_disabled") or set(),
+                                  "active": bool(res.get("autosnap_active"))}
                 if not res["rows"]:
                     unreachable.append(addr)
                 done += 1
                 if progress:
                     progress(f"{done}/{total} {addr}")
 
-    matrix = build_matrix(per_host, guests_by_host, configured)
+    matrix = build_matrix(per_host, guests_by_host, configured, autosnap)
     matrix["hosts"] = list(per_host.keys())
     matrix["hosts_without_data"] = unreachable
     matrix["snapshot_count"] = sum(len(v) for v in per_host.values())

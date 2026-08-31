@@ -404,3 +404,60 @@ def test_condense_caps_the_guest_list():
     assert len(payload["guests"]) == 10
     assert payload["truncated"] is True
     assert payload["guest_count"] == 30
+
+
+# --- a replica that is still being snapshotted locally ---------------------
+
+def _two_hosts():
+    """One guest on h1, replicated to h2 -- they share guids, and h1 holds a
+    newer snapshot so it is unambiguously the source. With identical snapshots
+    on both sides the tie is broken by host name, which would silently make h2
+    the source and test the wrong side."""
+    return {
+        "h1": ri.parse_snapshot_guids(_rows("rpool/data/vm-100-disk-0",
+                                            [("a", 1), ("b", 9), ("c", 20)])),
+        "h2": ri.parse_snapshot_guids(_rows("tank/repl/vm-100-disk-0",
+                                            [("a", 1), ("b", 9)])),
+    }
+
+
+def _copy(matrix):
+    return [c for c in matrix["guests"][0]["copies"] if not c["is_source"]][0]
+
+
+def test_a_replica_still_being_auto_snapshotted_is_flagged():
+    # Local snapshots on a replica are never pruned by the source's retention,
+    # and they pollute the very guid comparison this module performs.
+    m = ri.build_matrix(_two_hosts(), {}, None,
+                        {"h2": {"disabled": set(), "active": True}})
+    assert _copy(m)["local_autosnap"] is True
+
+
+def test_a_replica_that_opted_out_is_not_flagged():
+    m = ri.build_matrix(_two_hosts(), {}, None,
+                        {"h2": {"disabled": {"tank/repl/vm-100-disk-0"}, "active": True}})
+    assert _copy(m)["local_autosnap"] is False
+
+
+def test_a_host_without_scheduled_auto_snapshots_says_nothing():
+    # The missing property is harmless where nothing would act on it; claiming
+    # a problem there would be a permanent false alarm on every replica host
+    # that simply does not run zfs-auto-snapshot.
+    m = ri.build_matrix(_two_hosts(), {}, None,
+                        {"h2": {"disabled": set(), "active": False}})
+    assert "local_autosnap" not in _copy(m)
+
+
+def test_without_any_auto_snapshot_information_nothing_is_claimed():
+    m = ri.build_matrix(_two_hosts(), {}, None, None)
+    assert "local_autosnap" not in _copy(m)
+
+
+def test_the_source_itself_is_never_flagged():
+    # The source is supposed to be snapshotted -- that is where the snapshots
+    # come from in the first place.
+    m = ri.build_matrix(_two_hosts(), {}, None,
+                        {"h1": {"disabled": set(), "active": True},
+                         "h2": {"disabled": set(), "active": True}})
+    src = [c for c in m["guests"][0]["copies"] if c["is_source"]][0]
+    assert "local_autosnap" not in src

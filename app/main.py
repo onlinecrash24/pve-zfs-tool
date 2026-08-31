@@ -529,11 +529,29 @@ def api_pools():
 
 @app.route("/api/pools/status")
 def api_pool_status():
+    """Raw `zpool status` plus the structure read out of it.
+
+    The raw text stays -- people read it -- but it is also parsed into vdev
+    tiers so the view can answer a question the text alone never surfaces: is
+    this pool built so that one device failure destroys all of it? An
+    unmirrored special vdev holds the metadata for every disk in the pool and
+    reports ONLINE right up until it takes them with it.
+    """
     host, err, code = _require_host()
     if err:
         return err, code
     pool = request.args.get("pool", "")
-    return jsonify(get_pool_status(host, pool))
+    result = get_pool_status(host, pool)
+    if result.get("success"):
+        try:
+            from app.pool_topology import parse_topology, summarize
+            result["topology"] = summarize(parse_topology(result.get("stdout", "")), pool)
+        except Exception as e:
+            # The raw output is the point of this endpoint; a parser problem
+            # must not cost the user the text they came for.
+            log.warning("pool topology parse failed for %s/%s: %s",
+                        host.get("address"), pool, e)
+    return jsonify(result)
 
 
 @app.route("/api/pools/iostat")
@@ -586,6 +604,26 @@ def api_pool_scrub():
                           f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})")
         # Start background monitor to detect scrub completion
         start_scrub_monitor(host, pool_name)
+    return jsonify(result)
+
+
+@app.route("/api/pools/trim", methods=["POST"])
+@login_required
+def api_pool_trim():
+    """Start a TRIM pass -- the once-through companion to the autotrim toggle."""
+    from app.zfs_commands import trim_pool, start_trim_monitor
+    data = request.json or {}
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    pool_name = data.get("pool", "")
+    result = trim_pool(host, pool_name)
+    audit_log("pool.trim", target=pool_name, host=host["address"],
+              success=result.get("success", False))
+    if result.get("success"):
+        send_notification("trim_started", "Trim Started",
+                          f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})")
+        start_trim_monitor(host, pool_name)
     return jsonify(result)
 
 
