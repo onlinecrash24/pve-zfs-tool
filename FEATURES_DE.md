@@ -166,6 +166,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Zweisprachige Reports** -- Reports folgen der globalen UI-Sprache (Englisch/Deutsch)
 - **Anpassbarer System-Prompt** -- AI-Prompt bearbeiten, um Fehlalarme in deiner Umgebung zu reduzieren
 - **PDF-Export** -- Reports als PDF herunterladen oder automatisch zustellen lassen
+- **Eigenes Bericht-Logo** -- Das Logo des Tools im PDF-Kopf durch ein eigenes ersetzen (PNG/JPEG/GIF/BMP/WEBP, bis 5 MB, automatisch skaliert). Es liegt außerhalb des Container-Images und überlebt damit ein Update. Die Fußzeile nennt unabhängig davon immer „Powered by PVE ZFS Tool“
 - **Raw-Data-Export** -- JSON-Payload exportieren, das an das LLM gesendet würde
 
 ## Sicherheit

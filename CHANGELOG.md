@@ -7,6 +7,63 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.922 -- 2026-08-31
+
+v0.9.922 — the placeholders were disarming the warning
+
+**SECURITY.md.** A tool that holds root SSH on every host you register should
+say where to report a weakness — and should say what it holds, so a reporter
+can tell a finding from the design. "It runs privileged commands on your hosts"
+is the product, not a vulnerability. Reports now go through GitHub's private
+vulnerability reporting (Security → Report a vulnerability), with email as the
+alternative.
+
+It also names what is known and accepted rather than leaving it to be
+discovered: the replication key grants a full root shell in the target→source
+direction, replicas are not marked `canmount=noauto`, and the HTTP API is
+internal and unstable.
+
+**CHANGELOG.md**, generated from the published releases — which are themselves
+written into the annotated tag. The history is authored once and readable from
+a checkout, without a browser.
+
+**A container health check.** `docker ps` now reports `healthy` or `unhealthy`
+instead of only `Up`. It requests `/login`, which renders a real page, so a
+pass means the application is serving rather than that the port is open.
+Compose inherits it from the image; nothing to add. Note that Docker does not
+restart an unhealthy container by itself — `restart: unless-stopped` covers a
+crash, and reacting to running-but-not-answering needs an orchestrator.
+
+Putting placeholder credentials into `docker-compose.yml` meant first checking
+what the startup warning actually matches. It turned out to be the problem.
+
+The check compared one literal each: `SECRET_KEY == "dev-key-change-me"` and
+the pair `admin` / `password`. But the compose file shipped
+`SECRET_KEY=change-me-in-production`, and the README block shipped
+`your-secret-key-here` and `your-strong-password`. So anyone who ran the
+compose file unedited got a **fixed, publicly known session key and was never
+told**, and anyone who copied the README block got a publicly known key *and*
+password, silently. All six shipped values passed the old check as deliberate
+choices.
+
+The checks now match a blocklist of every placeholder this repository ships,
+plus the empty string. The password is judged on its own rather than paired
+with the username — renaming the user used to excuse a default password. The
+tests read the values back out of the compose file and both READMEs, so a
+placeholder introduced in documentation without being added to the blocklist
+fails the build instead of someone's deployment.
+
+**If you are running with a placeholder `SECRET_KEY`, it is now replaced with a
+random one at every restart, so sessions no longer survive a restart until you
+set a real one.** That is the treatment the old default already received. A
+fixed, publicly known key is worse than being logged out.
+
+Releases now publish themselves from the annotated tag's message — this text.
+The first attempt got it wrong: `actions/checkout` materialises a tag as a
+lightweight ref, and git's `%(contents)` then resolves to the commit message
+without complaining, so v0.9.921 was published carrying its merge commit text.
+The notes come from the API now.
+
 ## v0.9.921 -- 2026-08-31
 
 v0.9.921 — notifications you can actually switch off
