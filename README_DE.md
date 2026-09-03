@@ -194,7 +194,13 @@ apt install ntfs-3g         # Optional — nur für Windows-VM-NTFS-Partitionen
 
 Für Produktiv-Deployments den Container hinter einen HTTPS-Reverse-Proxy stellen. Die Anwendung enthält `ProxyFix`-Middleware und vertraut automatisch den `X-Forwarded-*`-Headern des Proxys.
 
-In `docker-compose.yml` `FORCE_HTTPS=true` setzen, um sichere Session-Cookies zu aktivieren.
+In `docker-compose.yml` `FORCE_HTTPS=true` setzen, um sichere Session-Cookies zu aktivieren,
+und `TRUST_PROXY=true`, damit die Anwendung die Client-Adresse aus `X-Forwarded-For`
+übernimmt, statt in jedem Nutzer den Proxy zu sehen. Ohne diese Variable zählt die
+Login-Sperre alle Nutzer als einen, und im Audit-Log steht die Adresse des Proxys.
+**Nicht** auf einem direkt erreichbaren Port setzen: Den Header kann jeder Client
+schreiben, und ihm dort zu vertrauen ließe einen Aufrufer seine Adresse selbst wählen
+und die Sperre umgehen.
 
 ### Nginx Proxy Manager (NPM)
 
@@ -282,6 +288,7 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 | `ADMIN_USER` | `admin` | Login-Benutzername -- **sollte geändert werden** |
 | `ADMIN_PASSWORD` | `password` | Login-Passwort -- **muss geändert werden!** |
 | `FORCE_HTTPS` | `true` | Sichere Session-Cookies -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
+| `TRUST_PROXY` | nicht gesetzt | Client-Adresse aus `X-Forwarded-For` übernehmen. **Nur** hinter einem Reverse-Proxy -- auf einem direkt erreichbaren Port könnte jeder Client seine Adresse selbst wählen und die Login-Sperre umgehen |
 | `TZ` | `UTC` | Zeitzone für Reports und Scheduler (z. B. `Europe/Berlin`, `America/New_York`) |
 | `DEFAULT_LANG` | `en` | Standard-UI-Sprache für neue Besucher (`de` oder `en`); Nutzer können weiterhin umschalten |
 | `METRICS_RETENTION_DAYS` | `90` | Wie lange Pool- + Disk-(SMART-)Messwerte aufbewahrt werden, bevor aufgeräumt wird; `<=0` behält für immer |

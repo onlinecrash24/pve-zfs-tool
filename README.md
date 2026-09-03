@@ -192,7 +192,12 @@ apt install ntfs-3g         # Optional — only needed for Windows VM NTFS parti
 
 For production deployments, place the container behind an HTTPS reverse proxy. The application includes `ProxyFix` middleware and automatically trusts `X-Forwarded-*` headers from your proxy.
 
-Set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies.
+Set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies, and
+`TRUST_PROXY=true` so the application takes the client address from `X-Forwarded-For`
+rather than seeing every user as the proxy. Without it the login rate limit treats all
+users as one and the audit log records the proxy's address. Do **not** set it on a port
+that is reachable directly: the header can be written by any client, and trusting it
+there would let a caller choose its own address and bypass the rate limit.
 
 ### Nginx Proxy Manager (NPM)
 
@@ -280,6 +285,7 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 | `ADMIN_USER` | `admin` | Login username -- **should be changed** |
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
+| `TRUST_PROXY` | unset | Take the client address from `X-Forwarded-For`. **Only** behind a reverse proxy -- on a directly reachable port any client could pick its own address and bypass the login rate limit |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
 | `DEFAULT_LANG` | `en` | Default UI language for new visitors (`de` or `en`); users can still switch |
 | `METRICS_RETENTION_DAYS` | `90` | How long pool + disk (SMART) samples are kept before auto-cleanup; `<=0` keeps forever |

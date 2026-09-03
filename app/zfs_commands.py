@@ -1439,7 +1439,8 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
     errors = []
 
     # Validate mount path
-    if mount_path and not mount_path.startswith(ZVOL_MOUNT_BASE):
+    # Boundary, not prefix: "<base>-something" starts with the base too.
+    if mount_path and not mount_path.startswith(ZVOL_MOUNT_BASE + "/"):
         return {"success": False, "error": "Invalid mount path — must be under zvol restore base"}
 
     # Unmount
@@ -1651,17 +1652,37 @@ def cleanup_restore_clones(host):
     return {"destroyed": destroyed, "errors": errors, "success": len(errors) == 0}
 
 
+def _validated_mount(mount_path):
+    """A mount the file browser may look inside: character-checked, and under
+    one of the two bases this tool itself mounts snapshots at.
+
+    _verify_under_mount below only proves a path stays inside the mount it was
+    handed. Nothing bounded the mount itself, so ``mount_path=/`` satisfied
+    the guard for every path on the host -- ``cat /etc/hostname`` went out
+    without a single ``..``. The bound belongs on the mount, and first."""
+    mount_path = validate_path(mount_path, "Mount path")
+    if not any(mount_path.startswith(base + "/")
+               for base in (RESTORE_MOUNT_BASE, ZVOL_MOUNT_BASE)):
+        raise ValueError("Mount path: not a snapshot mount of this tool")
+    return mount_path
+
+
 def _verify_under_mount(host, path, mount_path, what="Path"):
     """Confirm `path` resolves to a location under `mount_path` (symlink-safe).
 
     Returns None when it's inside, or an error dict otherwise. Fails CLOSED: if
     the remote `realpath` can't be run, access is DENIED rather than proceeding
     -- the old code skipped the check whenever realpath failed, so an in-snapshot
-    symlink pointing outside the mount could slip past it."""
+    symlink pointing outside the mount could slip past it.
+
+    Compared on a directory boundary, not as a string prefix: a plain
+    ``startswith`` let ``.../restore-a`` vouch for ``.../restore-ab``."""
     rp = run_command(host, f"realpath {shlex.quote(path)}")
     if not rp.get("success"):
         return {"success": False, "stderr": f"{what} could not be verified"}
-    if not rp.get("stdout", "").strip().startswith(mount_path):
+    resolved = rp.get("stdout", "").strip()
+    base = mount_path.rstrip("/")
+    if not (resolved == base or resolved.startswith(base + "/")):
         return {"success": False, "stderr": f"{what} escapes mount point"}
     return None
 
@@ -1669,7 +1690,7 @@ def _verify_under_mount(host, path, mount_path, what="Path"):
 def snapshot_browse(host, mount_path, subpath=""):
     """List files/directories at a path inside a mounted snapshot."""
     try:
-        mount_path = validate_path(mount_path, "Mount path")
+        mount_path = _validated_mount(mount_path)
         if subpath:
             subpath = validate_path(subpath, "Sub path")
     except ValueError as e:
@@ -1710,7 +1731,7 @@ def snapshot_browse(host, mount_path, subpath=""):
 def snapshot_read_file(host, mount_path, file_path):
     """Read a file from a mounted snapshot (for preview, max 100KB)."""
     try:
-        mount_path = validate_path(mount_path, "Mount path")
+        mount_path = _validated_mount(mount_path)
         file_path = validate_path(file_path, "File path")
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
@@ -1734,7 +1755,7 @@ def snapshot_read_file(host, mount_path, file_path):
 def snapshot_restore_file(host, mount_path, file_path, dest_path):
     """Copy a file from the mounted snapshot back to the live filesystem."""
     try:
-        mount_path = validate_path(mount_path, "Mount path")
+        mount_path = _validated_mount(mount_path)
         file_path = validate_path(file_path, "File path")
         dest_path = validate_path(dest_path, "Destination path")
     except ValueError as e:
@@ -1755,7 +1776,7 @@ def snapshot_restore_file(host, mount_path, file_path, dest_path):
 def snapshot_restore_dir(host, mount_path, dir_path, dest_path):
     """Recursively copy a directory from the mounted snapshot back to the live filesystem."""
     try:
-        mount_path = validate_path(mount_path, "Mount path")
+        mount_path = _validated_mount(mount_path)
         dir_path = validate_path(dir_path, "Directory path")
         dest_path = validate_path(dest_path, "Destination path")
     except ValueError as e:

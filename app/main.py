@@ -81,14 +81,28 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-me")
 app.permanent_session_lifetime = timedelta(hours=8)
 
-# Support running behind a reverse proxy (NPM, nginx, Caddy, Traefik)
-from werkzeug.middleware.proxy_fix import ProxyFix
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+def _env_flag(name):
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
+# Behind a reverse proxy (NPM, nginx, Caddy, Traefik) the client's address
+# arrives in X-Forwarded-For and ProxyFix rewrites remote_addr from it.
+#
+# Only when told to. Those headers can be set by ANY client, and this used to
+# be unconditional -- so on a container reached directly, which is what the
+# shipped compose file does, a caller could pick its own address: seven failed
+# logins with a rotating X-Forwarded-For never tripped the rate limit, and the
+# audit log recorded whatever the caller wrote. Off by default; the proxy
+# operator is the one who knows the header is trustworthy.
+TRUST_PROXY = _env_flag("TRUST_PROXY")
+if TRUST_PROXY:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Secure cookie settings (effective when behind HTTPS reverse proxy)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-if os.environ.get("FORCE_HTTPS", "").lower() in ("1", "true", "yes"):
+if _env_flag("FORCE_HTTPS"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
@@ -135,6 +149,11 @@ if is_placeholder_secret_key(app.secret_key):
 if is_placeholder_password(ADMIN_PASSWORD):
     log.warning("ADMIN_PASSWORD is a placeholder or default value! Anyone who has read this "
                 "repository knows it. Set ADMIN_USER and ADMIN_PASSWORD environment variables.")
+if TRUST_PROXY:
+    log.info("Trusting X-Forwarded-* headers (TRUST_PROXY=true) -- make sure only your reverse proxy can reach this port.")
+else:
+    log.info("Ignoring X-Forwarded-* headers. If this runs behind a reverse proxy, set TRUST_PROXY=true -- "
+             "otherwise every user shares one login rate-limit bucket and the audit log records the proxy's address.")
 
 # Rate limiting for login attempts
 _login_attempts = {}  # IP -> {"count": int, "last": float}
@@ -158,6 +177,12 @@ def _login_record_failure(ip, now):
     """Atomically increment the failed-attempt counter (resetting it if the
     lockout window elapsed). Returns the new count."""
     with _login_lock:
+        # Drop entries whose lockout window has passed. The map used to grow
+        # without bound -- every address that ever failed stayed forever --
+        # which, with a spoofable address, is an allocation per request.
+        for stale in [k for k, v in _login_attempts.items()
+                      if (now - v["last"]) >= LOGIN_LOCKOUT_SECONDS]:
+            del _login_attempts[stale]
         info = _login_attempts.get(ip, {"count": 0, "last": 0})
         if (now - info["last"]) >= LOGIN_LOCKOUT_SECONDS:
             info = {"count": 0, "last": now}
