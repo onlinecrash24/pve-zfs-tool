@@ -18,6 +18,13 @@ from app import zfs_commands as z
 def metrics(monkeypatch):
     monkeypatch.setenv("PROMETHEUS_TOKEN", "s3cret-token")
     monkeypatch.setattr(m, "audit_log", lambda *a, **k: None)
+    # These tests are about the token channel, not the exporter body. The
+    # handler imports prometheus_metrics locally, so the stub has to sit on
+    # app.analytics -- a name on app.main would never be looked at. The
+    # real body walks load_hosts() -> _ensure_data_dir() -> makedirs("/app/data"),
+    # which is unwritable on the CI runner (it passed locally only because
+    # Windows mapped /app somewhere it could create).
+    monkeypatch.setattr("app.analytics.prometheus_metrics", lambda: "pvezfs_up 1\n")
     return m.app.test_client()
 
 
