@@ -3143,19 +3143,19 @@ def prometheus_endpoint():
     """Expose Prometheus text-format metrics.
 
     Disabled unless ``PROMETHEUS_TOKEN`` is set in the environment.
-    The client must present ``Authorization: Bearer <token>`` or
-    ``?token=<token>``. Compare in constant time.
+    The client must present ``Authorization: Bearer <token>``. Compared in
+    constant time.
     """
     token_cfg = os.environ.get("PROMETHEUS_TOKEN", "")
     if not token_cfg:
         return make_response("prometheus exporter disabled (set PROMETHEUS_TOKEN)\n",
                              404, {"Content-Type": "text/plain; charset=utf-8"})
     auth = request.headers.get("Authorization", "")
-    supplied = ""
-    if auth.startswith("Bearer "):
-        supplied = auth[7:].strip()
-    if not supplied:
-        supplied = request.args.get("token", "")
+    # Header only. A ?token= query string used to be accepted too, and a token
+    # in the URL lands in proxy access logs, browser history and Referer
+    # headers; Prometheus has had `authorization: {type: Bearer}` in
+    # scrape_config for years, so nothing needs the query form.
+    supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
     if not supplied or not hmac.compare_digest(supplied, token_cfg):
         return make_response("unauthorized\n", 401,
                              {"Content-Type": "text/plain; charset=utf-8"})

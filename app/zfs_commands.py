@@ -308,7 +308,10 @@ def check_pool_upgrade(host, pool_name):
         pool_name = validate_pool_name(pool_name)
     except ValueError as e:
         return {"upgradable": False, "detail": str(e)}
-    result = run_command(host, f"zpool status {pool_name}")
+    # Whether features are enabled changes only through upgrade_pool, which
+    # invalidates the cache -- so this can sit in it rather than cost two SSH
+    # round trips per pool on every view.
+    result = run_command(host, f"zpool status {pool_name}", cache_ttl=_TTL_LONG)
     if not result["success"]:
         return {"upgradable": False, "detail": result.get("stderr", "")}
     # zpool status shows upgrade notice when features are available
@@ -318,7 +321,8 @@ def check_pool_upgrade(host, pool_name):
                   or "action: Some supported features" in stdout.lower()
                   if stdout else False)
     # Also check zpool upgrade output directly
-    upgrade_result = run_command(host, f"zpool upgrade {pool_name} -n 2>&1 || true")
+    upgrade_result = run_command(host, f"zpool upgrade {pool_name} -n 2>&1 || true",
+                                 cache_ttl=_TTL_LONG)
     upgrade_out = upgrade_result.get("stdout", "") + upgrade_result.get("stderr", "")
     if "already enabled" in upgrade_out or "up-to-date" in upgrade_out:
         upgradable = False
@@ -656,24 +660,21 @@ def clone_snapshot(host, full_name, clone_name):
 
 
 def get_clone_targets(host):
-    """Get all pools and their top-level datasets as potential clone targets."""
-    result = run_command(host, "zpool list -H -o name")
+    """Get all pools and their top-level datasets as potential clone targets.
+
+    One round trip: without a dataset argument ``zfs list -d 1`` lists every
+    pool and its direct children. This used to be ``zpool list`` followed by
+    one ``zfs list`` per pool -- N+1 SSH calls to populate a dropdown.
+    """
+    result = run_command(host, "zfs list -H -o name -d 1", cache_ttl=_TTL_SHORT)
     if not result["success"]:
         return {"pools": [], "datasets": []}
-    pools = []
-    datasets = []
+    pools, datasets = [], []
     for line in result["stdout"].strip().splitlines():
-        pool = line.strip()
-        if not pool:
+        name = line.strip()
+        if not name:
             continue
-        pools.append(pool)
-        # Get sub-datasets one level deep
-        ds_result = run_command(host, f"zfs list -H -o name -r -d 1 {pool}")
-        if ds_result["success"]:
-            for ds_line in ds_result["stdout"].strip().splitlines():
-                ds = ds_line.strip()
-                if ds and ds != pool:
-                    datasets.append(ds)
+        (datasets if "/" in name else pools).append(name)
     return {"pools": pools, "datasets": datasets}
 
 
@@ -824,26 +825,34 @@ def get_zdb_analysis(host, pool_name):
     diagnostics = {}
 
     # 1. Basic pool internals (config, vdev tree, state)
-    result = run_command(host, f"zdb {pool_name} 2>&1 | head -80")
+    # Up to sixteen SSH round trips per click, none of which changes within a
+    # minute -- cached, so a second look at the same pool is free.
+    result = run_command(host, f"zdb {pool_name} 2>&1 | head -80", cache_ttl=_TTL_MED)
     if result["success"]:
         diagnostics["pool_info"] = result["stdout"].strip()
 
     # 2. Block statistics (space accounting — can detect silent corruption)
-    result = run_command(host, f"zdb -b {pool_name} 2>&1 | tail -20", timeout=60)
+    result = run_command(host, f"zdb -b {pool_name} 2>&1 | tail -20", timeout=60,
+                         cache_ttl=_TTL_MED)
     if result["success"]:
         diagnostics["block_stats"] = result["stdout"].strip()
 
     # 3. Label info from vdevs (pool GUID, txg, disk state)
     #    Get disk devices from pool status first
     vdev_result = run_command(host,
-        f"zpool status {pool_name} | grep -E '^\t  ' | awk '{{print $1}}' | head -10")
+        f"zpool status {pool_name} | grep -E '^\t  ' | awk '{{print $1}}' | head -10",
+        cache_ttl=_TTL_MED)
     if vdev_result["success"]:
         vdev_names = [v.strip() for v in vdev_result["stdout"].strip().splitlines() if v.strip()]
         label_info = []
         for vdev in vdev_names[:6]:  # Max 6 disks
-            # Try /dev/disk/by-id path or direct /dev/ path
+            # Try /dev/disk/by-id path or direct /dev/ path. The name comes
+            # from the host's own zpool status, so it is quoted: a host can
+            # only ever inject into itself this way, but there is no reason
+            # to let it.
             for dev_path in [f"/dev/{vdev}", f"/dev/disk/by-id/{vdev}"]:
-                lbl = run_command(host, f"zdb -l {dev_path} 2>&1 | head -30")
+                lbl = run_command(host, f"zdb -l {shlex.quote(dev_path)} 2>&1 | head -30",
+                                  cache_ttl=_TTL_MED)
                 if lbl["success"] and lbl["stdout"].strip():
                     label_info.append({
                         "device": dev_path,
@@ -1306,7 +1315,7 @@ def zvol_snapshot_mount(host, snapshot):
             seen_devices.add(dev_path)
 
             # Detect filesystem and label with blkid
-            blkid_all = run_command(host, f"blkid -o export {dev_path} 2>/dev/null")
+            blkid_all = run_command(host, f"blkid -o export {shlex.quote(dev_path)} 2>/dev/null")
             fstype = ""
             label = ""
             part_size = "?"
@@ -1325,7 +1334,7 @@ def zvol_snapshot_mount(host, snapshot):
 
             # If blkid didn't return size, try blockdev
             if part_size == "?":
-                bdev = run_command(host, f"blockdev --getsize64 {dev_path} 2>/dev/null")
+                bdev = run_command(host, f"blockdev --getsize64 {shlex.quote(dev_path)} 2>/dev/null")
                 if bdev["success"] and bdev["stdout"].strip():
                     try:
                         part_size = _format_size(int(bdev["stdout"].strip()))
@@ -1556,7 +1565,7 @@ def zvol_cleanup_all(host):
             parts = line.split("\t")
             if len(parts) >= 2 and parts[1].strip() == "visible":
                 ds = parts[0].strip()
-                r = run_command(host, f"zfs set snapdev=hidden {ds}")
+                r = run_command(host, f"zfs set snapdev=hidden {shlex.quote(ds)}")
                 if r["success"]:
                     cleaned["snapdev"].append(ds)
 
@@ -1973,14 +1982,19 @@ def get_smart_status(host, pool_name=None):
             if disk_id.startswith("/dev/"):
                 dev_path = disk_id
             else:
-                resolve = run_command(host, f"readlink -f /dev/disk/by-id/{disk_id} 2>/dev/null")
+                # Device names come from the host's own zpool status; quoted
+                # anyway, and cached -- topology does not change between clicks.
+                resolve = run_command(host,
+                                      f"readlink -f {shlex.quote('/dev/disk/by-id/' + disk_id)} 2>/dev/null",
+                                      cache_ttl=_TTL_LONG)
                 if resolve["success"] and resolve["stdout"].strip().startswith("/dev/"):
                     dev_path = resolve["stdout"].strip()
                 else:
                     dev_path = f"/dev/{disk_id}"
 
             # Resolve a partition to its whole disk (lsblk is authoritative).
-            strip = run_command(host, f"lsblk -no PKNAME {dev_path} 2>/dev/null | head -1")
+            strip = run_command(host, f"lsblk -no PKNAME {shlex.quote(dev_path)} 2>/dev/null | head -1",
+                                cache_ttl=_TTL_LONG)
             base_disk = _smart_base_disk(
                 dev_path, strip.get("stdout", ""), bool(strip.get("success")))
 
@@ -1994,8 +2008,9 @@ def get_smart_status(host, pool_name=None):
                     verdict = None
                     saw_output = False
                     for dtype in _smart_device_types(base_disk):
-                        cmd = (f"smartctl -H {dtype} {base_disk} 2>&1" if dtype
-                               else f"smartctl -H {base_disk} 2>&1")
+                        qdisk = shlex.quote(base_disk)
+                        cmd = (f"smartctl -H {dtype} {qdisk} 2>&1" if dtype
+                               else f"smartctl -H {qdisk} 2>&1")
                         r = run_command(host, cmd, cache_ttl=_TTL_SMART)
                         out = r.get("stdout", "")
                         if out.strip():
