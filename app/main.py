@@ -49,6 +49,8 @@ from app.notifications import (
     load_config as load_notify_config,
     save_config as save_notify_config,
     send_notification, test_telegram, test_gotify, test_matrix, test_email,
+    test_webhook, validate_template as validate_webhook_template,
+    render_preview as render_webhook_preview, WEBHOOK_PRESETS,
 )
 from app.ai_reports import (
     load_config_masked as load_ai_config,
@@ -1550,6 +1552,10 @@ def api_notify_config():
         cfg["gotify"]["token"] = _mask_secret(cfg["gotify"]["token"])
     if cfg.get("matrix", {}).get("access_token"):
         cfg["matrix"]["access_token"] = _mask_secret(cfg["matrix"]["access_token"])
+    if cfg.get("webhook", {}).get("secret"):
+        cfg["webhook"]["secret"] = _mask_secret(cfg["webhook"]["secret"])
+    # The starting templates live server-side so the UI and the sender agree.
+    cfg["webhook_presets"] = dict(WEBHOOK_PRESETS)
     return jsonify(cfg)
 
 
@@ -1563,14 +1569,23 @@ def api_save_notify_config():
         ("telegram", "bot_token"),
         ("gotify", "token"),
         ("matrix", "access_token"),
+        ("webhook", "secret"),
     ):
         new_val = (data.get(section) or {}).get(field, "")
         resolved = _resolve_masked(new_val, existing.get(section, {}).get(field, ""))
         if resolved != new_val:
             data.setdefault(section, {})[field] = resolved
+    # A broken webhook template is refused here, with the reason, rather than
+    # stored and discovered when the first alert fires. Nothing is written.
+    if "webhook" in data:
+        try:
+            validate_webhook_template((data.get("webhook") or {}).get("template", ""))
+        except ValueError as e:
+            return jsonify({"success": False, "error": f"webhook template: {e}"}), 400
+    data.pop("webhook_presets", None)      # read-only, never stored
     save_notify_config(data)
     audit_log("config.notifications.save", target="notifications", success=True,
-              details={"channels": [k for k in ("email", "telegram", "gotify", "matrix")
+              details={"channels": [k for k in ("email", "telegram", "gotify", "matrix", "webhook")
                                     if (data.get(k) or {}).get("enabled")]})
     return jsonify({"success": True, "message": "Configuration saved"})
 
@@ -1626,6 +1641,29 @@ def api_test_email():
         return _masked_secret_error("SMTP password")
     result = test_email(data)
     return jsonify(result)
+
+
+@app.route("/api/notifications/test/webhook", methods=["POST"])
+def api_test_webhook():
+    data = request.json or {}
+    secret = _resolve_masked(data.get("secret", ""),
+                             load_notify_config().get("webhook", {}).get("secret", ""))
+    if _is_masked(secret):
+        return _masked_secret_error("webhook secret")
+    cfg = dict(data)
+    cfg["secret"] = secret
+    return jsonify(test_webhook(cfg))
+
+
+@app.route("/api/notifications/webhook/preview", methods=["POST"])
+def api_webhook_preview():
+    """Render the template against the sample event. Sends nothing."""
+    data = request.json or {}
+    try:
+        return jsonify({"success": True,
+                        "body": render_webhook_preview(data.get("template", ""))})
+    except ValueError as e:
+        return jsonify({"success": False, "detail": str(e)}), 400
 
 
 @app.route("/api/notifications/send", methods=["POST"])

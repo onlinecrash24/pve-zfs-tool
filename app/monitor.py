@@ -248,19 +248,21 @@ def check_host_reachability(host, reachable):
     if prev == new:
         return
     name = host.get("name") or host["address"]
+    # state/key let a webhook receiver pair the two: same key, new -> resolved.
+    pair_key = f"host_offline:{host['address']}"
     if not reachable:
         send_notification(
             "host_offline",
             "Host Offline",
             f"{name} ({host['address']}) is not reachable via SSH.",
-            priority=8,
+            priority=8, state="new", key=pair_key, host=name,
         )
     else:
         send_notification(
             "host_offline",
             "Host Back Online",
             f"{name} ({host['address']}) is reachable again.",
-            priority=3,
+            priority=3, state="resolved", key=pair_key, host=name,
         )
     _state_set(scope, key, new, last_alert_ts=int(time.time()))
 
@@ -311,6 +313,7 @@ def check_pool_health(host, pools):
         if prev == health:
             continue
         name = host.get("name") or host["address"]
+        pair_key = f"pool_error:{host['address']}:{pool_name}"
         if health in BAD_HEALTH:
             send_notification(
                 "pool_error",
@@ -318,7 +321,7 @@ def check_pool_health(host, pools):
                 f"Pool '{pool_name}' on {name} transitioned "
                 f"from {prev} to {health}.\n\n"
                 f"Run 'zpool status {pool_name}' on the host for details.",
-                priority=9,
+                priority=9, state="new", key=pair_key, host=name,
             )
         elif prev in BAD_HEALTH and health == "ONLINE":
             send_notification(
@@ -326,7 +329,7 @@ def check_pool_health(host, pools):
                 f"Pool {pool_name}: Recovered",
                 f"Pool '{pool_name}' on {name} recovered: "
                 f"{prev} → {health}.",
-                priority=4,
+                priority=4, state="resolved", key=pair_key, host=name,
             )
         _state_set(scope, key, health, last_alert_ts=int(time.time()))
 

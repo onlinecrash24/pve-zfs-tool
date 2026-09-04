@@ -7291,6 +7291,68 @@ async function viewNotifications() {
     emCard.appendChild(emBody);
     container.appendChild(emCard);
 
+    // Webhook card -- generic JSON to anything that takes it. The body is an
+    // editable template; the preset buttons only fill the textarea.
+    const wh = config.webhook || {};
+    const whPresets = config.webhook_presets || {};
+    const whCard = h("div", { className: "card" });
+    whCard.appendChild(h("div", { className: "card-header" }, [
+        h("span", {}, t("webhook")),
+        h("span", { className: `badge ${wh.enabled ? "badge-online" : "badge-offline"}` },
+          wh.enabled ? t("enabled") : t("disabled")),
+    ]));
+    const whBody = h("div", { className: "card-body" });
+    const whPlaceholders = ["title", "message", "event", "state", "severity", "state_code",
+        "priority", "host", "key", "timestamp", "version", "pdf_filename", "pdf_base64"]
+        .map(p => `<code>{{${p}}}</code>`).join(" ");
+    whBody.innerHTML = `
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="wh-enabled" ${wh.enabled ? "checked" : ""}>
+                ${escapeHtml(t("enable_webhook"))}
+            </label>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>${escapeHtml(t("wh_url"))}</label>
+                <input class="form-control" id="wh-url" placeholder="https://n8n.example.com/webhook/zfs" value="${escapeAttr(wh.url || "")}">
+            </div>
+            <div class="form-group">
+                <label>${escapeHtml(t("wh_secret"))}</label>
+                <input class="form-control" id="wh-secret" type="password" autocomplete="off" value="${escapeAttr(wh.secret || "")}">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>${escapeHtml(t("wh_headers"))}</label>
+            <textarea class="form-control" id="wh-headers" rows="2" style="font-family:monospace;font-size:12px" placeholder="Authorization: Bearer …">${escapeHtml(wh.headers || "")}</textarea>
+        </div>
+        <div class="form-group">
+            <label>${escapeHtml(t("wh_template"))}</label>
+            <div class="btn-group" style="margin:4px 0 6px">
+                <button class="btn btn-sm" data-wh-preset="generic">${escapeHtml(t("wh_preset_generic"))}</button>
+                <button class="btn btn-sm" data-wh-preset="slack">${escapeHtml(t("wh_preset_slack"))}</button>
+                <button class="btn btn-sm" data-wh-preset="signl4">${escapeHtml(t("wh_preset_signl4"))}</button>
+                <button class="btn btn-sm" data-wh-preset="monitoring">${escapeHtml(t("wh_preset_monitoring"))}</button>
+            </div>
+            <textarea class="form-control" id="wh-template" rows="12" spellcheck="false" style="font-family:monospace;font-size:12px">${escapeHtml(wh.template || whPresets.generic || "")}</textarea>
+            <p style="margin-top:6px;font-size:12px;color:var(--text-secondary)"><b>${escapeHtml(t("wh_placeholders"))}:</b> ${whPlaceholders}</p>
+        </div>
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="wh-attach-pdf" ${wh.attach_pdf ? "checked" : ""}>
+                ${escapeHtml(t("wh_attach_pdf"))}
+            </label>
+        </div>
+        <div class="btn-group" style="margin-top:8px">
+            <button class="btn btn-sm" id="wh-preview-btn">${escapeHtml(t("wh_preview"))}</button>
+            <button class="btn btn-sm btn-success" id="wh-test-btn">${escapeHtml(t("send_test"))}</button>
+        </div>
+        <pre id="wh-preview" style="display:none;margin-top:8px;font-size:12px;max-height:320px;overflow:auto"></pre>
+        <p style="margin-top:10px;font-size:12px;color:var(--text-secondary)">${t("wh_help")}</p>
+    `;
+    whCard.appendChild(whBody);
+    container.appendChild(whCard);
+
     // --- Event Configuration ---
     const evCard = h("div", { className: "card" });
     evCard.appendChild(h("div", { className: "card-header" }, t("event_config")));
@@ -7401,6 +7463,36 @@ async function viewNotifications() {
             r.success ? "success" : "error");
     });
 
+    // Webhook: presets fill the textarea, preview renders server-side (same
+    // renderer as delivery, nothing is sent), test delivers the sample event.
+    const _whCfg = () => ({
+        url: document.getElementById("wh-url").value.trim(),
+        secret: document.getElementById("wh-secret").value,
+        headers: document.getElementById("wh-headers").value,
+        template: document.getElementById("wh-template").value,
+        attach_pdf: document.getElementById("wh-attach-pdf").checked,
+    });
+    document.querySelectorAll("[data-wh-preset]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const tpl = whPresets[btn.dataset.whPreset];
+            if (tpl) document.getElementById("wh-template").value = tpl;
+        });
+    });
+    document.getElementById("wh-preview-btn").addEventListener("click", async () => {
+        const pre = document.getElementById("wh-preview");
+        const r = await API.post("/api/notifications/webhook/preview", { template: _whCfg().template });
+        pre.style.display = "block";
+        pre.textContent = r.success
+            ? `${t("wh_preview_title")}\n\n${JSON.stringify(r.body, null, 2)}`
+            : t("wh_template_invalid", r.detail || r.error || t("error"));
+    });
+    document.getElementById("wh-test-btn").addEventListener("click", async () => {
+        const cfg = _whCfg();
+        if (!cfg.url) { toast(t("wh_url_required"), "error"); return; }
+        const r = await API.post("/api/notifications/test/webhook", cfg);
+        toast(r.success ? t("wh_test_sent") : t("wh_failed", r.detail || t("error")),
+            r.success ? "success" : "error");
+    });
     document.getElementById("em-test-btn").addEventListener("click", async () => {
         const payload = {
             smtp_host: document.getElementById("em-host").value.trim(),
@@ -7450,6 +7542,14 @@ async function viewNotifications() {
                 from_address: document.getElementById("em-from").value.trim(),
                 to_addresses: document.getElementById("em-to").value.trim(),
                 security: document.getElementById("em-security").value,
+            },
+            webhook: {
+                enabled: document.getElementById("wh-enabled").checked,
+                url: document.getElementById("wh-url").value.trim(),
+                secret: document.getElementById("wh-secret").value,
+                headers: document.getElementById("wh-headers").value,
+                template: document.getElementById("wh-template").value,
+                attach_pdf: document.getElementById("wh-attach-pdf").checked,
             },
             events,
             thresholds: {

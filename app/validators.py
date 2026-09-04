@@ -153,3 +153,26 @@ def validate_dataset_name(value):
 def validate_clone_name(value):
     """Validate a clone target name."""
     return validate_zfs_name(value, "Clone name")
+
+
+def validate_webhook_url(value):
+    """An http(s) URL with a host. Nothing else -- urllib would happily open
+    file:// or gopher://, and a notification target that is not a web server
+    is a mistake, not a use case.
+
+    Deliberately NOT rejecting private or link-local addresses: an n8n or a
+    monitoring bridge on the LAN is the primary use of a webhook here.
+    """
+    from urllib.parse import urlsplit
+    if not value or not isinstance(value, str):
+        raise ValueError("Webhook URL is required")
+    value = value.strip()
+    _check_length(value, "Webhook URL")
+    if any(ord(c) < 33 for c in value):
+        raise ValueError("Webhook URL: whitespace or control characters are not allowed")
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("Webhook URL must start with http:// or https://")
+    if not parts.hostname:
+        raise ValueError("Webhook URL has no host")
+    return value

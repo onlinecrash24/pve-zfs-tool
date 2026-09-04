@@ -261,6 +261,33 @@ server {
 4. Homeserver-URL, Access-Token und Raum-ID in den Notification-Einstellungen eintragen
 5. „Send Test" klicken
 
+### Webhook
+
+1. URL eines beliebigen Endpunkts eintragen, der JSON annimmt -- n8n, ein Slack-Incoming-Webhook, SIGNL4, eine Monitoring-Brücke
+2. Startvorlage wählen (Generisch, Slack, SIGNL4, Monitoring) und frei bearbeiten; **Vorschau** zeigt den exakten Body für ein Beispielereignis
+3. Optional ein Signatur-Geheimnis und zusätzliche Header setzen (z. B. `Authorization: Bearer ...`)
+4. „Send Test“ klicken
+
+Die generische Vorlage erzeugt dieses Dokument. Platzhalter, die einen ganzen Wert bilden, behalten ihren Typ; `state_code` folgt Nagios (0 ok, 1 warning, 2 critical):
+
+```json
+{
+  "source": "pve-zfs-tool", "version": "v0.9.924",
+  "event": "host_offline", "state": "new",
+  "severity": "critical", "state_code": 2, "priority": 8,
+  "title": "Host Offline", "message": "pve1 (10.0.0.5) is not reachable via SSH.",
+  "host": "pve1", "key": "host_offline:10.0.0.5",
+  "timestamp": "2026-09-03T21:14:00+02:00"
+}
+```
+
+Ereignispaare teilen sich einen `key` und kommen als `new` und später `resolved`, so dass ein Empfänger schließen kann, was er geöffnet hat. Mit gesetztem Geheimnis trägt jede Anfrage `X-PVEZFS-Signature: sha256=<hex>`, eine HMAC-SHA256 über den rohen Body -- vor dem Verarbeiten prüfen:
+
+```python
+expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+hmac.compare_digest(expected, request.headers["X-PVEZFS-Signature"])
+```
+
 ## Prometheus-Integration (optional)
 
 Die Umgebungsvariable `PROMETHEUS_TOKEN` setzen, um den `/metrics`-Endpoint zu aktivieren (ansonsten `404`). Beispiel Prometheus-Scrape-Config:
