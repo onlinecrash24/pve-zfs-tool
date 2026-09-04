@@ -7,6 +7,67 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.924 -- 2026-09-04
+
+v0.9.924 — webhooks, and two things you may need to change
+
+**`X-Forwarded-For` is no longer trusted unless you say so.** ProxyFix used to
+be applied unconditionally, so on a directly reachable port — which is what
+the shipped compose file does — any client could name its own address. Seven
+failed logins with a rotating `X-Forwarded-For` never tripped the rate limit,
+and the audit log recorded whatever the caller wrote.
+
+Behind a reverse proxy, set **`TRUST_PROXY=true`**. Until you do, every user
+shares one login rate-limit bucket (five failed attempts by anyone lock
+everyone out for five minutes) and the audit log records the proxy's address.
+The startup log says which mode is active. Do not set it on a port that is
+reachable directly.
+
+**`/metrics` takes the token in the `Authorization: Bearer` header only.** The
+`?token=` query form is gone: a token in the URL lands in proxy access logs,
+browser history and Referer headers, and Prometheus has had bearer auth in
+scrape_config for years. Both READMEs already showed only the header.
+
+A fifth channel beside Telegram, Gotify, Matrix and email: one JSON document
+per event to any HTTP endpoint — n8n, a Slack incoming webhook, a monitoring
+bridge.
+
+The body is an editable JSON template with placeholders, not a fixed format.
+Generic and Slack ship as starting templates that fill the textarea; Teams,
+Discord, Mattermost or a vendor endpoint need only a different template. The
+template is parsed as JSON first and placeholders are filled in inside string
+values, so a quote in a message can never break it; a placeholder that is the
+whole value keeps its type (`"{{state_code}}"` becomes the number `2`).
+Invalid JSON and unknown placeholders are refused when you save, with the
+position or the name, rather than discovered when the first alert fires.
+**Preview** renders the template against a sample event without sending.
+
+The generic document carries monitoring semantics: `severity`, a Nagios
+`state_code` (0/1/2), a stable correlation `key`, and `state` as `new` or
+`resolved`. Host offline/online and pool failed/recovered share one key, so a
+receiver can close the alert it opened. The URL is the credential — Slack,
+n8n and their kind put the token in it — and is treated as one.
+
+A dead receiver cannot take the other channels down: the webhook never raises
+and gives up after ten seconds.
+
+The restore browser proved that a path stayed under the mount it was handed —
+which, when the mount was `/`, was every path on the host.
+`mount_path=/&file=etc/hostname` sent `cat /etc/hostname` to the host without
+a single `..`, while the documentation advertised path-traversal protection.
+All four browse, preview and restore functions now require the mount to sit
+under one of the two bases this tool mounts snapshots at, and the guard
+compares on a directory boundary rather than a string prefix.
+
+Names read from the host — vdev names from `zpool status`, kpartx mapper
+names, dataset names from `zfs get` — go back to it quoted. The clone-target
+dropdown takes one SSH round trip instead of one per pool. The deep
+diagnostics, the upgrade check and the SMART topology resolution are cached,
+since none of them changes between clicks.
+
+Every one of these was demonstrated against the running application before
+it was fixed, and each demonstration is now a test.
+
 ## v0.9.923 -- 2026-08-31
 
 v0.9.923 — the German feature list says the same as the English one
