@@ -16,6 +16,10 @@ services:
       - ADMIN_USER=admin                      # CHANGE THIS!
       - ADMIN_PASSWORD=your-strong-password   # CHANGE THIS!
       - FORCE_HTTPS=true  # HTTPS behind reverse proxy
+      # Only behind a reverse proxy: take the client address from
+      # X-Forwarded-For. Leave unset when this port is reachable directly,
+      # or any client can pick its own address and skip the login rate limit.
+      # - TRUST_PROXY=true
       - TZ=Europe/Berlin  # Timezone (e.g. Europe/Berlin, UTC, America/New_York)
       - DEFAULT_LANG=de   # Default UI language for new visitors: de or en (user can still switch)
       # Data retention (days) — auto-cleaned; lower these if the zfs-data

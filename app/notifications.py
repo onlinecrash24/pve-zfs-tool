@@ -5,6 +5,8 @@ carry files: Email, Telegram (sendDocument), Matrix (media upload + m.file).
 Gotify has no native file support, so the report is sent as text only.
 """
 
+import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -17,8 +19,11 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
+import uuid
+from datetime import datetime
 from email.message import EmailMessage
 from app.timezone import now_str as tz_now_str
+from app.validators import validate_webhook_url
 
 DATA_DIR = "/app/data"
 NOTIFY_CONFIG_FILE = os.path.join(DATA_DIR, "notifications.json")
@@ -52,6 +57,13 @@ DEFAULT_CONFIG = {
         "from_address": "",
         "to_addresses": "",
         "security": "starttls",
+    },
+    "webhook": {
+        "enabled": False,
+        "url": "",             # the URL is the credential (Slack, n8n, ... put a token in it)
+        "template": "",        # JSON with {{placeholders}}; empty = generic preset
+        "headers": "",         # one "Name: value" per line
+        "attach_pdf": False,   # populate {{pdf_*}} for AI reports (can be large)
     },
     "events": {
         "scrub_started": True,
@@ -521,8 +533,209 @@ def _summarize_ai_report(content: str, lang: str = "en"):
     return verdict, txt
 
 
+# ---------------------------------------------------------------------------
+# Webhook
+# ---------------------------------------------------------------------------
+#
+# Generic JSON to any HTTP endpoint. The body is a user-editable JSON template
+# with {{placeholders}}; the generic document and a Slack shape ship as
+# starting templates. Anything that takes JSON -- Teams, Discord, Mattermost,
+# n8n, a monitoring bridge -- is reachable without this file knowing about it.
+#
+# No request signing: with Slack, n8n and their kind the URL itself carries
+# the token, so the URL is the credential and is treated like one.
+#
+# The template is parsed as JSON first and placeholders are substituted inside
+# string values by walking the parsed object; the body is then re-serialised
+# by json.dumps. A quote or newline in a message therefore cannot break the
+# JSON, and a placeholder that is the WHOLE string value becomes its native
+# type ("{{state_code}}" -> 2, not "2").
+
+WEBHOOK_PLACEHOLDERS = (
+    "title", "message", "event", "state", "severity", "state_code", "priority",
+    "host", "key", "timestamp", "version", "pdf_filename", "pdf_base64",
+)
+# Digits included: {{pdf_base64}} silently stayed literal while this was
+# [a-z_]+, and validate_template could not flag it because the pattern never
+# saw it. A test now holds every listed placeholder against this pattern.
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-z0-9_]+)\s*\}\}")
+_RESERVED_HEADERS = {"content-length", "host", "x-pvezfs-event", "x-pvezfs-delivery"}
+
+_GENERIC_BODY = {
+    "source": "pve-zfs-tool",
+    "version": "{{version}}",
+    "event": "{{event}}",
+    "state": "{{state}}",
+    "severity": "{{severity}}",
+    "state_code": "{{state_code}}",
+    "priority": "{{priority}}",
+    "title": "{{title}}",
+    "message": "{{message}}",
+    "host": "{{host}}",
+    "key": "{{key}}",
+    "timestamp": "{{timestamp}}",
+}
+
+WEBHOOK_PRESETS = {
+    "generic": json.dumps(_GENERIC_BODY, indent=2),
+    "slack": json.dumps({"text": "*{{title}}*\n{{message}}"}, indent=2),
+}
+
+
+def _severity(priority, state="new"):
+    """(severity word, Nagios state code) from the priority every caller
+    already passes: >= 8 critical, 6-7 warning, 5 info, <= 4 ok. A resolved
+    event is ok whatever its priority says."""
+    if state == "resolved":
+        return "ok", 0
+    try:
+        p = int(priority)
+    except (TypeError, ValueError):
+        p = 5
+    if p >= 8:
+        return "critical", 2
+    if p >= 6:
+        return "warning", 1
+    if p >= 5:
+        return "info", 0
+    return "ok", 0
+
+
+def build_event(event_type, title, message, priority=5, state="new", key=None,
+                host=None, pdf=None, timestamp=None):
+    """The placeholder values for one notification, with native types.
+
+    ``key`` is the correlation id a receiver pairs new/resolved on; callers
+    that know their object pass it (host offline/online share one key).
+    Otherwise it derives from event + title, which is stable but never pairs.
+    """
+    severity, code = _severity(priority, state)
+    if not key:
+        key = f"{event_type}:{hashlib.sha1((title or '').encode('utf-8')).hexdigest()[:12]}"
+    fname, b64 = None, None
+    if pdf:
+        try:
+            fname, data = pdf
+            b64 = base64.b64encode(data).decode("ascii")
+        except Exception:
+            fname, b64 = None, None
+    return {
+        "title": title or "",
+        "message": message or "",
+        "event": event_type or "",
+        "state": "resolved" if state == "resolved" else "new",
+        "severity": severity,
+        "state_code": code,
+        "priority": int(priority) if str(priority).lstrip("-").isdigit() else 5,
+        "host": host or None,
+        "key": key,
+        "timestamp": timestamp or datetime.now().astimezone().isoformat(timespec="seconds"),
+        "version": os.environ.get("APP_VERSION") or "dev",
+        "pdf_filename": fname,
+        "pdf_base64": b64,
+    }
+
+
+def sample_event():
+    """What the preview and the test button render: a host-offline alert."""
+    return build_event("host_offline", "Host Offline",
+                       "pve1 (10.0.0.5) is not reachable via SSH.",
+                       priority=8, state="new", key="host_offline:10.0.0.5", host="pve1")
+
+
+def validate_template(text):
+    """Parse a template, or raise ValueError saying exactly what is wrong.
+
+    Two things are rejected at save time rather than at 3 a.m. when the first
+    alert fires: JSON that does not parse (with the position), and a
+    placeholder that is not on the list (a typo would otherwise ship as the
+    literal text ``{{sevrity}}`` to every receiver, silently).
+    """
+    text = (text or "").strip() or WEBHOOK_PRESETS["generic"]
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"not valid JSON: {e.msg} (line {e.lineno}, column {e.colno})")
+    unknown = sorted({m for m in _PLACEHOLDER_RE.findall(text)
+                      if m not in WEBHOOK_PLACEHOLDERS})
+    if unknown:
+        raise ValueError("unknown placeholder(s): " + ", ".join("{{%s}}" % u for u in unknown)
+                         + "; available: " + ", ".join("{{%s}}" % p for p in WEBHOOK_PLACEHOLDERS))
+    return obj
+
+
+def render_template(obj, values):
+    """Substitute placeholders inside the parsed template's string values."""
+    if isinstance(obj, dict):
+        return {k: render_template(v, values) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [render_template(v, values) for v in obj]
+    if isinstance(obj, str):
+        whole = _PLACEHOLDER_RE.fullmatch(obj.strip())
+        if whole and whole.group(1) in values:
+            return values[whole.group(1)]           # native type, may be None
+        return _PLACEHOLDER_RE.sub(
+            lambda m: "" if values.get(m.group(1)) is None else str(values[m.group(1)]), obj)
+    return obj
+
+
+def render_preview(template_text):
+    """The body a template produces for the sample event -- what the UI shows."""
+    return render_template(validate_template(template_text), sample_event())
+
+
+def parse_headers(text):
+    """``Name: value`` per line -> dict. Names limited to token characters,
+    and the headers this tool sets itself cannot be overridden."""
+    out = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, value = line.partition(":")
+        name, value = name.strip(), value.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z0-9-]+", name):
+            raise ValueError(f"invalid header line: {line[:60]!r}")
+        if name.lower() in _RESERVED_HEADERS:
+            raise ValueError(f"header {name} is set by the tool and cannot be overridden")
+        if any(ord(c) < 32 for c in value):
+            raise ValueError(f"header {name}: control characters are not allowed")
+        out[name] = value
+    return out
+
+
+def _send_webhook(cfg, values):
+    """POST the rendered template. Never raises: a bad receiver must not take
+    the other channels down with it, and a webhook can point anywhere."""
+    try:
+        url = validate_webhook_url(cfg.get("url", ""))
+        body = json.dumps(render_template(validate_template(cfg.get("template")), values),
+                          ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "pve-zfs-tool",
+        }
+        headers.update(parse_headers(cfg.get("headers", "")))
+        # Set after the user's headers so neither can be overridden.
+        headers["X-PVEZFS-Event"] = values.get("event", "")
+        headers["X-PVEZFS-Delivery"] = str(uuid.uuid4())
+    except ValueError as e:
+        return {"success": False, "detail": str(e)}
+    except Exception as e:
+        return {"success": False, "detail": f"could not build request: {e}"}
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return {"success": True, "detail": f"HTTP {resp.status}"}
+    except urllib.error.HTTPError as e:
+        return {"success": False,
+                "detail": f"HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:500]}"}
+    except Exception as e:
+        return {"success": False, "detail": str(e)}
+
+
 def send_notification(event_type, title, message, priority=5, pdf_attachment=None,
-                      email_short=None, lang=None):
+                      email_short=None, lang=None, state="new", key=None, host=None):
     """Send notification through all enabled channels if event type is active.
 
     pdf_attachment: optional tuple (filename, bytes) — sent as attachment for
@@ -635,6 +848,17 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
             )
         results["email"] = _send_email(em, subject, body_text, body_html, attachments)
 
+    # Webhook -- the message as structured JSON, not the "message + timestamp"
+    # text the chat channels get; the receiver has the timestamp as a field.
+    wh = config.get("webhook", {})
+    if wh.get("enabled") and wh.get("url"):
+        try:
+            values = build_event(event_type, title, message, priority, state, key, host,
+                                 pdf=pdf_attachment if wh.get("attach_pdf") else None)
+            results["webhook"] = _send_webhook(wh, values)
+        except Exception as e:      # belt and braces: _send_webhook already never raises
+            results["webhook"] = {"success": False, "detail": str(e)}
+
     return results
 
 
@@ -688,3 +912,9 @@ def test_email(cfg):
         body_text="Test notification — Email is working!",
         body_html="<p>Test notification — <b>Email is working!</b></p>",
     )
+
+
+def test_webhook(cfg):
+    """Deliver the sample event with the given webhook settings, so what the
+    receiver gets is exactly what the preview showed."""
+    return _send_webhook(cfg, sample_event())

@@ -194,7 +194,13 @@ apt install ntfs-3g         # Optional — nur für Windows-VM-NTFS-Partitionen
 
 Für Produktiv-Deployments den Container hinter einen HTTPS-Reverse-Proxy stellen. Die Anwendung enthält `ProxyFix`-Middleware und vertraut automatisch den `X-Forwarded-*`-Headern des Proxys.
 
-In `docker-compose.yml` `FORCE_HTTPS=true` setzen, um sichere Session-Cookies zu aktivieren.
+In `docker-compose.yml` `FORCE_HTTPS=true` setzen, um sichere Session-Cookies zu aktivieren,
+und `TRUST_PROXY=true`, damit die Anwendung die Client-Adresse aus `X-Forwarded-For`
+übernimmt, statt in jedem Nutzer den Proxy zu sehen. Ohne diese Variable zählt die
+Login-Sperre alle Nutzer als einen, und im Audit-Log steht die Adresse des Proxys.
+**Nicht** auf einem direkt erreichbaren Port setzen: Den Header kann jeder Client
+schreiben, und ihm dort zu vertrauen ließe einen Aufrufer seine Adresse selbst wählen
+und die Sperre umgehen.
 
 ### Nginx Proxy Manager (NPM)
 
@@ -255,6 +261,26 @@ server {
 4. Homeserver-URL, Access-Token und Raum-ID in den Notification-Einstellungen eintragen
 5. „Send Test" klicken
 
+### Webhook
+
+1. URL eines beliebigen Endpunkts eintragen, der JSON annimmt -- n8n, ein Slack-Incoming-Webhook, eine Monitoring-Brücke. Die URL trägt meist das Token des Empfängers — sie ist damit ein Zugangsdatum
+2. Startvorlage wählen (Generisch oder Slack) und frei bearbeiten; **Vorschau** zeigt den exakten Body für ein Beispielereignis
+3. Optional zusätzliche Header setzen (z. B. `Authorization: Bearer ...`)
+4. „Send Test“ klicken
+
+Die generische Vorlage erzeugt dieses Dokument. Platzhalter, die einen ganzen Wert bilden, behalten ihren Typ; `state_code` folgt Nagios (0 ok, 1 warning, 2 critical). Ereignispaare teilen sich einen `key` und kommen als `new` und später `resolved`, so dass ein Empfänger schließen kann, was er geöffnet hat:
+
+```json
+{
+  "source": "pve-zfs-tool", "version": "v0.9.924",
+  "event": "host_offline", "state": "new",
+  "severity": "critical", "state_code": 2, "priority": 8,
+  "title": "Host Offline", "message": "pve1 (10.0.0.5) is not reachable via SSH.",
+  "host": "pve1", "key": "host_offline:10.0.0.5",
+  "timestamp": "2026-09-03T21:14:00+02:00"
+}
+```
+
 ## Prometheus-Integration (optional)
 
 Die Umgebungsvariable `PROMETHEUS_TOKEN` setzen, um den `/metrics`-Endpoint zu aktivieren (ansonsten `404`). Beispiel Prometheus-Scrape-Config:
@@ -282,6 +308,7 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 | `ADMIN_USER` | `admin` | Login-Benutzername -- **sollte geändert werden** |
 | `ADMIN_PASSWORD` | `password` | Login-Passwort -- **muss geändert werden!** |
 | `FORCE_HTTPS` | `true` | Sichere Session-Cookies -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
+| `TRUST_PROXY` | nicht gesetzt | Client-Adresse aus `X-Forwarded-For` übernehmen. **Nur** hinter einem Reverse-Proxy -- auf einem direkt erreichbaren Port könnte jeder Client seine Adresse selbst wählen und die Login-Sperre umgehen |
 | `TZ` | `UTC` | Zeitzone für Reports und Scheduler (z. B. `Europe/Berlin`, `America/New_York`) |
 | `DEFAULT_LANG` | `en` | Standard-UI-Sprache für neue Besucher (`de` oder `en`); Nutzer können weiterhin umschalten |
 | `METRICS_RETENTION_DAYS` | `90` | Wie lange Pool- + Disk-(SMART-)Messwerte aufbewahrt werden, bevor aufgeräumt wird; `<=0` behält für immer |

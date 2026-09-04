@@ -192,7 +192,12 @@ apt install ntfs-3g         # Optional — only needed for Windows VM NTFS parti
 
 For production deployments, place the container behind an HTTPS reverse proxy. The application includes `ProxyFix` middleware and automatically trusts `X-Forwarded-*` headers from your proxy.
 
-Set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies.
+Set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies, and
+`TRUST_PROXY=true` so the application takes the client address from `X-Forwarded-For`
+rather than seeing every user as the proxy. Without it the login rate limit treats all
+users as one and the audit log records the proxy's address. Do **not** set it on a port
+that is reachable directly: the header can be written by any client, and trusting it
+there would let a caller choose its own address and bypass the rate limit.
 
 ### Nginx Proxy Manager (NPM)
 
@@ -253,6 +258,26 @@ server {
 4. Enter homeserver URL, access token, and room ID in the Notifications settings
 5. Click "Send Test" to verify
 
+### Webhook
+
+1. Enter the URL of any endpoint that accepts JSON -- n8n, a Slack incoming webhook, a monitoring bridge. The URL usually carries the receiver's token, so treat it as a credential
+2. Pick a starting template (Generic or Slack) and edit it freely; **Preview** shows the exact body for a sample event
+3. Optionally add extra headers (e.g. `Authorization: Bearer ...`)
+4. Click "Send Test" to verify
+
+The generic template produces this document. Placeholders that make up a whole value keep their type; `state_code` follows Nagios (0 ok, 1 warning, 2 critical). Paired events share a `key` and arrive as `new` then `resolved`, so a receiver can close what it opened:
+
+```json
+{
+  "source": "pve-zfs-tool", "version": "v0.9.924",
+  "event": "host_offline", "state": "new",
+  "severity": "critical", "state_code": 2, "priority": 8,
+  "title": "Host Offline", "message": "pve1 (10.0.0.5) is not reachable via SSH.",
+  "host": "pve1", "key": "host_offline:10.0.0.5",
+  "timestamp": "2026-09-03T21:14:00+02:00"
+}
+```
+
 ## Prometheus Integration (optional)
 
 Set the `PROMETHEUS_TOKEN` environment variable to enable the `/metrics` endpoint (it stays `404` otherwise). Example Prometheus scrape config:
@@ -280,6 +305,7 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 | `ADMIN_USER` | `admin` | Login username -- **should be changed** |
 | `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
+| `TRUST_PROXY` | unset | Take the client address from `X-Forwarded-For`. **Only** behind a reverse proxy -- on a directly reachable port any client could pick its own address and bypass the login rate limit |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
 | `DEFAULT_LANG` | `en` | Default UI language for new visitors (`de` or `en`); users can still switch |
 | `METRICS_RETENTION_DAYS` | `90` | How long pool + disk (SMART) samples are kept before auto-cleanup; `<=0` keeps forever |

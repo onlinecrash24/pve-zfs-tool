@@ -49,6 +49,8 @@ from app.notifications import (
     load_config as load_notify_config,
     save_config as save_notify_config,
     send_notification, test_telegram, test_gotify, test_matrix, test_email,
+    test_webhook, validate_template as validate_webhook_template,
+    render_preview as render_webhook_preview, WEBHOOK_PRESETS,
 )
 from app.ai_reports import (
     load_config_masked as load_ai_config,
@@ -81,14 +83,28 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-me")
 app.permanent_session_lifetime = timedelta(hours=8)
 
-# Support running behind a reverse proxy (NPM, nginx, Caddy, Traefik)
-from werkzeug.middleware.proxy_fix import ProxyFix
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+def _env_flag(name):
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
+# Behind a reverse proxy (NPM, nginx, Caddy, Traefik) the client's address
+# arrives in X-Forwarded-For and ProxyFix rewrites remote_addr from it.
+#
+# Only when told to. Those headers can be set by ANY client, and this used to
+# be unconditional -- so on a container reached directly, which is what the
+# shipped compose file does, a caller could pick its own address: seven failed
+# logins with a rotating X-Forwarded-For never tripped the rate limit, and the
+# audit log recorded whatever the caller wrote. Off by default; the proxy
+# operator is the one who knows the header is trustworthy.
+TRUST_PROXY = _env_flag("TRUST_PROXY")
+if TRUST_PROXY:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Secure cookie settings (effective when behind HTTPS reverse proxy)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-if os.environ.get("FORCE_HTTPS", "").lower() in ("1", "true", "yes"):
+if _env_flag("FORCE_HTTPS"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
@@ -135,6 +151,11 @@ if is_placeholder_secret_key(app.secret_key):
 if is_placeholder_password(ADMIN_PASSWORD):
     log.warning("ADMIN_PASSWORD is a placeholder or default value! Anyone who has read this "
                 "repository knows it. Set ADMIN_USER and ADMIN_PASSWORD environment variables.")
+if TRUST_PROXY:
+    log.info("Trusting X-Forwarded-* headers (TRUST_PROXY=true) -- make sure only your reverse proxy can reach this port.")
+else:
+    log.info("Ignoring X-Forwarded-* headers. If this runs behind a reverse proxy, set TRUST_PROXY=true -- "
+             "otherwise every user shares one login rate-limit bucket and the audit log records the proxy's address.")
 
 # Rate limiting for login attempts
 _login_attempts = {}  # IP -> {"count": int, "last": float}
@@ -158,6 +179,12 @@ def _login_record_failure(ip, now):
     """Atomically increment the failed-attempt counter (resetting it if the
     lockout window elapsed). Returns the new count."""
     with _login_lock:
+        # Drop entries whose lockout window has passed. The map used to grow
+        # without bound -- every address that ever failed stayed forever --
+        # which, with a spoofable address, is an allocation per request.
+        for stale in [k for k, v in _login_attempts.items()
+                      if (now - v["last"]) >= LOGIN_LOCKOUT_SECONDS]:
+            del _login_attempts[stale]
         info = _login_attempts.get(ip, {"count": 0, "last": 0})
         if (now - info["last"]) >= LOGIN_LOCKOUT_SECONDS:
             info = {"count": 0, "last": now}
@@ -1525,6 +1552,8 @@ def api_notify_config():
         cfg["gotify"]["token"] = _mask_secret(cfg["gotify"]["token"])
     if cfg.get("matrix", {}).get("access_token"):
         cfg["matrix"]["access_token"] = _mask_secret(cfg["matrix"]["access_token"])
+    # The starting templates live server-side so the UI and the sender agree.
+    cfg["webhook_presets"] = dict(WEBHOOK_PRESETS)
     return jsonify(cfg)
 
 
@@ -1543,9 +1572,17 @@ def api_save_notify_config():
         resolved = _resolve_masked(new_val, existing.get(section, {}).get(field, ""))
         if resolved != new_val:
             data.setdefault(section, {})[field] = resolved
+    # A broken webhook template is refused here, with the reason, rather than
+    # stored and discovered when the first alert fires. Nothing is written.
+    if "webhook" in data:
+        try:
+            validate_webhook_template((data.get("webhook") or {}).get("template", ""))
+        except ValueError as e:
+            return jsonify({"success": False, "error": f"webhook template: {e}"}), 400
+    data.pop("webhook_presets", None)      # read-only, never stored
     save_notify_config(data)
     audit_log("config.notifications.save", target="notifications", success=True,
-              details={"channels": [k for k in ("email", "telegram", "gotify", "matrix")
+              details={"channels": [k for k in ("email", "telegram", "gotify", "matrix", "webhook")
                                     if (data.get(k) or {}).get("enabled")]})
     return jsonify({"success": True, "message": "Configuration saved"})
 
@@ -1601,6 +1638,24 @@ def api_test_email():
         return _masked_secret_error("SMTP password")
     result = test_email(data)
     return jsonify(result)
+
+
+@app.route("/api/notifications/test/webhook", methods=["POST"])
+def api_test_webhook():
+    # Nothing to unmask: the webhook has no secret of its own -- the URL is
+    # the credential, and it is sent as typed.
+    return jsonify(test_webhook(request.json or {}))
+
+
+@app.route("/api/notifications/webhook/preview", methods=["POST"])
+def api_webhook_preview():
+    """Render the template against the sample event. Sends nothing."""
+    data = request.json or {}
+    try:
+        return jsonify({"success": True,
+                        "body": render_webhook_preview(data.get("template", ""))})
+    except ValueError as e:
+        return jsonify({"success": False, "detail": str(e)}), 400
 
 
 @app.route("/api/notifications/send", methods=["POST"])
@@ -3118,19 +3173,19 @@ def prometheus_endpoint():
     """Expose Prometheus text-format metrics.
 
     Disabled unless ``PROMETHEUS_TOKEN`` is set in the environment.
-    The client must present ``Authorization: Bearer <token>`` or
-    ``?token=<token>``. Compare in constant time.
+    The client must present ``Authorization: Bearer <token>``. Compared in
+    constant time.
     """
     token_cfg = os.environ.get("PROMETHEUS_TOKEN", "")
     if not token_cfg:
         return make_response("prometheus exporter disabled (set PROMETHEUS_TOKEN)\n",
                              404, {"Content-Type": "text/plain; charset=utf-8"})
     auth = request.headers.get("Authorization", "")
-    supplied = ""
-    if auth.startswith("Bearer "):
-        supplied = auth[7:].strip()
-    if not supplied:
-        supplied = request.args.get("token", "")
+    # Header only. A ?token= query string used to be accepted too, and a token
+    # in the URL lands in proxy access logs, browser history and Referer
+    # headers; Prometheus has had `authorization: {type: Bearer}` in
+    # scrape_config for years, so nothing needs the query form.
+    supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
     if not supplied or not hmac.compare_digest(supplied, token_cfg):
         return make_response("unauthorized\n", 401,
                              {"Content-Type": "text/plain; charset=utf-8"})
