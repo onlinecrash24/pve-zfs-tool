@@ -7,7 +7,6 @@ Gotify has no native file support, so the report is sent as text only.
 
 import base64
 import hashlib
-import hmac
 import json
 import logging
 import mimetypes
@@ -61,8 +60,7 @@ DEFAULT_CONFIG = {
     },
     "webhook": {
         "enabled": False,
-        "url": "",
-        "secret": "",          # HMAC-SHA256 over the body; empty = unsigned
+        "url": "",             # the URL is the credential (Slack, n8n, ... put a token in it)
         "template": "",        # JSON with {{placeholders}}; empty = generic preset
         "headers": "",         # one "Name: value" per line
         "attach_pdf": False,   # populate {{pdf_*}} for AI reports (can be large)
@@ -540,10 +538,12 @@ def _summarize_ai_report(content: str, lang: str = "en"):
 # ---------------------------------------------------------------------------
 #
 # Generic JSON to any HTTP endpoint. The body is a user-editable JSON template
-# with {{placeholders}}; Slack, SIGNL4 and a Nagios-style monitoring shape are
-# merely starting templates. Anything that takes JSON -- Teams, Discord,
-# Mattermost, n8n, a monitoring bridge -- is reachable without this file
-# knowing about it.
+# with {{placeholders}}; the generic document and a Slack shape ship as
+# starting templates. Anything that takes JSON -- Teams, Discord, Mattermost,
+# n8n, a monitoring bridge -- is reachable without this file knowing about it.
+#
+# No request signing: with Slack, n8n and their kind the URL itself carries
+# the token, so the URL is the credential and is treated like one.
 #
 # The template is parsed as JSON first and placeholders are substituted inside
 # string values by walking the parsed object; the body is then re-serialised
@@ -559,8 +559,7 @@ WEBHOOK_PLACEHOLDERS = (
 # [a-z_]+, and validate_template could not flag it because the pattern never
 # saw it. A test now holds every listed placeholder against this pattern.
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-z0-9_]+)\s*\}\}")
-_RESERVED_HEADERS = {"content-length", "host", "x-pvezfs-signature",
-                     "x-pvezfs-event", "x-pvezfs-delivery"}
+_RESERVED_HEADERS = {"content-length", "host", "x-pvezfs-event", "x-pvezfs-delivery"}
 
 _GENERIC_BODY = {
     "source": "pve-zfs-tool",
@@ -580,19 +579,6 @@ _GENERIC_BODY = {
 WEBHOOK_PRESETS = {
     "generic": json.dumps(_GENERIC_BODY, indent=2),
     "slack": json.dumps({"text": "*{{title}}*\n{{message}}"}, indent=2),
-    # SIGNL4 reads title/message itself; the X-S4-* keys drive its alert
-    # lifecycle, so a host-offline alert is RESOLVED by the host-online event
-    # instead of becoming a second alert.
-    "signl4": json.dumps({**_GENERIC_BODY,
-                          "X-S4-Status": "{{state}}",
-                          "X-S4-ExternalID": "{{key}}",
-                          "X-S4-Service": "PVE ZFS Tool"}, indent=2),
-    # The flat shape every Nagios-family bridge (Checkmk, Naemon, Icinga)
-    # passes straight through: state is a NUMBER here.
-    "monitoring": json.dumps({"host": "{{host}}",
-                              "service": "{{event}}",
-                              "state": "{{state_code}}",
-                              "output": "{{title}}: {{message}}"}, indent=2),
 }
 
 
@@ -718,10 +704,6 @@ def parse_headers(text):
     return out
 
 
-def _sign(secret, body):
-    return "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
-
 def _send_webhook(cfg, values):
     """POST the rendered template. Never raises: a bad receiver must not take
     the other channels down with it, and a webhook can point anywhere."""
@@ -734,12 +716,9 @@ def _send_webhook(cfg, values):
             "User-Agent": "pve-zfs-tool",
         }
         headers.update(parse_headers(cfg.get("headers", "")))
-        # Set after the user's headers so none of these can be overridden.
+        # Set after the user's headers so neither can be overridden.
         headers["X-PVEZFS-Event"] = values.get("event", "")
         headers["X-PVEZFS-Delivery"] = str(uuid.uuid4())
-        secret = cfg.get("secret") or ""
-        if secret:
-            headers["X-PVEZFS-Signature"] = _sign(secret, body)
     except ValueError as e:
         return {"success": False, "detail": str(e)}
     except Exception as e:

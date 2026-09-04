@@ -1,12 +1,10 @@
-"""The webhook channel: a JSON template rendered safely, signed, delivered once.
+"""The webhook channel: a JSON template rendered safely, delivered once.
 
 This is the first test in the suite that stubs urllib.request.urlopen itself
 rather than one level up -- the point is to see the exact bytes and headers a
 receiver would get.
 """
 
-import hashlib
-import hmac
 import io
 import json
 import re
@@ -62,7 +60,7 @@ def _headers(req):
 
 
 def _cfg(**over):
-    cfg = {"enabled": True, "url": "https://hooks.example.test/zfs", "secret": "",
+    cfg = {"enabled": True, "url": "https://hooks.example.test/zfs",
            "template": "", "headers": "", "attach_pdf": False}
     cfg.update(over)
     return cfg
@@ -109,24 +107,13 @@ def test_without_a_key_the_correlation_id_is_stable_but_never_pairs():
     assert a == b and a != c and a.startswith("scrub_started:")
 
 
-# --- the signature, checked the way a receiver would ---------------------------
+# --- the tool's own headers stay its own ---------------------------------------
 
-def test_the_signature_verifies_on_the_receiver_side(receiver):
-    secret = "shared-secret-42"
-    n._send_webhook(_cfg(secret=secret), n.sample_event())
-    req = receiver[0]
-    expected = "sha256=" + hmac.new(secret.encode(), req.data, hashlib.sha256).hexdigest()
-    assert hmac.compare_digest(expected, _headers(req)["x-pvezfs-signature"])
-
-
-def test_no_secret_means_no_signature_header(receiver):
-    n._send_webhook(_cfg(secret=""), n.sample_event())
-    assert "x-pvezfs-signature" not in _headers(receiver[0])
-
-
-def test_a_custom_header_cannot_override_the_signature(receiver):
+def test_a_custom_header_cannot_override_the_tool_s_own(receiver):
     with pytest.raises(ValueError):
-        n.parse_headers("X-PVEZFS-Signature: sha256=forged")
+        n.parse_headers("X-PVEZFS-Event: forged")
+    n._send_webhook(_cfg(headers="X-Custom: 1"), n.sample_event())
+    assert _headers(receiver[0])["x-pvezfs-event"] == "host_offline"
 
 
 # --- the renderer: user text can never break the JSON --------------------------
@@ -181,21 +168,21 @@ def test_every_preset_validates_and_renders(name):
     json.dumps(out)
 
 
-def test_the_signl4_preset_pairs_new_and_resolved_on_one_external_id():
-    tpl = n.validate_template(n.WEBHOOK_PRESETS["signl4"])
+def test_only_the_two_presets_the_user_asked_for_exist():
+    assert set(n.WEBHOOK_PRESETS) == {"generic", "slack"}
+
+
+def test_the_generic_document_pairs_new_and_resolved_on_one_key():
+    # The pairing lives in the document itself, so any receiver -- not a
+    # preset -- can close what it opened.
+    tpl = n.validate_template(n.WEBHOOK_PRESETS["generic"])
     down = n.render_template(tpl, n.build_event("host_offline", "Host Offline", "x", 8, "new",
                                                 key="host_offline:10.0.0.5"))
     up = n.render_template(tpl, n.build_event("host_offline", "Host Back Online", "y", 3, "resolved",
                                               key="host_offline:10.0.0.5"))
-    assert down["X-S4-Status"] == "new" and up["X-S4-Status"] == "resolved"
-    assert down["X-S4-ExternalID"] == up["X-S4-ExternalID"] == "host_offline:10.0.0.5"
-
-
-def test_the_monitoring_preset_sends_state_as_a_number():
-    out = n.render_template(n.validate_template(n.WEBHOOK_PRESETS["monitoring"]),
-                            n.build_event("pool_error", "Pool rpool: FAULTED", "x", 9, host="pve1"))
-    assert out == {"host": "pve1", "service": "pool_error", "state": 2,
-                   "output": "Pool rpool: FAULTED: x"}
+    assert (down["state"], up["state"]) == ("new", "resolved")
+    assert down["key"] == up["key"] == "host_offline:10.0.0.5"
+    assert (down["state_code"], up["state_code"]) == (2, 0)
 
 
 # --- the two monitor pairs actually pass state and key --------------------------
@@ -257,7 +244,7 @@ def test_headers_parse_and_reject_what_they_should():
 
 @pytest.fixture
 def client(monkeypatch):
-    store = {"webhook": {"enabled": True, "url": "https://h/x", "secret": "OriginalSecret123",
+    store = {"webhook": {"enabled": True, "url": "https://h/x",
                          "template": n.WEBHOOK_PRESETS["generic"], "headers": "", "attach_pdf": False}}
     saved = []
     monkeypatch.setattr(m, "load_notify_config", lambda: json.loads(json.dumps(store)))
@@ -280,21 +267,18 @@ def test_the_config_post_refuses_a_broken_template_and_stores_nothing(client):
     assert client.saved == []
 
 
-def test_the_masked_secret_round_trips_through_the_route(client):
-    shown = n.mask_secret("OriginalSecret123")
+def test_a_valid_template_is_stored_and_the_presets_are_not(client):
     r = client.post("/api/notifications/config",
-                    json={"webhook": {"enabled": True, "url": "https://h/x",
-                                      "secret": shown, "template": ""}},
+                    json={"webhook": {"enabled": True, "url": "https://h/x", "template": ""},
+                          "webhook_presets": {"generic": "should never be stored"}},
                     headers={"X-CSRF-Token": "t"})
     assert r.status_code == 200
-    assert client.saved[0]["webhook"]["secret"] == "OriginalSecret123"
+    assert "webhook_presets" not in client.saved[0]
 
 
-def test_the_get_masks_the_secret_and_ships_the_presets(client):
+def test_the_get_ships_the_presets(client):
     body = client.get("/api/notifications/config").get_json()
-    assert body["webhook"]["secret"] != "OriginalSecret123"
-    assert n.is_masked(body["webhook"]["secret"])
-    assert set(body["webhook_presets"]) == set(n.WEBHOOK_PRESETS)
+    assert set(body["webhook_presets"]) == {"generic", "slack"}
 
 
 def test_the_preview_route_renders_and_sends_nothing(client, receiver):

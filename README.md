@@ -260,12 +260,12 @@ server {
 
 ### Webhook
 
-1. Enter the URL of any endpoint that accepts JSON -- n8n, a Slack incoming webhook, SIGNL4, a monitoring bridge
-2. Pick a starting template (Generic, Slack, SIGNL4, Monitoring) and edit it freely; **Preview** shows the exact body for a sample event
-3. Optionally set a signing secret and extra headers (e.g. `Authorization: Bearer ...`)
+1. Enter the URL of any endpoint that accepts JSON -- n8n, a Slack incoming webhook, a monitoring bridge. The URL usually carries the receiver's token, so treat it as a credential
+2. Pick a starting template (Generic or Slack) and edit it freely; **Preview** shows the exact body for a sample event
+3. Optionally add extra headers (e.g. `Authorization: Bearer ...`)
 4. Click "Send Test" to verify
 
-The generic template produces this document. Placeholders that make up a whole value keep their type; `state_code` follows Nagios (0 ok, 1 warning, 2 critical):
+The generic template produces this document. Placeholders that make up a whole value keep their type; `state_code` follows Nagios (0 ok, 1 warning, 2 critical). Paired events share a `key` and arrive as `new` then `resolved`, so a receiver can close what it opened:
 
 ```json
 {
@@ -276,13 +276,6 @@ The generic template produces this document. Placeholders that make up a whole v
   "host": "pve1", "key": "host_offline:10.0.0.5",
   "timestamp": "2026-09-03T21:14:00+02:00"
 }
-```
-
-Paired events share a `key` and arrive as `new` then `resolved`, so a receiver can close what it opened. With a secret set, each request carries `X-PVEZFS-Signature: sha256=<hex>`, an HMAC-SHA256 over the raw body -- verify it before trusting the payload:
-
-```python
-expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
-hmac.compare_digest(expected, request.headers["X-PVEZFS-Signature"])
 ```
 
 ## Prometheus Integration (optional)

@@ -1552,8 +1552,6 @@ def api_notify_config():
         cfg["gotify"]["token"] = _mask_secret(cfg["gotify"]["token"])
     if cfg.get("matrix", {}).get("access_token"):
         cfg["matrix"]["access_token"] = _mask_secret(cfg["matrix"]["access_token"])
-    if cfg.get("webhook", {}).get("secret"):
-        cfg["webhook"]["secret"] = _mask_secret(cfg["webhook"]["secret"])
     # The starting templates live server-side so the UI and the sender agree.
     cfg["webhook_presets"] = dict(WEBHOOK_PRESETS)
     return jsonify(cfg)
@@ -1569,7 +1567,6 @@ def api_save_notify_config():
         ("telegram", "bot_token"),
         ("gotify", "token"),
         ("matrix", "access_token"),
-        ("webhook", "secret"),
     ):
         new_val = (data.get(section) or {}).get(field, "")
         resolved = _resolve_masked(new_val, existing.get(section, {}).get(field, ""))
@@ -1645,14 +1642,9 @@ def api_test_email():
 
 @app.route("/api/notifications/test/webhook", methods=["POST"])
 def api_test_webhook():
-    data = request.json or {}
-    secret = _resolve_masked(data.get("secret", ""),
-                             load_notify_config().get("webhook", {}).get("secret", ""))
-    if _is_masked(secret):
-        return _masked_secret_error("webhook secret")
-    cfg = dict(data)
-    cfg["secret"] = secret
-    return jsonify(test_webhook(cfg))
+    # Nothing to unmask: the webhook has no secret of its own -- the URL is
+    # the credential, and it is sent as typed.
+    return jsonify(test_webhook(request.json or {}))
 
 
 @app.route("/api/notifications/webhook/preview", methods=["POST"])

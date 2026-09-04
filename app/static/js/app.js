@@ -7312,15 +7312,9 @@ async function viewNotifications() {
                 ${escapeHtml(t("enable_webhook"))}
             </label>
         </div>
-        <div class="form-row">
-            <div class="form-group">
-                <label>${escapeHtml(t("wh_url"))}</label>
-                <input class="form-control" id="wh-url" placeholder="https://n8n.example.com/webhook/zfs" value="${escapeAttr(wh.url || "")}">
-            </div>
-            <div class="form-group">
-                <label>${escapeHtml(t("wh_secret"))}</label>
-                <input class="form-control" id="wh-secret" type="password" autocomplete="off" value="${escapeAttr(wh.secret || "")}">
-            </div>
+        <div class="form-group">
+            <label>${escapeHtml(t("wh_url"))}</label>
+            <input class="form-control" id="wh-url" placeholder="https://n8n.example.com/webhook/zfs" value="${escapeAttr(wh.url || "")}">
         </div>
         <div class="form-group">
             <label>${escapeHtml(t("wh_headers"))}</label>
@@ -7331,8 +7325,6 @@ async function viewNotifications() {
             <div class="btn-group" style="margin:4px 0 6px">
                 <button class="btn btn-sm" data-wh-preset="generic">${escapeHtml(t("wh_preset_generic"))}</button>
                 <button class="btn btn-sm" data-wh-preset="slack">${escapeHtml(t("wh_preset_slack"))}</button>
-                <button class="btn btn-sm" data-wh-preset="signl4">${escapeHtml(t("wh_preset_signl4"))}</button>
-                <button class="btn btn-sm" data-wh-preset="monitoring">${escapeHtml(t("wh_preset_monitoring"))}</button>
             </div>
             <textarea class="form-control" id="wh-template" rows="12" spellcheck="false" style="font-family:monospace;font-size:12px">${escapeHtml(wh.template || whPresets.generic || "")}</textarea>
             <p style="margin-top:6px;font-size:12px;color:var(--text-secondary)"><b>${escapeHtml(t("wh_placeholders"))}:</b> ${whPlaceholders}</p>
@@ -7467,7 +7459,6 @@ async function viewNotifications() {
     // renderer as delivery, nothing is sent), test delivers the sample event.
     const _whCfg = () => ({
         url: document.getElementById("wh-url").value.trim(),
-        secret: document.getElementById("wh-secret").value,
         headers: document.getElementById("wh-headers").value,
         template: document.getElementById("wh-template").value,
         attach_pdf: document.getElementById("wh-attach-pdf").checked,
@@ -7546,7 +7537,6 @@ async function viewNotifications() {
             webhook: {
                 enabled: document.getElementById("wh-enabled").checked,
                 url: document.getElementById("wh-url").value.trim(),
-                secret: document.getElementById("wh-secret").value,
                 headers: document.getElementById("wh-headers").value,
                 template: document.getElementById("wh-template").value,
                 attach_pdf: document.getElementById("wh-attach-pdf").checked,
