@@ -51,7 +51,7 @@ def test_checkzfs_confines_replicas_to_the_target_and_on_a_same_host_pair_the_so
     monkeypatch.setattr(r, "run_command", run)
     r.run_checkzfs(_host("10.0.0.9"), "root@10.0.0.9")
     ck = [c for c in cmds if "checkzfs" in c][0]
-    assert "--replicafilter '^#tank/repl/'" in ck
+    assert "--replicafilter '^tank/repl/'" in ck
     assert "--filter '^[^#]*#(?!tank/repl/)'" in ck
     assert "--source 10.0.0.9" in ck
 
@@ -61,8 +61,49 @@ def test_checkzfs_on_a_remote_pair_confines_replicas_but_leaves_the_sources_alon
     monkeypatch.setattr(r, "run_command", run)
     r.run_checkzfs(_host("10.0.0.9"), "root@10.0.0.5")
     ck = [c for c in cmds if "checkzfs" in c][0]
-    assert "--replicafilter '^#tank/repl/'" in ck
+    assert "--replicafilter '^tank/repl/'" in ck
     assert "--filter" not in ck
+
+
+# checkzfs.py, verbatim -- the two filters are searched against DIFFERENT
+# strings, and getting that wrong is how the first version reported every
+# pair as having no replica. Modelled here so the anchors cannot drift back.
+#
+#   _dsname = "{0}#{dataset}".format(_remote, **_entry)          # --filter
+#   _is_source = bool(_remote in self.source_hosts and self.filter.search(_dsname))
+#   def dataset_name(self):                                        # --replicafilter
+#       if self.remote: return f"{self.remote}#{self.dataset}"
+#       return self.dataset
+#   if self.replicafilter.search(_dataset.dataset_name): ...add_replica...
+
+def _dsname(remote, ds):
+    return "{0}#{1}".format(remote, ds)
+
+
+def _dataset_name(remote, ds):
+    return f"{remote}#{ds}" if remote else ds
+
+
+def test_the_replica_filter_matches_local_replicas_and_nothing_seen_over_ssh():
+    rf = re.compile(r.checkzfs_replica_filter("tank/repl"))
+    # what a replica looks like on the host running checkzfs: local, bare name
+    assert rf.search(_dataset_name("", "tank/repl/rpool/data/vm-100"))
+    assert rf.search(_dataset_name(None, "tank/repl/rpool/ROOT/pve-1"))
+    # the same path seen over SSH from the source (same-host pair) -- not a replica
+    assert not rf.search(_dataset_name("10.0.0.9", "tank/repl/rpool/data/vm-100"))
+    # local datasets outside the target: the ones that used to pair with themselves
+    assert not rf.search(_dataset_name("", "rpool/data/vm-100"))
+    assert not rf.search(_dataset_name("", "tank/subvol-100-disk-0"))
+    # the first, broken version anchored on a "#" that local names never carry
+    assert not re.compile("^#tank/repl/").search(_dataset_name("", "tank/repl/rpool/x"))
+
+
+def test_the_source_filter_drops_the_target_subtree_whatever_the_host_prefix_is():
+    sf = re.compile(r.checkzfs_source_filter("tank/repl"))
+    assert sf.search(_dsname("10.0.0.9", "rpool/data/vm-100"))
+    assert sf.search(_dsname("None", "rpool/ROOT/pve-1"))          # local _remote is None
+    assert not sf.search(_dsname("10.0.0.9", "tank/repl/rpool/data/vm-100"))
+    assert sf.search(_dsname("10.0.0.9", "tank/replica/x"))           # boundary: not "tank/repl/"
 
 
 def test_checkzfs_without_a_config_runs_exactly_as_before(monkeypatch):

@@ -1509,6 +1509,16 @@ def _cron_reload_snippet() -> str:
     )
 
 
+def checkzfs_replica_filter(target: str) -> str:
+    """Regex for --replicafilter: local datasets under the pair's target."""
+    return "^" + re.escape(target) + "/"
+
+
+def checkzfs_source_filter(target: str) -> str:
+    """Regex for --filter on a same-host pair: any host, dataset not under target."""
+    return "^[^#]*#(?!" + re.escape(target) + "/)"
+
+
 def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
     """Run ``checkzfs --source <ip> --columns +message`` on the given (target)
     host and parse the box-drawing table output into structured rows.
@@ -1519,23 +1529,31 @@ def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
     ip = _extract_ip(source)
     if not ip or not re.match(r"^[A-Za-z0-9._:-]+$", ip):
         return {"success": False, "error": "invalid source", "raw": "", "rows": []}
-    # checkzfs keys datasets as "host#dataset" and pairs snapshots by GUID.
-    # On a same-host pair the same dataset is seen twice -- via SSH as
-    # "<ip>#rpool/x" (source) and locally as "#rpool/x" -- with identical
+    # checkzfs pairs snapshots by GUID. On a same-host pair the same dataset
+    # is seen twice -- via SSH as a source and locally -- with identical
     # GUIDs, so every dataset became a replica of itself and the panel filled
     # with false WARN/CRIT about auto-snapshot on "replication partners".
     #
-    # Replicas of THIS pair live under its target, and on the host running
-    # checkzfs they are always local (empty remote, hence the "#" prefix), so
-    # the replica search is confined there for every pair. On a same-host pair
-    # the target subtree is additionally kept out of the SOURCE set, or the
-    # replicas would show up a second time, via SSH, as sources of themselves.
+    # The two filters see DIFFERENT strings (checkzfs.py, verbatim):
+    #   --filter        searches _dsname = "{remote}#{dataset}"  (always a "#")
+    #   --replicafilter searches dataset_name, which is "{remote}#{dataset}"
+    #                   for a remote and the BARE "{dataset}" when remote is
+    #                   empty -- i.e. for every local dataset.
+    # Replicas of a pair are local to the host running checkzfs and live under
+    # its target, so the bare anchored form "^<target>/" finds exactly them
+    # and, as a side effect, never matches the "<ip>#..." copies seen over
+    # SSH. The first version of this anchored on "^#<target>/", which matches
+    # nothing local at all and reported every pair as having no replica.
+    #
+    # On a same-host pair the target subtree is additionally kept out of the
+    # SOURCE set, or the replicas would show up a second time, via SSH, as
+    # sources of themselves.
     filters = ""
     target = ((read_config(host, source).get("values") or {}).get("target") or "").strip()
     if target and re.match(r"^[A-Za-z0-9][A-Za-z0-9_./:-]*$", target):
-        filters += f" --replicafilter {shlex.quote('^#' + re.escape(target) + '/')}"
+        filters += f" --replicafilter {shlex.quote(checkzfs_replica_filter(target))}"
         if _is_same_host(host, ip):
-            filters += f" --filter {shlex.quote('^[^#]*#(?!' + re.escape(target) + '/)')}"
+            filters += f" --filter {shlex.quote(checkzfs_source_filter(target))}"
     # ``--no-color`` would be ideal but isn't supported by every checkzfs
     # version. We force ``TERM=dumb`` and additionally strip ANSI escapes
     # below, which covers both cases.
