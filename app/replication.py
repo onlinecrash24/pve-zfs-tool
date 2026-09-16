@@ -77,25 +77,6 @@ def config_path_for(source: Optional[str] = None) -> str:
         return CONFIG_PATH
     return f"{CONFIG_DIR}/{_safe_filename(ip)}.conf"
 
-# Keys we surface in the UI — everything else is preserved verbatim on write.
-KNOWN_KEYS = [
-    "target",
-    "source",
-    "sshport",
-    "tag",
-    "snapshot_filter",
-    "min_keep",
-    "zfs_auto_snapshot_engine",
-    "prefix",
-    "suffix",
-    "checkzfs_sourcepools",
-    "checkzfs_prefix",
-    "checkzfs_filter",
-    "checkzfs_threshold_warning",
-    "checkzfs_threshold_critical",
-    "checkzfs_output",
-]
-
 # Shell key=value with optional quoting. Allows spaces inside quotes.
 _KV_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$')
 
@@ -336,14 +317,43 @@ def install(host: Dict[str, Any]) -> Dict[str, Any]:
 # Config write
 # ---------------------------------------------------------------------------
 
-def read_config(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
-    cfg_path = config_path_for(source)
+def _is_same_host(host: Dict[str, Any], src_ip: str) -> bool:
+    """True when the replication source is the very machine we are talking to.
+
+    A same-host pair (rpool -> tank/repl on one box) is legitimate. The
+    same-pool guard in write_config and the checkzfs filters both need this
+    answer, so it lives in one place and cannot drift between them.
+    """
+    return bool(src_ip) and src_ip in {host.get("address"), "127.0.0.1", "localhost"}
+
+
+_CONF_PATH_RE = re.compile(r"^" + re.escape(CONFIG_DIR) + r"/[A-Za-z0-9._-]+\.conf$")
+
+
+def _validate_conf_path(path: str) -> str:
+    path = (path or "").strip()
+    if not _CONF_PATH_RE.match(path) or ".." in path:
+        raise ValueError(f"config path must be {CONFIG_DIR}/<name>.conf")
+    return path
+
+
+def _read_config_file(host: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     r = run_command(host, f"cat {shlex.quote(cfg_path)} 2>/dev/null", timeout=10)
     if not r["success"] or not r["stdout"]:
         return {"exists": False, "values": {}, "raw": "", "config_path": cfg_path}
     parsed = _parse_config(r["stdout"])
     return {"exists": True, "values": parsed["values"], "raw": r["stdout"],
             "_lines": parsed["lines"], "config_path": cfg_path}
+
+
+def read_config(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
+    return _read_config_file(host, config_path_for(source))
+
+
+def read_config_path(host: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
+    """Read a config by its path rather than by source -- for files that do
+    not follow the tool's <source-ip>.conf convention yet (see import)."""
+    return _read_config_file(host, _validate_conf_path(cfg_path))
 
 
 def write_config(host: Dict[str, Any], values: Dict[str, str],
@@ -366,8 +376,7 @@ def write_config(host: Dict[str, Any], values: Dict[str, str],
     target_ds = (values.get("target") or "").strip()
     src_spec = (source or values.get("source") or "").strip()
     src_ip = _extract_ip(src_spec)
-    host_addrs = {host.get("address"), "127.0.0.1", "localhost"}
-    if target_ds and "/" in target_ds and src_ip and src_ip in host_addrs:
+    if target_ds and "/" in target_ds and _is_same_host(host, src_ip):
         target_pool = target_ds.split("/", 1)[0]
         tag = (values.get("tag") or "bashclub:zsync").strip() or "bashclub:zsync"
         try:
@@ -591,9 +600,13 @@ def list_auto_snap_disabled(host: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def list_configs(host: Dict[str, Any], cache_ttl: int = 0) -> Dict[str, Any]:
-    """Enumerate per-source config files in /etc/bashclub.
+    """Enumerate config files in /etc/bashclub.
 
-    Returns ``{configs: [{path, source, target, exists}], default_exists: bool}``.
+    Returns ``{configs: [{path, source, target, canonical_path, needs_import}]}``.
+    ``canonical_path`` is where the tool would keep this pair
+    (``<source-ip>.conf``); ``needs_import`` says the file lives elsewhere --
+    a grown upstream ``zsync.conf`` or a hand-named file -- and cannot be
+    opened in the wizard until it is imported.
 
     ``cache_ttl`` is for read-only callers that run this on every host of an
     estate (the backup overview): replication configs change by hand, so
@@ -618,10 +631,14 @@ def list_configs(host: Dict[str, Any], cache_ttl: int = 0) -> Dict[str, Any]:
             elif line == "__END__":
                 if cur:
                     parsed = _parse_config("\n".join(buf))
+                    src = parsed["values"].get("source", "")
+                    canonical = config_path_for(src) if src else cur
                     out.append({
                         "path": cur,
-                        "source": parsed["values"].get("source", ""),
+                        "source": src,
                         "target": parsed["values"].get("target", ""),
+                        "canonical_path": canonical,
+                        "needs_import": cur != canonical,
                     })
                 cur = None
             elif cur is not None:
@@ -1070,6 +1087,11 @@ def list_tagged_datasets(host: Dict[str, Any], tag: str = "bashclub:zsync") -> D
 
     Returns ``{datasets: [{name, type, tagged, value}], tag: tag}``.
     ``value`` is ``""`` for unset (ZFS output ``-``).
+
+    Upstream knows three values: ``all`` (dataset and children), ``subvols``
+    (children only) and ``exclude``. Only ``all`` means "this dataset is
+    replicated", so only ``all`` counts as tagged -- the checklist used to show
+    an ``exclude`` as ticked, which is the opposite of what it says.
     """
     # Only allow a safe tag format to avoid shell-escape surprises
     if not re.match(r"^[A-Za-z0-9_.:-]+$", tag):
@@ -1084,7 +1106,7 @@ def list_tagged_datasets(host: Dict[str, Any], tag: str = "bashclub:zsync") -> D
         if len(parts) < 3:
             continue
         name, dtype, value = parts[0], parts[1], parts[2]
-        tagged = value not in ("", "-")
+        tagged = value == "all"
         datasets.append({
             "name": name,
             "type": dtype,
@@ -1231,6 +1253,151 @@ def _validate_cron(schedule: str) -> bool:
     return len(fields) == 5
 
 
+_CROND_PATH_RE = re.compile(r"^/etc/cron\.d/[A-Za-z0-9._-]+$")
+
+
+def _find_zsync_cron_lines(host: Dict[str, Any], cfg_path: str) -> List[Dict[str, Any]]:
+    """Every cron line that runs bashclub-zsync with ``cfg_path`` -- in root's
+    crontab AND in /etc/cron.d, where upstream's documentation puts it (with
+    a sixth, user field). Returns ``[{where, schedule, user, command, raw}]``;
+    ``where`` is ``"crontab"`` or the cron.d file's path."""
+    marker = _cron_marker(cfg_path)
+    cmd = ("echo __CRONTAB__; crontab -l 2>/dev/null; "
+           "for f in /etc/cron.d/*; do [ -f \"$f\" ] || continue; "
+           "echo \"__CROND__ $f\"; cat \"$f\"; done 2>/dev/null")
+    r = run_command(host, cmd, timeout=15)
+    found: List[Dict[str, Any]] = []
+    where = "crontab"
+    for line in (r.get("stdout") or "").splitlines():
+        if line == "__CRONTAB__":
+            where = "crontab"
+            continue
+        if line.startswith("__CROND__ "):
+            where = line[len("__CROND__ "):].strip()
+            continue
+        s = line.strip()
+        if not s or s.startswith("#") or marker not in s:
+            continue
+        if where == "crontab":
+            parts = s.split(None, 5)
+            if len(parts) >= 6:
+                found.append({"where": where, "schedule": " ".join(parts[:5]),
+                              "user": "", "command": parts[5], "raw": s})
+        else:
+            parts = s.split(None, 6)
+            if len(parts) >= 7:
+                found.append({"where": where, "schedule": " ".join(parts[:5]),
+                              "user": parts[5], "command": parts[6], "raw": s})
+    return found
+
+
+def _remove_cron_line(host: Dict[str, Any], where: str, cfg_path: str) -> Dict[str, Any]:
+    """Drop the line(s) running zsync with ``cfg_path`` from root's crontab or
+    from one /etc/cron.d file. The cron.d file is rewritten in place (``cat >``
+    into the existing inode) so its ownership and mode survive -- cron ignores
+    a file that is group-writable or not root-owned."""
+    marker = _cron_marker(cfg_path)
+    if where == "crontab":
+        cmd = (f"M={shlex.quote(marker)}; TMP=$(mktemp); "
+               f"crontab -l 2>/dev/null | grep -vF \"$M\" > \"$TMP\"; "
+               f"crontab \"$TMP\" && rm -f \"$TMP\" && echo __OK__")
+    else:
+        if not _CROND_PATH_RE.match(where or ""):
+            return {"success": False, "stderr": "invalid cron.d path"}
+        cmd = (f"M={shlex.quote(marker)}; F={shlex.quote(where)}; TMP=$(mktemp); "
+               f"grep -vF \"$M\" \"$F\" > \"$TMP\"; cat \"$TMP\" > \"$F\" && rm -f \"$TMP\" && echo __OK__")
+    r = run_command(host, cmd, timeout=15)
+    ok = "__OK__" in (r.get("stdout") or "")
+    return {"success": ok, "stderr": "" if ok else (r.get("stderr") or r.get("stdout") or "")}
+
+
+def import_config_preview(host: Dict[str, Any], path: str) -> Dict[str, Any]:
+    """What importing ``path`` would do -- read-only.
+
+    A config that grew outside the tool (upstream's default zsync.conf, or a
+    hand-named file) is invisible to the wizard: it reads only
+    <source-ip>.conf, and its cron marker names that path too. Import moves
+    the pair into that convention. This shows the move before it happens.
+    """
+    try:
+        path = _validate_conf_path(path)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    cfg = read_config_path(host, path)
+    if not cfg.get("exists"):
+        return {"success": False, "error": f"{path} not found or empty"}
+    values = dict(cfg["values"])
+    source = (values.get("source") or "").strip()
+    if not _extract_ip(source):
+        return {"success": False, "error": "config has no usable 'source' (expected user@host)"}
+    canonical = config_path_for(source)
+    if canonical == path:
+        return {"success": False, "error": "already at the tool's path; open it instead"}
+    ex = run_command(host, f"[ -e {shlex.quote(canonical)} ] && echo __YES__ || echo __NO__", timeout=10)
+    return {
+        "success": True,
+        "path": path,
+        "canonical_path": canonical,
+        "canonical_exists": "__YES__" in (ex.get("stdout") or ""),
+        "source": source,
+        "source_user": source.split("@", 1)[0] if "@" in source else "root",
+        "target": (values.get("target") or "").strip(),
+        "values": values,
+        "cron": _find_zsync_cron_lines(host, path),
+    }
+
+
+def import_config(host: Dict[str, Any], path: str, adopt_cron: bool = True) -> Dict[str, Any]:
+    """Move a foreign config into the tool's convention.
+
+    Order is deliberate: write the new file, then move the cron, then park
+    the old file. If anything stops in the middle, both files exist and no
+    schedule has been lost. The old file is renamed, not deleted -- with a
+    suffix that is not ``.conf``, so the scanner stops listing it.
+    """
+    pv = import_config_preview(host, path)
+    if not pv.get("success"):
+        return pv
+    if pv["canonical_exists"]:
+        return {"success": False, "error_code": "exists",
+                "error": f"{pv['canonical_path']} already exists -- refusing to overwrite it"}
+    steps: List[Dict[str, Any]] = []
+    w = write_config(host, pv["values"], source=pv["source"])
+    steps.append({"step": "write_config", "success": bool(w.get("success")),
+                  "detail": w.get("stderr") or pv["canonical_path"]})
+    if not w.get("success"):
+        return {"success": False, "steps": steps,
+                "error": "writing the new config failed: " + (w.get("stderr") or "unknown error")}
+
+    cron = "skipped"
+    if adopt_cron:
+        if len(pv["cron"]) == 1:
+            c = pv["cron"][0]
+            s = set_cron(host, c["schedule"], source=pv["source"])
+            steps.append({"step": "set_cron", "success": bool(s.get("success")), "detail": c["schedule"]})
+            if s.get("success"):
+                rm = _remove_cron_line(host, c["where"], path)
+                steps.append({"step": "remove_old_cron", "success": bool(rm.get("success")), "detail": c["raw"]})
+                cron = "adopted" if rm.get("success") else "adopted_old_kept"
+            else:
+                cron = "failed"
+        elif len(pv["cron"]) > 1:
+            cron = "ambiguous"        # two schedules for one file: a human decides
+        else:
+            cron = "none"
+
+    mv = run_command(host,
+                     f"P={shlex.quote(path)}; N=\"$P.imported-$(date +%Y%m%d%H%M%S)\"; "
+                     f"mv \"$P\" \"$N\" && echo \"__PARKED__ $N\"", timeout=10)
+    parked = ""
+    for ln in (mv.get("stdout") or "").splitlines():
+        if ln.startswith("__PARKED__ "):
+            parked = ln[len("__PARKED__ "):].strip()
+    steps.append({"step": "park_old_config", "success": bool(parked), "detail": parked})
+    return {"success": True, "config_path": pv["canonical_path"], "parked": parked,
+            "cron": cron, "cron_lines": pv["cron"], "steps": steps}
+
+
 def get_cron(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
     """Read root's crontab and return the current zsync entry (if any) for
     the per-source config file."""
@@ -1352,10 +1519,28 @@ def run_checkzfs(host: Dict[str, Any], source: str) -> Dict[str, Any]:
     ip = _extract_ip(source)
     if not ip or not re.match(r"^[A-Za-z0-9._:-]+$", ip):
         return {"success": False, "error": "invalid source", "raw": "", "rows": []}
+    # checkzfs keys datasets as "host#dataset" and pairs snapshots by GUID.
+    # On a same-host pair the same dataset is seen twice -- via SSH as
+    # "<ip>#rpool/x" (source) and locally as "#rpool/x" -- with identical
+    # GUIDs, so every dataset became a replica of itself and the panel filled
+    # with false WARN/CRIT about auto-snapshot on "replication partners".
+    #
+    # Replicas of THIS pair live under its target, and on the host running
+    # checkzfs they are always local (empty remote, hence the "#" prefix), so
+    # the replica search is confined there for every pair. On a same-host pair
+    # the target subtree is additionally kept out of the SOURCE set, or the
+    # replicas would show up a second time, via SSH, as sources of themselves.
+    filters = ""
+    target = ((read_config(host, source).get("values") or {}).get("target") or "").strip()
+    if target and re.match(r"^[A-Za-z0-9][A-Za-z0-9_./:-]*$", target):
+        filters += f" --replicafilter {shlex.quote('^#' + re.escape(target) + '/')}"
+        if _is_same_host(host, ip):
+            filters += f" --filter {shlex.quote('^[^#]*#(?!' + re.escape(target) + '/)')}"
     # ``--no-color`` would be ideal but isn't supported by every checkzfs
     # version. We force ``TERM=dumb`` and additionally strip ANSI escapes
     # below, which covers both cases.
-    cmd = f"TERM=dumb {CHECKZFS_BINARY} --source {shlex.quote(ip)} --columns +message 2>&1"
+    cmd = (f"TERM=dumb {CHECKZFS_BINARY} --source {shlex.quote(ip)}{filters} "
+           f"--columns +message 2>&1")
     r = run_command(host, cmd, timeout=120)
     raw = r.get("stdout", "") or ""
     # Strip ANSI escape sequences (CSI ... letter) and lone ESC chars.

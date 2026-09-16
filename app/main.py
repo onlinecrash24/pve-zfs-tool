@@ -3147,6 +3147,33 @@ def api_replication_configs():
     return jsonify(list_configs(host))
 
 
+@app.route("/api/replication/import/preview")
+def api_replication_import_preview():
+    """Read-only: what importing a foreign config file would do."""
+    from app.replication import import_config_preview
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(import_config_preview(host, request.args.get("path", "")))
+
+
+@app.route("/api/replication/import", methods=["POST"])
+@login_required
+def api_replication_import():
+    from app.replication import import_config
+    data = request.json or {}
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = import_config(host, data.get("path", ""),
+                           adopt_cron=bool(data.get("adopt_cron", True)))
+    audit_log("replication.config.import", target=data.get("path", ""), host=host["address"],
+              success=bool(result.get("success")),
+              details={"new_path": result.get("config_path"), "cron": result.get("cron"),
+                       "parked": result.get("parked"), "error": result.get("error")})
+    return jsonify(result)
+
+
 @app.route("/api/replication/checkzfs")
 @login_required
 def api_replication_checkzfs():
