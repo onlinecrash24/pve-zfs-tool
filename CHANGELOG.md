@@ -7,6 +7,53 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.925 -- 2026-09-20
+
+v0.9.925 — replication in practice, and the disk that would not leave
+
+Four field reports about bashclub-zsync pairs, one about a replaced disk.
+Every one of them was verified against the code -- and against upstream's
+source, read verbatim -- before it was fixed.
+
+On a pair like `rpool -> tank/repl` on one machine, checkzfs saw every
+dataset twice -- via SSH as a source and locally -- with identical snapshot
+GUIDs, so each became a "replica" of itself and the panel filled with
+WARN/CRIT about auto-snapshot on "replication partners". The replica search
+is now confined to the pair's target (`--replicafilter '^<target>/'`), and on
+a same-host pair the target subtree is kept out of the source set as well.
+
+**If you pulled `:dev` between the 16th and 17th:** the first version of this
+filter was anchored wrongly and reported every pair as having no replica. The
+corrected form is the one upstream itself passes to checkzfs; both filters
+are now tested against upstream's naming rule, quoted from its source.
+
+A config that grew outside the tool -- upstream's default `zsync.conf`, or a
+hand-named file -- was not merely awkward to adopt; it was **invisible**, and
+even a listed file could not be opened: the wizard reads only
+`<source-ip>.conf`, and its cron marker names that path too. Such files now
+appear in the pairs overview with an **Import** button. Import previews what
+it would do (old and new path, source, target, any cron entry in root's
+crontab *or* `/etc/cron.d`), then writes the new file with every value
+carried over, takes over the schedule and removes the old entry, and parks
+the old file with an `.imported-<timestamp>` suffix. It never overwrites an
+existing pair, and with two cron entries for one file it touches neither.
+
+The dataset checklist ticked anything carrying the property, even with the
+value `exclude`. Upstream knows `all`, `subvols` and `exclude`; only `all`
+means "replicated", so only `all` is a tick now -- the other two show as a
+badge and are left alone on save. Section 4's heading named
+`/etc/bashclub/zsync.conf`, a file the wizard never writes; it shows the real
+path.
+
+After a disk swap the old drive kept its tile, model and all, with no data
+under it. Tiles came from the newest row per *device name* over the whole
+retention window -- and a replacement that inherits the name (the new `sda`)
+was folded into the same tile as the old one, mixing both drives' curves.
+Tiles are keyed by serial number now. A disk missing from the latest sample
+is marked as such, with its last sighting and a **Forget history** button
+that removes only that disk's rows up to that moment; a same-named
+replacement keeps its data.
+
 ## v0.9.924 -- 2026-09-04
 
 v0.9.924 — webhooks, and two things you may need to change
