@@ -97,8 +97,14 @@ Stated here rather than discovered later:
   — **a compromised replication target has full root on its source.**
   Narrowing it is planned; a forced command alone cannot work, because the
   disaster-recovery reverse sync legitimately runs `zfs recv` on the source.
-- **Replicas are not marked `canmount=noauto`.** In a pull model the target
-  connects into the source, so a compromised source controls the stream that
-  the target receives and may mount. Planned.
+- **A compromised source controls the stream the target receives.** In a
+  pull model the target connects into the source, so what `zfs recv` on the
+  target is fed comes from the machine you are worried about. What keeps
+  that data from being *mounted* there is bashclub-zsync itself, not this
+  tool: it creates replica datasets with `canmount=noauto` and sets it again
+  before every incremental. An earlier version of this file said replicas
+  were not protected at all -- that was true of this tool's code and wrong
+  about the deployed system. The stream still reaches a kernel-level parser
+  on the target; that part is inherent to ZFS replication.
 - **The HTTP API is internal.** It follows the UI and is neither documented nor
   stable; treat it as an implementation detail rather than an interface.
