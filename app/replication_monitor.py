@@ -238,9 +238,11 @@ def _check_pair(host: Dict[str, Any], cfg_entry: Dict[str, Any]) -> Dict[str, An
 
 def _is_default_template(cfg_entry: Dict[str, Any]) -> bool:
     """The bashclub install ships /etc/bashclub/zsync.conf with placeholder
-    source 'user@host' / target 'pool/dataset'. Skip it everywhere."""
-    if (cfg_entry.get("path") or "").endswith("/zsync.conf"):
-        return True
+    source 'user@host' / target 'pool/dataset'. Skip it everywhere.
+
+    Judged by the placeholders, not by the file name: a grown zsync.conf with
+    real values is a real pair that the overview must show (as importable),
+    and skipping it by name made those pairs invisible to the tool."""
     src = (cfg_entry.get("source") or "").lower()
     tgt = (cfg_entry.get("target") or "").lower()
     return src == "user@host" or tgt == "pool/dataset"
@@ -258,7 +260,10 @@ def run_checks_for_host(host: Dict[str, Any]) -> List[Dict[str, Any]]:
         return out
 
     for cfg in configs:
-        if _is_default_template(cfg):
+        # A pair that still lives outside the tool's <source-ip>.conf layout
+        # cannot be monitored yet: its cron marker names a path we do not
+        # look for, and it would only ever report "no schedule".
+        if _is_default_template(cfg) or cfg.get("needs_import"):
             continue
         try:
             snapshot = _check_pair(host, cfg)

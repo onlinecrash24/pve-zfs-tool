@@ -4049,11 +4049,14 @@ async function renderDisksCard(container, hours) {
         return;
     }
 
-    // Fetch every disk's series for this range in one call, group by device.
+    // Fetch every disk's series for this range in one call, group by physical
+    // disk (device + serial): a replacement that inherits "sda" must not get
+    // the old drive's curve.
+    const diskKey = r => r.device + "|" + (r.serial || "");
     const seriesByDev = {};
     try {
         const s = await API.get(`/api/metrics/disk-series?host=${encodeURIComponent(currentHost)}&hours=${hours}`);
-        (s.data || []).forEach(row => { (seriesByDev[row.device] = seriesByDev[row.device] || []).push(row); });
+        (s.data || []).forEach(row => { (seriesByDev[diskKey(row)] = seriesByDev[diskKey(row)] || []).push(row); });
     } catch (e) { /* charts are optional */ }
 
     const grid = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;padding:16px" });
@@ -4072,11 +4075,34 @@ async function renderDisksCard(container, hours) {
         ]));
         if (d.model) box.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, d.model));
 
+        // A disk that was not in the host's latest sample: pulled, replaced,
+        // or simply not answering. Say so, and offer to drop its history --
+        // only its own rows up to its last sighting.
+        if (d.stale) {
+            const forget = h("button", { className: "btn btn-sm btn-danger", style: "margin-left:auto" }, t("disk_forget"));
+            forget.onclick = async () => {
+                if (!confirm(t("disk_forget_confirm", d.device, d.model || d.serial || ""))) return;
+                forget.disabled = true;
+                try {
+                    const r = await API.post("/api/metrics/disks/forget",
+                        { host: currentHost, device: d.device, serial: d.serial || "", before: d.timestamp });
+                    if (r.success) { toast(t("disk_forgotten", r.deleted), "success"); viewMetrics(); }
+                    else { forget.disabled = false; toast(t("disk_forget_failed", r.error || t("error")), "error"); }
+                } catch (e) { forget.disabled = false; toast(t("disk_forget_failed", e.message || ""), "error"); }
+            };
+            box.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin:2px 0 8px;flex-wrap:wrap" }, [
+                h("span", { className: "badge badge-warning" }, t("disk_stale")),
+                h("span", { className: "muted", style: "font-size:11px" },
+                  t("disk_stale_since", new Date(d.timestamp * 1000).toLocaleString())),
+                forget,
+            ]));
+        }
+
         box.appendChild(h("div", { className: "stat-label" }, t("disk_temp")));
         box.appendChild(h("div", { style: "font-size:22px;font-weight:700;margin-bottom:6px;" + _diskTempColor(d.temp_c, d.type) },
             d.temp_c != null ? `${d.temp_c.toFixed(0)} °C` : "—"));
 
-        const pts = (seriesByDev[d.device] || []).map(r => ({ x: r.timestamp, y: r.temp_c }));
+        const pts = (seriesByDev[diskKey(d)] || []).map(r => ({ x: r.timestamp, y: r.temp_c }));
         const chartWrap = document.createElement("div");
         chartWrap.innerHTML = _svgLineChart(pts, { yZero: false, color: "#58a6ff", height: 120, yFmt: v => v.toFixed(0) + "°" });
         box.appendChild(chartWrap);
@@ -4356,7 +4382,12 @@ async function viewReplication() {
 
             const key = (p.targetHost.address || "") + "::" + (p.path || "");
             const hp = healthByKey[key];
-            const status = hp ? hp.status : "pending";
+            // A config outside the tool's <source-ip>.conf layout cannot be
+            // opened or monitored until imported; the row says so instead of
+            // pretending to be a pending pair.
+            const status = p.needs_import ? "import" : (hp ? hp.status : "pending");
+            const importBtn = h("button", { className: "btn btn-sm btn-primary", style: "margin-right:6px" }, t("repl_pairs_import"));
+            importBtn.onclick = () => openImportModal(p);
             const lagSec = hp ? hp.lag_seconds : null;
             const lastTs = hp ? hp.last_sync_ts : null;
             const statusBadge = h("span", {
@@ -4373,11 +4404,56 @@ async function viewReplication() {
                 h("td", { style: "font-size:12px" }, fmtAbs(lastTs)),
                 h("td", { style: "text-align:right;font-family:monospace;font-size:12px" }, fmtAge(lagSec)),
                 h("td", { style: "font-family:monospace;font-size:11px;color:var(--text-secondary)" }, p.path || ""),
-                h("td", { style: "text-align:right" }, [openBtn, delBtn]),
+                h("td", { style: "text-align:right" }, [p.needs_import ? importBtn : openBtn, delBtn]),
             ]));
         });
         tbl.appendChild(tb);
         pairsBody.appendChild(tbl);
+    }
+
+    async function openImportModal(p) {
+        // Preview first: the server says exactly what it would move, and
+        // whether the target path already exists, before anything changes.
+        const pv = await API.get("/api/replication/import/preview?host=" + encodeURIComponent(p.targetHost.address)
+            + "&path=" + encodeURIComponent(p.path || ""));
+        if (!pv.success) { toast(t("repl_import_failed", pv.error || t("error")), "error"); return; }
+        const mono = "font-family:monospace;font-size:12px";
+        const row = (label, val) => `<tr><td style="color:var(--text-secondary);padding:2px 10px 2px 0">${escapeHtml(label)}</td><td style="${mono}">${escapeHtml(val || "—")}</td></tr>`;
+        let cronHtml;
+        if (pv.cron.length === 1) {
+            cronHtml = `<p style="margin:10px 0 4px">${escapeHtml(t("repl_import_cron_found"))}</p>
+                <div style="${mono};padding:6px 8px;background:var(--bg-secondary);border-radius:4px;word-break:break-all">${escapeHtml(pv.cron[0].raw)}</div>
+                <label class="checkbox-label" style="margin-top:8px"><input type="checkbox" id="ri-adopt" checked> ${escapeHtml(t("repl_import_adopt_cron"))}</label>`;
+        } else if (pv.cron.length > 1) {
+            cronHtml = `<p style="margin:10px 0 4px;color:var(--warning,#d29922)">${escapeHtml(t("repl_import_cron_many"))}</p>
+                ${pv.cron.map(c => `<div style="${mono};padding:4px 8px;word-break:break-all">${escapeHtml(c.raw)}</div>`).join("")}`;
+        } else {
+            cronHtml = `<p style="margin:10px 0 4px;color:var(--text-secondary)">${escapeHtml(t("repl_import_cron_none"))}</p>`;
+        }
+        const existsHtml = pv.canonical_exists
+            ? `<p style="margin-top:10px;color:var(--danger)">${escapeHtml(t("repl_import_exists", pv.canonical_path))}</p>` : "";
+        const userHtml = pv.source_user && pv.source_user !== "root"
+            ? `<p style="margin-top:8px;color:var(--warning,#d29922);font-size:12px">${escapeHtml(t("repl_import_user_note", pv.source_user))}</p>` : "";
+        const body = `<table style="border-collapse:collapse">
+                ${row(t("repl_import_from"), pv.path)}
+                ${row(t("repl_import_to"), pv.canonical_path)}
+                ${row(t("repl_pairs_source"), pv.source)}
+                ${row(t("repl_pairs_target_ds"), pv.target)}
+            </table>${cronHtml}${existsHtml}${userHtml}
+            <p style="margin-top:10px;font-size:12px;color:var(--text-secondary)">${escapeHtml(t("repl_import_backup_note"))}</p>`;
+        openModal(t("repl_import_title"), body, async () => {
+            const adoptEl = document.getElementById("ri-adopt");
+            const r = await API.post("/api/replication/import",
+                { host: p.targetHost.address, path: p.path, adopt_cron: !!(adoptEl && adoptEl.checked) });
+            closeModal();
+            if (r.success) {
+                toast(t("repl_import_done", r.config_path), "success");
+                if (r.cron === "adopted_old_kept") toast(t("repl_import_old_cron_kept"), "error");
+                refreshPairs();
+            } else {
+                toast(t("repl_import_failed", r.error || t("error")), "error");
+            }
+        });
     }
 
     function openDeletePairModal(p) {
@@ -4811,6 +4887,12 @@ async function viewReplication() {
                     currentChecks.set(d.name, cb);
                     row.appendChild(cb);
                     row.appendChild(h("span", { style: "font-family:monospace;font-size:13px;flex:1" }, d.name));
+                    // Only "all" is a tick. "subvols" and "exclude" are shown as
+                    // what they are and left alone on save unless touched.
+                    if (d.value && d.value !== "all") {
+                        row.appendChild(h("span", { className: "badge badge-warning",
+                            style: "font-size:11px", title: t("repl_ds_value_note") }, d.value));
+                    }
                     row.appendChild(h("span", { style: "font-size:11px;color:var(--text-secondary)" }, d.type));
                     dsListWrap.appendChild(row);
                 });
@@ -4846,7 +4928,7 @@ async function viewReplication() {
         // -- Step 4: Config -----------------------------------------------
         const cfgCard = h("div", { className: "card", style: "margin-top:16px" });
         cfgCard.appendChild(h("div", { className: "card-header" },
-            "4. " + t("repl_config_title")));
+            "4. " + t("repl_config_title", status.config_path || "")));
         const cfgBody = h("div", { className: "card-body" });
         cfgCard.appendChild(cfgBody);
         configMount.appendChild(cfgCard);

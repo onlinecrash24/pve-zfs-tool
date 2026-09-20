@@ -1940,6 +1940,29 @@ def api_metrics_disks():
     return jsonify({"disks": metrics_latest_disks(host_addr)})
 
 
+@app.route("/api/metrics/disks/forget", methods=["POST"])
+@login_required
+def api_metrics_forget_disk():
+    """Drop the stored history of one physical disk -- the tile a pulled
+    drive leaves behind under Metrics. Bounded by the tile's last sighting so
+    a replacement that reuses the device name keeps its rows."""
+    from app.metrics import forget_disk
+    data = request.json or {}
+    host_addr = (data.get("host") or "").strip()
+    device = (data.get("device") or "").strip()
+    try:
+        before = int(data.get("before") or 0)
+    except (TypeError, ValueError):
+        before = 0
+    if not host_addr or not device or before <= 0:
+        return jsonify({"success": False, "error": "host, device and before are required"}), 400
+    serial = (data.get("serial") or "").strip()
+    deleted = forget_disk(host_addr, device, serial, before)
+    audit_log("metrics.disk.forget", target=f"{device} ({serial or '-'})", host=host_addr,
+              success=True, details={"rows": deleted, "before": before})
+    return jsonify({"success": True, "deleted": deleted})
+
+
 @app.route("/api/metrics/disk-series")
 @login_required
 def api_metrics_disk_series():
@@ -3145,6 +3168,33 @@ def api_replication_configs():
     if err:
         return err, code
     return jsonify(list_configs(host))
+
+
+@app.route("/api/replication/import/preview")
+def api_replication_import_preview():
+    """Read-only: what importing a foreign config file would do."""
+    from app.replication import import_config_preview
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(import_config_preview(host, request.args.get("path", "")))
+
+
+@app.route("/api/replication/import", methods=["POST"])
+@login_required
+def api_replication_import():
+    from app.replication import import_config
+    data = request.json or {}
+    host = _find_host(data.get("host", ""))
+    if not host:
+        return jsonify({"error": "Host not found"}), 404
+    result = import_config(host, data.get("path", ""),
+                           adopt_cron=bool(data.get("adopt_cron", True)))
+    audit_log("replication.config.import", target=data.get("path", ""), host=host["address"],
+              success=bool(result.get("success")),
+              details={"new_path": result.get("config_path"), "cron": result.get("cron"),
+                       "parked": result.get("parked"), "error": result.get("error")})
+    return jsonify(result)
 
 
 @app.route("/api/replication/checkzfs")
