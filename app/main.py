@@ -1940,6 +1940,29 @@ def api_metrics_disks():
     return jsonify({"disks": metrics_latest_disks(host_addr)})
 
 
+@app.route("/api/metrics/disks/forget", methods=["POST"])
+@login_required
+def api_metrics_forget_disk():
+    """Drop the stored history of one physical disk -- the tile a pulled
+    drive leaves behind under Metrics. Bounded by the tile's last sighting so
+    a replacement that reuses the device name keeps its rows."""
+    from app.metrics import forget_disk
+    data = request.json or {}
+    host_addr = (data.get("host") or "").strip()
+    device = (data.get("device") or "").strip()
+    try:
+        before = int(data.get("before") or 0)
+    except (TypeError, ValueError):
+        before = 0
+    if not host_addr or not device or before <= 0:
+        return jsonify({"success": False, "error": "host, device and before are required"}), 400
+    serial = (data.get("serial") or "").strip()
+    deleted = forget_disk(host_addr, device, serial, before)
+    audit_log("metrics.disk.forget", target=f"{device} ({serial or '-'})", host=host_addr,
+              success=True, details={"rows": deleted, "before": before})
+    return jsonify({"success": True, "deleted": deleted})
+
+
 @app.route("/api/metrics/disk-series")
 @login_required
 def api_metrics_disk_series():

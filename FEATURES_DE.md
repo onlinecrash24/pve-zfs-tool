@@ -102,7 +102,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 
 ## Historische Metriken (Trends)
 - **Background-Sampler** -- Erfasst alle 15 Minuten pro Host Pool-Kapazität, Fragmentierung, Allokation, Health und Dedup-Ratio
-- **SMART je Platte** -- Temperatur (Ampel nach Medientyp -- HDD 45/55 °C, SSD/NVMe 60/70 °C), SMART-Gesundheit, Verschleiß/percentage-used, reallocated/pending Sektoren und Betriebsstunden für jede physische Platte, samt Temperatur-Trend-Chart; `smartmontools` bei Bedarf inline installierbar
+- **SMART je Platte** -- Temperatur (Ampel nach Medientyp -- HDD 45/55 °C, SSD/NVMe 60/70 °C), SMART-Gesundheit, Verschleiß/percentage-used, reallocated/pending Sektoren und Betriebsstunden für jede physische Platte, samt Temperatur-Trend-Chart; `smartmontools` bei Bedarf inline installierbar. Kacheln sind nach Seriennummer geschlüsselt, eine Ersatzplatte mit demselben Kernelnamen erbt also nicht die Kurve der alten; eine Platte, die im letzten Durchlauf fehlt, wird als solche markiert und ihre Historie lässt sich per Klick löschen -- nur ihre eigenen Zeilen, bis zur letzten Sichtung
 - **SQLite-Speicherung** -- Konfigurierbare Retention (Standard 90 Tage für Metriken, 365 fürs Audit-Log -- `METRICS_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`) in `/app/data/pvezfs.db`; jeden Zyklus automatisch getrimmt mit WAL-Checkpoint-Truncate, damit das Volume beschränkt bleibt
 - **Inline-Trend-Charts** -- Theme-fähiges Inline-SVG (Flächen-Gradient, kein externes JS): Kapazität %, Fragmentierung %, Allokiert GB und Platten-Temperatur je Platte
 - **Einstellbarer Zeitbereich** -- 6 h / 24 h / 7 T / 30 T / 90 T

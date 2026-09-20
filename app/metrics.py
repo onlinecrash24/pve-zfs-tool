@@ -430,19 +430,61 @@ def query_disk_series(host_addr, device=None, hours=24):
 
 
 def latest_disks(host_addr):
-    """Return the most recent SMART sample per disk on a host."""
+    """Return the most recent SMART sample per physical disk on a host.
+
+    Keyed by (device, serial), not device alone: a replacement that inherits
+    the kernel name -- the new ``sda`` -- is a different disk, and grouping by
+    name folded both histories into one tile wearing whichever model was
+    sampled last.
+
+    ``stale`` marks a disk missing from the host's latest sampling cycle. One
+    _store_disk_metrics call stamps every disk of a cycle with the same
+    timestamp, so "older than the newest timestamp on this host" is exactly
+    "not seen in the last cycle". A pulled drive stays listed, marked stale,
+    until its history is forgotten or the retention window ages it out --
+    silently dropping it would hide the fact that a disk vanished.
+    """
     cols_d = ", ".join("d." + c.strip() for c in _DISK_COLS.split(","))
     conn = get_conn()
     try:
         rows = conn.execute(
             f"""SELECT {cols_d} FROM disk_metrics d
-               JOIN (SELECT device, MAX(timestamp) AS mt FROM disk_metrics
-                     WHERE host=? GROUP BY device) m
-                 ON d.device = m.device AND d.timestamp = m.mt
-               WHERE d.host=? ORDER BY d.device""",
+               JOIN (SELECT device, COALESCE(serial, '') AS ser, MAX(timestamp) AS mt
+                     FROM disk_metrics WHERE host=?
+                     GROUP BY device, COALESCE(serial, '')) m
+                 ON d.device = m.device AND COALESCE(d.serial, '') = m.ser
+                    AND d.timestamp = m.mt
+               WHERE d.host=? ORDER BY d.device, d.timestamp DESC""",
             (host_addr, host_addr),
         ).fetchall()
-        return [dict(r) for r in rows]
+        newest = max((r["timestamp"] for r in rows), default=0)
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["stale"] = d["timestamp"] < newest
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def forget_disk(host_addr, device, serial, before):
+    """Delete one physical disk's stored history.
+
+    Scoped to host + device + serial and to rows at or before ``before`` --
+    the stale tile's last sighting. The time bound is what keeps a same-named
+    replacement out of reach even when neither disk reports a serial.
+    Returns the number of rows removed.
+    """
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM disk_metrics WHERE host=? AND device=? "
+            "AND COALESCE(serial, '')=? AND timestamp <= ?",
+            (host_addr, device, serial or "", int(before)),
+        )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 

@@ -102,7 +102,7 @@ start at the [README](README.md).
 
 ## Historical Metrics (Trends)
 - **Background Sampler** -- Captures pool capacity, fragmentation, allocation, health and dedup ratio every 15 minutes per host
-- **Per-Disk SMART** -- Temperature (traffic-light by media type -- HDD 45/55 °C, SSD/NVMe 60/70 °C), SMART health, wear/percentage-used, reallocated/pending sectors and power-on hours for every physical disk, with a temperature trend chart; `smartmontools` installable inline when missing
+- **Per-Disk SMART** -- Temperature (traffic-light by media type -- HDD 45/55 °C, SSD/NVMe 60/70 °C), SMART health, wear/percentage-used, reallocated/pending sectors and power-on hours for every physical disk, with a temperature trend chart; `smartmontools` installable inline when missing. Tiles are keyed by serial number, so a replacement that inherits the kernel name does not inherit the old drive's curve; a disk missing from the latest sample is marked as such and its history can be forgotten with one click -- only its own rows, up to its last sighting
 - **SQLite Storage** -- Configurable retention (default 90 days for metrics, 365 for the audit log -- `METRICS_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`) in `/app/data/pvezfs.db`; auto-trimmed each cycle with a WAL checkpoint-truncate so the volume stays bounded
 - **Inline Trend Charts** -- Theme-aware inline SVG (gradient area fill, no external JS): pool capacity%, fragmentation%, allocated GB, and per-disk temperature
 - **Configurable Range** -- 6 h / 24 h / 7 d / 30 d / 90 d views

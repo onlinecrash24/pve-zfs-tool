@@ -4049,11 +4049,14 @@ async function renderDisksCard(container, hours) {
         return;
     }
 
-    // Fetch every disk's series for this range in one call, group by device.
+    // Fetch every disk's series for this range in one call, group by physical
+    // disk (device + serial): a replacement that inherits "sda" must not get
+    // the old drive's curve.
+    const diskKey = r => r.device + "|" + (r.serial || "");
     const seriesByDev = {};
     try {
         const s = await API.get(`/api/metrics/disk-series?host=${encodeURIComponent(currentHost)}&hours=${hours}`);
-        (s.data || []).forEach(row => { (seriesByDev[row.device] = seriesByDev[row.device] || []).push(row); });
+        (s.data || []).forEach(row => { (seriesByDev[diskKey(row)] = seriesByDev[diskKey(row)] || []).push(row); });
     } catch (e) { /* charts are optional */ }
 
     const grid = h("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;padding:16px" });
@@ -4072,11 +4075,34 @@ async function renderDisksCard(container, hours) {
         ]));
         if (d.model) box.appendChild(h("div", { className: "muted", style: "font-size:11px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, d.model));
 
+        // A disk that was not in the host's latest sample: pulled, replaced,
+        // or simply not answering. Say so, and offer to drop its history --
+        // only its own rows up to its last sighting.
+        if (d.stale) {
+            const forget = h("button", { className: "btn btn-sm btn-danger", style: "margin-left:auto" }, t("disk_forget"));
+            forget.onclick = async () => {
+                if (!confirm(t("disk_forget_confirm", d.device, d.model || d.serial || ""))) return;
+                forget.disabled = true;
+                try {
+                    const r = await API.post("/api/metrics/disks/forget",
+                        { host: currentHost, device: d.device, serial: d.serial || "", before: d.timestamp });
+                    if (r.success) { toast(t("disk_forgotten", r.deleted), "success"); viewMetrics(); }
+                    else { forget.disabled = false; toast(t("disk_forget_failed", r.error || t("error")), "error"); }
+                } catch (e) { forget.disabled = false; toast(t("disk_forget_failed", e.message || ""), "error"); }
+            };
+            box.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin:2px 0 8px;flex-wrap:wrap" }, [
+                h("span", { className: "badge badge-warning" }, t("disk_stale")),
+                h("span", { className: "muted", style: "font-size:11px" },
+                  t("disk_stale_since", new Date(d.timestamp * 1000).toLocaleString())),
+                forget,
+            ]));
+        }
+
         box.appendChild(h("div", { className: "stat-label" }, t("disk_temp")));
         box.appendChild(h("div", { style: "font-size:22px;font-weight:700;margin-bottom:6px;" + _diskTempColor(d.temp_c, d.type) },
             d.temp_c != null ? `${d.temp_c.toFixed(0)} °C` : "—"));
 
-        const pts = (seriesByDev[d.device] || []).map(r => ({ x: r.timestamp, y: r.temp_c }));
+        const pts = (seriesByDev[diskKey(d)] || []).map(r => ({ x: r.timestamp, y: r.temp_c }));
         const chartWrap = document.createElement("div");
         chartWrap.innerHTML = _svgLineChart(pts, { yZero: false, color: "#58a6ff", height: 120, yFmt: v => v.toFixed(0) + "°" });
         box.appendChild(chartWrap);
