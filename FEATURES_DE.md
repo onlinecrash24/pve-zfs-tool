@@ -25,7 +25,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Suche** -- Snapshots nach Dataset-Name filtern, in Timeline- und Tabellenansicht
 - **Snapshots erstellen** -- Manuelle Snapshots mit eigenem Namen, rekursiv möglich
 - **Rollback** -- Smart-Rollback erkennt VMs/LXC-Container automatisch, stoppt sie vor dem Rollback und startet sie danach neu
-- **Klonen** -- Snapshots per Modal-Dialog klonen, mit Ziel-Datastore/Pool-Auswahl und editierbarem Klonnamen (Standard: `{name}_CLONE`); unterstützt Pool-übergreifendes Klonen via `zfs send | zfs recv`
+- **Klonen** -- Snapshots per Modal-Dialog klonen, mit Ziel-Datastore/Pool-Auswahl und editierbarem Klonnamen (Standard: `{name}_CLONE`); unterstützt Pool-übergreifendes Klonen via `zfs send | zfs recv`. Ein Clone wird als Arbeitskopie angelegt: von zfs-auto-snapshot ausgenommen und ohne Platzreservierung, so dass ein geklontes 2-TB-Volume keine 2 TB reserviert und die eigenen Snapshots des Clones nie den Ursprung festhalten
 - **Diff** -- Änderungen für Filesystem-Datasets (`zfs diff`) und zvol/VM-Snapshots (Inkrement-Send-Größen, Snapshot-Properties, Größenübersicht)
 - **Löschen** -- Nur manuell angelegte Snapshots löschbar (Auto-Snapshots sind geschützt)
 

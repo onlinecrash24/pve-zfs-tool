@@ -633,8 +633,24 @@ def rollback_snapshot(host, full_name, force=False, destroy_recent=False, stop_g
     return result
 
 
+# Properties every user-created clone gets. A clone is a working copy, not a
+# dataset in its own right: zfs-auto-snapshot must not start snapshotting it
+# (those snapshots would pin blocks and, with the origin, make the whole
+# thing impossible to prune), and a volume clone must not reserve its full
+# size up front -- a 2 TB zvol clone that reserves 2 TB defeats the point of
+# cloning. refreservation=none is a no-op on filesystems, so no type lookup
+# is needed.
+CLONE_PROPS = "-o com.sun:auto-snapshot=false -o refreservation=none"
+
+
 def clone_snapshot(host, full_name, clone_name):
-    """Clone a snapshot. If clone_name is on a different pool, use send/recv."""
+    """Clone a snapshot. If clone_name is on a different pool, use send/recv.
+
+    A cross-pool "clone" is a full, independent copy: `zfs recv` creates a new
+    dataset with no origin. (An earlier version followed it with `zfs promote`
+    on the assumption that the result was a dependent clone -- it is not, and
+    the promote failed quietly every time.)
+    """
     try:
         full_name = validate_zfs_name(full_name, "Snapshot")
         clone_name = validate_clone_name(clone_name)
@@ -643,20 +659,18 @@ def clone_snapshot(host, full_name, clone_name):
     snap_pool = full_name.split("/")[0]
     clone_pool = clone_name.split("/")[0]
     if snap_pool == clone_pool:
-        result = run_command(host, f"zfs clone {full_name} {clone_name}")
+        result = run_command(host, f"zfs clone {CLONE_PROPS} {full_name} {clone_name}")
         if result.get("success"):
             _invalidate(host)
         return result
-    else:
-        # Cross-pool: send | recv, then promote
-        result = run_command(host, f"zfs send {full_name} | zfs recv {clone_name}")
-        if not result["success"]:
-            return result
-        # The received dataset is a dependent clone, promote it to be independent
-        promote = run_command(host, f"zfs promote {clone_name} 2>/dev/null")
-        result["promoted"] = promote.get("success", False)
-        _invalidate(host)
+    # Cross-pool: the copy is independent, but it still must not be
+    # auto-snapshotted -- set the property on the received dataset.
+    result = run_command(host, f"zfs send {full_name} | zfs recv {clone_name}")
+    if not result["success"]:
         return result
+    run_command(host, f"zfs set com.sun:auto-snapshot=false {clone_name}")
+    _invalidate(host)
+    return result
 
 
 def get_clone_targets(host):
