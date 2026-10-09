@@ -224,3 +224,42 @@ def test_the_footer_credits_the_tool():
     import inspect
     src = inspect.getsource(pdf.ReportPDF.footer)
     assert "Powered by PVE ZFS Tool" in src
+
+
+# --- the upload decoder allowlist -------------------------------------------
+#
+# Pillow identifies a file by its bytes and tries every plugin it has. The
+# feature promises PNG/JPEG/GIF/BMP/WEBP; anything else must never reach a
+# decoder, because "anything else" is where Pillow's CVEs live (PSD, FITS,
+# fonts, JPEG2000, ...). PPM stands in for them here: Pillow can write it, so
+# the test needs no binary fixture, and it is not on the allowlist.
+
+def _image_bytes(fmt):
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(buf, format=fmt)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def logo_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdf, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(pdf, "CUSTOM_LOGO_PATH", str(tmp_path / "report_logo.png"))
+    return tmp_path
+
+
+def test_a_format_outside_the_allowlist_is_refused_even_though_pillow_could_read_it(logo_dir):
+    ok, msg = pdf.save_custom_logo(_image_bytes("PPM"))
+    assert ok is False and "readable image" in msg
+    assert not (logo_dir / "report_logo.png").exists()
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "GIF", "BMP", "WEBP"])
+def test_every_promised_format_is_accepted(logo_dir, fmt):
+    ok, _ = pdf.save_custom_logo(_image_bytes(fmt))
+    assert ok is True
+    assert (logo_dir / "report_logo.png").exists()
+
+
+def test_the_allowlist_is_what_the_docstring_promises():
+    assert set(pdf.LOGO_UPLOAD_FORMATS) == {"PNG", "JPEG", "GIF", "BMP", "WEBP"}

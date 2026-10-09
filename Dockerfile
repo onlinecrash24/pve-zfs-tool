@@ -9,7 +9,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install, then remove the installers. Nothing at runtime imports pip or
+# setuptools (checked: the only references are cffi's build helpers and
+# Werkzeug's demo app), but both ship vendored copies of msgpack and urllib3
+# that image scanners flag -- and that cannot be fixed by upgrading pip, which
+# vendors them at whatever version it was released with. An image without a
+# package manager is also one less tool for anyone who gets a shell in it.
+# Same layer as the install, so the removed files do not survive underneath.
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip uninstall -y pip setuptools \
+    && rm -rf /usr/local/lib/python3.13/site-packages/{pip,setuptools,pkg_resources,_distutils_hack}* \
+              /usr/local/lib/python3.13/site-packages/distutils-precedence.pth
 
 COPY app/ ./app/
 COPY entrypoint.sh .

@@ -210,7 +210,8 @@ def _logo_pixel_size(path):
     function, testable without touching the filesystem."""
     try:
         from PIL import Image
-        with Image.open(path) as im:
+        # Only ever our own normalised PNG or the bundled asset.
+        with Image.open(path, formats=("PNG",)) as im:
             return im.size
     except Exception:
         return None
@@ -234,6 +235,11 @@ def _logo_box(iw, ih, target_h=11.0, max_w=45.0):
     return (w, h)
 
 
+# The formats an uploaded logo may be. Passed to Image.open as an allowlist so
+# no other decoder ever sees the bytes -- see save_custom_logo.
+LOGO_UPLOAD_FORMATS = ("PNG", "JPEG", "GIF", "BMP", "WEBP")
+
+
 def save_custom_logo(data):
     """Validate and store an uploaded report logo. Returns (ok, message).
 
@@ -250,7 +256,12 @@ def save_custom_logo(data):
     try:
         from PIL import Image
         import io
-        im = Image.open(io.BytesIO(data))
+        # Pillow sniffs the format from the bytes, not the name, and tries
+        # every plugin it has. Without `formats=` a file renamed to .png but
+        # holding a PSD, FITS or font payload would be decoded by exactly the
+        # plugins that carry the bulk of Pillow's CVEs. The allowlist is the
+        # set this feature promises; nothing else gets a decoder.
+        im = Image.open(io.BytesIO(data), formats=LOGO_UPLOAD_FORMATS)
         im.load()  # force full decode now rather than lazily on first use
     except Exception:
         return False, "Not a readable image file"
