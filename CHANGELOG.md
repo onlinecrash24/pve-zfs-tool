@@ -7,6 +7,41 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.927 -- 2026-10-09
+
+v0.9.927 — image scan: Pillow, a decoder allowlist, and no pip in the image
+
+A Trivy scan of the image reported 16 HIGH findings, 0 CRITICAL. Three
+groups, and only one of them is a dependency this tool chose.
+
+Pillow 12.1.1 carried twelve of the findings; 12.3.0 closes all of them.
+fpdf2 accepts it, and the report-logo tests were run against it before the
+pin moved.
+
+The custom report logo accepts PNG, JPEG, GIF, BMP and WEBP -- but the
+upload called Pillow with no format allowlist. Pillow identifies a file by
+its bytes and tries every decoder it has, so a file renamed to `.png` but
+holding a PSD, FITS or font payload was decoded by exactly the plugins the
+scan listed. The allowlist is passed to the decoder now; nothing outside it
+ever sees the bytes. This holds regardless of which Pillow version is
+installed.
+
+`msgpack` and `urllib3` in the scan are the copies that pip vendors;
+`setuptools` comes with the base image. None of them runs -- the only
+references in the installed packages are cffi's build helpers and
+Werkzeug's demo app. pip is already at its latest release, so upgrading it
+cannot fix what it vendors. Both are removed in the same layer as the
+install. An image without a package manager is also one tool fewer for
+anyone who gets a shell in it.
+
+Verified the way it has to be: the CI build now pulls the image it just
+pushed, starts it, and waits for the container's own health check to report
+healthy -- gunicorn up, application imported, health check working. A build
+that only builds would not have caught an image that no longer starts.
+
+Expected after this release: zero Python findings on a rescan. Debian base
+findings are the base image's and tracked separately.
+
 ## v0.9.926 -- 2026-10-08
 
 v0.9.926 — clones that behave like working copies
