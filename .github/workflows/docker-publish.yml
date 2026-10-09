@@ -137,6 +137,32 @@ jobs:
           build-args: |
             APP_VERSION=${{ github.ref_name }}
 
+      # 6. Smoke test: a built image is not a running one. Pull what was just
+      # pushed, start it, and wait for its own HEALTHCHECK to report healthy --
+      # which proves gunicorn is up, the app imports, and the healthcheck
+      # itself works. Added after pip and setuptools were removed from the
+      # image, a change that only a start could have validated.
+      - name: Smoke test the pushed image
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+          docker pull "$IMG"
+          docker run -d --name smoke \
+            -e SECRET_KEY=smoke-test-only -e ADMIN_PASSWORD=smoke-test-only "$IMG"
+          status=starting
+          for i in $(seq 1 45); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' smoke 2>/dev/null || echo missing)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          echo "--- container log ---"; docker logs smoke 2>&1 | tail -40
+          docker rm -f smoke >/dev/null
+          if [ "$status" != healthy ]; then
+            echo "::error::image never became healthy (last status: $status)"; exit 1
+          fi
+          echo "healthy after start -- gunicorn up, app imported, healthcheck working"
+
   # Publish the GitHub release for a tag build.
   #
   # This used to be a manual step, and v0.9.920 shipped with a tag and an

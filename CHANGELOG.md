@@ -7,6 +7,32 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.926 -- 2026-10-08
+
+v0.9.926 — clones that behave like working copies
+
+A clone made from the Snapshots view was created with no properties at all.
+Two consequences, both the classic warnings about recovery clones:
+zfs-auto-snapshot started snapshotting the clone on its next run -- snapshots
+that pin blocks and, together with the origin, make the whole thing
+impossible to prune -- and a volume clone reserved its full size, so cloning
+a 2 TB zvol reserved 2 TB.
+
+Every user-created clone now gets `com.sun:auto-snapshot=false` and
+`refreservation=none`. A cross-pool copy (`zfs send | zfs recv`) gets the
+auto-snapshot exclusion set after the receive. Gone with it: a `zfs promote`
+that ran after every cross-pool copy on the belief that the received dataset
+was a dependent clone. It is not, the promote failed quietly every time, and
+the flag it set was read by nothing.
+
+The policy listed "replicas are not marked `canmount=noauto`" as a known,
+accepted weakness. That was true of this tool's code and wrong about the
+deployed system: bashclub-zsync creates replica datasets with
+`canmount=noauto` and sets it again before every incremental. Rewritten to
+say what is actually the case, with the earlier claim named as an error.
+
+CHANGELOG.md regenerated through v0.9.925.
+
 ## v0.9.925 -- 2026-09-20
 
 v0.9.925 — replication in practice, and the disk that would not leave
