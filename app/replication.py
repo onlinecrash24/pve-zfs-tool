@@ -1011,13 +1011,32 @@ def bootstrap_ssh(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> D
     r = run_command(target_host, kh_script, timeout=20)
     out["known_hosts_updated"] = "__KH_OK__" in (r.get("stdout") or "")
 
-    # Step 4: append target pubkey to source authorized_keys
-    from app.ssh_manager import _append_authorized_key
-    r = _append_authorized_key(source_host, pubkey)
+    # Step 4: install the target's key on the source -- restricted.
+    #
+    # This key is what a compromised replication TARGET would use against its
+    # source. Unrestricted it is a full root shell. `restrict` turns off PTY,
+    # port and agent forwarding and X11 (none of which zsync, the reverse
+    # sync, the migration pull or the probe use -- all are non-interactive
+    # `ssh host 'cmd'` in BatchMode), and `from=` pins the key to the target's
+    # address. No forced command: the disaster-recovery reverse sync
+    # legitimately runs `zfs recv` on the source, so a command allowlist
+    # would either break DR or permit the one thing worth restricting.
+    from app.ssh_manager import _append_authorized_key, _remove_authorized_key
+    options = authorized_key_options(target_host)
+    if not options:
+        out["error"] = (f"target address {target_host.get('address')!r} cannot be used in an "
+                        f"SSH from= restriction")
+        return out
+    r = _append_authorized_key(source_host, pubkey, options=options)
     out["authorized_keys_updated"] = bool(r.get("success"))
+    out["key_options"] = options
     if not out["authorized_keys_updated"]:
         out["error"] = "Failed to append authorized_keys on source: " + (r.get("stderr") or r.get("stdout") or "unknown")
         return out
+    # Migration: a setup made before this restriction left the bare key line
+    # behind. Removed AFTER the restricted line is in place, so there is never
+    # a moment without access; harmless when there is no such line.
+    _remove_authorized_key(source_host, pubkey)
 
     # Step 5: probe from target
     pr = probe_ssh_trust(target_host, source_host)
@@ -1025,8 +1044,23 @@ def bootstrap_ssh(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> D
     out["probe_ok"] = pr["probe_ok"]
     out["success"] = out["probe_ok"]
     if not out["probe_ok"] and not out["error"]:
-        out["error"] = "SSH probe failed"
+        out["error"] = ("SSH probe failed. If the source sees the target under a different "
+                        "address than the tool does (NAT, a second interface), the from= "
+                        "restriction on the key blocks it -- register the target under the "
+                        "address the source sees.")
     return out
+
+
+_FROM_ADDR_RE = re.compile(r"^[A-Za-z0-9.:_-]+$")
+
+
+def authorized_key_options(target_host: Dict[str, Any]) -> str:
+    """The authorized_keys option prefix for the replication key, or "" when
+    the target's address cannot be embedded safely."""
+    addr = (target_host.get("address") or "").strip()
+    if not _FROM_ADDR_RE.match(addr):
+        return ""
+    return f'restrict,from="{addr}"'
 
 
 def probe_ssh_trust(target_host: Dict[str, Any], source_host: Dict[str, Any]) -> Dict[str, Any]:

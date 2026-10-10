@@ -580,13 +580,22 @@ def get_public_key():
 # SSH Key Rotation
 # ---------------------------------------------------------------------------
 
-def _append_authorized_key(host, pubkey):
-    """Append a public key to ~/.ssh/authorized_keys idempotently."""
+def _append_authorized_key(host, pubkey, options=None):
+    """Append a public key to ~/.ssh/authorized_keys idempotently.
+
+    ``options`` is an authorized_keys option prefix such as
+    ``restrict,from="10.0.0.9"``; the stored line is ``<options> <pubkey>``.
+    Idempotency is by exact line, so the same key with different options is a
+    different line -- a caller that tightens options must remove the old line
+    itself (replication.bootstrap_ssh does). The tool's own key is installed
+    without options: it needs the full shell, that is the product.
+    """
+    line = f"{options} {pubkey}" if options else pubkey
     cmd = (
         "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
         "touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && "
-        f"grep -qxF {shlex.quote(pubkey)} ~/.ssh/authorized_keys || "
-        f"echo {shlex.quote(pubkey)} >> ~/.ssh/authorized_keys"
+        f"grep -qxF {shlex.quote(line)} ~/.ssh/authorized_keys || "
+        f"echo {shlex.quote(line)} >> ~/.ssh/authorized_keys"
     )
     return run_command(host, cmd)
 

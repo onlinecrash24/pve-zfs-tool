@@ -54,7 +54,7 @@ start at the [README](README.md).
 ## Replication (bashclub-zsync)
 - **Setup Wizard** -- Source/target host pair → setup → datasets → config → log, with progressive disclosure
 - **Green/Red Pre-Flight** -- Before setup, checks what already exists (PVE, bashclub repo, `bashclub-zsync` installed, SSH trust) and only performs the missing steps
-- **One-Click Setup** -- Installs `bashclub-zsync` on **both** hosts via the official deb822 APT repo (`apt.bashclub.org/release/`, suite derived from the host: bookworm/trixie) and bootstraps passwordless SSH from target to source (key generation, `ssh-keyscan` for `known_hosts`, `authorized_keys` append, BatchMode probe)
+- **One-Click Setup** -- Installs `bashclub-zsync` on **both** hosts via the official deb822 APT repo (`apt.bashclub.org/release/`, suite derived from the host: bookworm/trixie) and bootstraps passwordless SSH from target to source (key generation, `ssh-keyscan` for `known_hosts`, `authorized_keys` append, BatchMode probe). The key is installed with `restrict,from="<target>"` -- no PTY or forwarding, valid only from the target's address -- and a bare line left by an earlier setup is removed once the restricted one is in place
 - **PVE Detection** -- Per-host PVE-version badge (warns if a host is not Proxmox VE)
 - **Per-Source Config Files** -- Each replication pair lives in its own `/etc/bashclub/<source-ip>.conf` so multiple pairs coexist on a single target host (matches the upstream bashclub convention)
 - **Dataset Tagging** -- Checkbox list of all source datasets/zvols; sets/clears the `bashclub:zsync` user property (value `all`) so the upstream filter actually picks them up

@@ -476,44 +476,90 @@ def _newest_backup_dt(host):
     return None
 
 
+_failing = {}            # address -> epoch of the first failure of the current outage
+_standby_logged = set()  # addresses whose standby skip has been logged once
+
+
+def _scheduler_tick(now=None):
+    """One pass over the schedules. Split out of the loop so tests can drive
+    it without threads or sleeps."""
+    now = now or tz_now().replace(tzinfo=None)   # naive local for comparisons
+    cfg = load_config()
+    hosts = {h["address"]: h for h in load_hosts()}
+    for address, sched in (cfg.get("schedules") or {}).items():
+        if not sched.get("enabled"):
+            continue
+        host = hosts.get(address)
+        if not host:
+            continue
+        # A host marked expected-offline is not tried at all. Trying it costs
+        # a 10-minute SSH timeout per attempt and -- before this check -- sent
+        # a failure notification every 30 minutes for as long as the host
+        # stayed off, which is precisely what marking it was meant to stop.
+        if host.get("standby"):
+            if address not in _standby_logged:
+                log.info("Host backup for %s skipped: host is marked expected-offline", address)
+                _standby_logged.add(address)
+            continue
+        _standby_logged.discard(address)
+        if not backup_due(_newest_backup_dt(host), now, sched):
+            continue
+        # Throttle retries so a failing host isn't hammered every poll.
+        if time.time() - _last_attempt.get(address, 0) < _RETRY_THROTTLE_SEC:
+            continue
+        _last_attempt[address] = time.time()
+        log.info("Scheduled host backup for %s (%s)", address, sched.get("interval", "daily"))
+        try:
+            res = create_backup(host, include_priv=bool(sched.get("include_priv")))
+        except Exception as e:
+            res = {"success": False, "error": f"crashed: {e}"}
+        if res.get("success"):
+            try:
+                deleted = prune_backups(host, int(sched.get("keep", 8)))
+            except Exception as e:
+                log.warning("Host backup prune for %s failed: %s", address, e)
+                deleted = 0
+            log.info("Host backup for %s ok in %ss (%s bytes, pruned %d)",
+                     address, res.get("duration_sec"), res.get("bytes"), deleted)
+            _record_success(host)
+        else:
+            log.error("Host backup for %s failed: %s", address, res.get("error"))
+            _record_failure(host, res.get("error") or "")
+
+
 def _scheduler_loop():
     log.info("Host backup scheduler started")
     while not _sched_stop.is_set():
         try:
-            now = tz_now().replace(tzinfo=None)   # naive local for comparisons
-            cfg = load_config()
-            hosts = {h["address"]: h for h in load_hosts()}
-            for address, sched in (cfg.get("schedules") or {}).items():
-                if not sched.get("enabled"):
-                    continue
-                host = hosts.get(address)
-                if not host:
-                    continue
-                if not backup_due(_newest_backup_dt(host), now, sched):
-                    continue
-                # Throttle retries so a failing host isn't hammered every poll.
-                if time.time() - _last_attempt.get(address, 0) < _RETRY_THROTTLE_SEC:
-                    continue
-                _last_attempt[address] = time.time()
-                log.info("Scheduled host backup for %s (%s)", address,
-                         sched.get("interval", "daily"))
-                try:
-                    res = create_backup(host, include_priv=bool(sched.get("include_priv")))
-                    if res.get("success"):
-                        deleted = prune_backups(host, int(sched.get("keep", 8)))
-                        log.info("Host backup for %s ok in %ss (%s bytes, pruned %d)",
-                                 address, res.get("duration_sec"), res.get("bytes"), deleted)
-                    else:
-                        log.error("Host backup for %s failed: %s", address, res.get("error"))
-                        _notify_failure(host, res.get("error", ""))
-                except Exception as e:
-                    log.error("Host backup for %s crashed: %s", address, e)
-                    _notify_failure(host, str(e))
-            _sched_stop.wait(300)
+            _scheduler_tick()
         except Exception as e:
             log.error("Host backup scheduler error: %s", e)
-            _sched_stop.wait(300)
+        _sched_stop.wait(300)
     log.info("Host backup scheduler stopped")
+
+
+def _record_failure(host, error):
+    """Notify on the FIRST failure of an outage, not on every retry.
+
+    Retries keep running every _RETRY_THROTTLE_SEC so a transient failure
+    recovers by itself -- but each one used to send its own notification, and
+    a dead host produced a mail every 30 minutes until someone deleted its
+    schedule. One mail says the backup is failing; the recovery mail says
+    when it stopped. Everything in between is the log's business.
+    """
+    address = host.get("address")
+    if address in _failing:
+        log.warning("Host backup for %s still failing (first failure %s): %s", address,
+                    time.strftime("%Y-%m-%d %H:%M", time.localtime(_failing[address])), error[:200])
+        return
+    _failing[address] = time.time()
+    _notify_failure(host, error)
+
+
+def _record_success(host):
+    since = _failing.pop(host.get("address"), None)
+    if since is not None:
+        _notify_recovered(host, since)
 
 
 def _notify_failure(host, error):
@@ -522,11 +568,28 @@ def _notify_failure(host, error):
         send_notification(
             "host_backup_failed",
             f"Host-Backup fehlgeschlagen: {host.get('name') or host.get('address')}",
-            f"Host: {host.get('address')}\nFehler: {error[:500]}",
+            f"Host: {host.get('address')}\nFehler: {error[:500]}\n\n"
+            f"Weitere Versuche laufen alle {_RETRY_THROTTLE_SEC // 60} Minuten ohne weitere "
+            f"Meldung; die nächste Mail kommt, wenn ein Backup wieder gelingt. "
+            f"Ist der Host absichtlich aus, unter Hosts als „Erwartet offline“ markieren.",
             priority=7,
         )
     except Exception as e:
         log.warning("host backup failure notification failed: %s", e)
+
+
+def _notify_recovered(host, since):
+    try:
+        from app.notifications import send_notification
+        send_notification(
+            "host_backup_failed",
+            f"Host-Backup wieder erfolgreich: {host.get('name') or host.get('address')}",
+            f"Host: {host.get('address')}\nFehlgeschlagen seit: "
+            f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(since))}",
+            priority=3,
+        )
+    except Exception as e:
+        log.warning("host backup recovery notification failed: %s", e)
 
 
 def start_scheduler():
