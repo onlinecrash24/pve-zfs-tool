@@ -89,14 +89,18 @@ it looks alarming and is the design.
 
 Stated here rather than discovered later:
 
-- **The replication key grants a full root shell.** Replication is pull-based,
-  so the key pair is generated on the *target* and its public half is installed
-  on the *source*: a compromised source has no credential for the target, which
-  is the direction that matters most. But that key is installed without
-  `restrict`, `from=`, or a forced command, so the exposure runs the other way
-  — **a compromised replication target has full root on its source.**
-  Narrowing it is planned; a forced command alone cannot work, because the
-  disaster-recovery reverse sync legitimately runs `zfs recv` on the source.
+- **The replication key is root on the source, from one address.**
+  Replication is pull-based, so the key pair is generated on the *target* and
+  its public half is installed on the *source*: a compromised source has no
+  credential for the target, which is the direction that matters most. The
+  installed line carries `restrict` (no PTY, no port or agent forwarding) and
+  `from="<target address>"`, and a setup made before that leaves no bare line
+  behind. What remains: whoever holds the target can run commands as root on
+  the source, from the target's address. There is deliberately **no forced
+  command** — the disaster-recovery reverse sync legitimately runs `zfs recv`
+  on the source, so a command allowlist would either break DR or permit the
+  one thing worth restricting. Narrowing that further means a non-root user
+  with ZFS delegation, which zsync does not support.
 - **A compromised source controls the stream the target receives.** In a
   pull model the target connects into the source, so what `zfs recv` on the
   target is fed comes from the machine you are worried about. What keeps
