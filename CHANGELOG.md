@@ -7,6 +7,45 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.928 -- 2026-10-10
+
+v0.9.928 — one mail per outage, and a narrower replication key
+
+Field report: a host failed and the tool sent "Host-Backup fehlgeschlagen"
+every 30 minutes. Marking the host "Erwartet offline" changed nothing.
+
+Two defects. The host-backup scheduler never looked at that flag -- only the
+offline monitor did -- so a host that was deliberately off was tried on every
+pass, a 10-minute SSH timeout each time. And every retry, one per 30
+minutes, sent its own notification.
+
+Now a host marked expected-offline is not tried at all. A host that is down
+without being marked is still retried every 30 minutes, so a transient
+failure recovers by itself -- but only the first failure of an outage sends
+a mail, and the mail says so and points at the marking. When a backup
+succeeds again, one recovery mail follows, with the date of the first
+failure.
+
+Replication is pull-based: the key pair lives on the target and its public
+half goes into the source's authorized_keys. That line used to be bare -- a
+full root shell on the source for whoever held the target. It is installed
+with `restrict,from="<target address>"` now: no PTY, no port or agent
+forwarding, valid only from the target's address. Checked against all five
+callers over that key; none needs any of that. A bare line left by an
+earlier setup is removed after the restricted one is in place, so there is
+never a moment without access.
+
+**For existing pairs:** the restriction takes effect when you run
+"Install & set up SSH" again -- the step is idempotent and swaps the line.
+If the source sees the target under a different address than the tool does
+(NAT, a second interface), the `from=` pin blocks the connection; the probe
+then fails and says exactly that.
+
+No forced command, on purpose: the disaster-recovery reverse sync runs
+`zfs recv` on the source, so a command allowlist would either break DR or
+permit the one thing worth restricting. SECURITY.md describes the key as
+what it now is.
+
 ## v0.9.927 -- 2026-10-09
 
 v0.9.927 — image scan: Pillow, a decoder allowlist, and no pip in the image

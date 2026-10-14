@@ -2,7 +2,7 @@
 
 Runs piggy-backed on the existing metrics sampler (every 15 min by default),
 inspects every per-source bashclub-zsync config we can find on a host, and
-classifies its health into ``ok | warn | crit | pending | no_schedule``
+classifies its health into ``ok | warn | crit | pending | no_schedule | standby``
 based on the lag between *now* and the newest snapshot under the replica
 target.
 
@@ -236,6 +236,12 @@ def _check_pair(host: Dict[str, Any], cfg_entry: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _source_ip(source: Optional[str]) -> str:
+    """``root@10.0.0.5`` -> ``10.0.0.5``; a bare address passes through."""
+    s = (source or "").strip()
+    return s.split("@", 1)[1] if "@" in s else s
+
+
 def _is_default_template(cfg_entry: Dict[str, Any]) -> bool:
     """The bashclub install ships /etc/bashclub/zsync.conf with placeholder
     source 'user@host' / target 'pool/dataset'. Skip it everywhere.
@@ -259,6 +265,12 @@ def run_checks_for_host(host: Dict[str, Any]) -> List[Dict[str, Any]]:
                     host.get("address"), e)
         return out
 
+    # Sources marked expected-offline. A pair whose source is deliberately
+    # off cannot sync, so its lag grows until it reads CRIT -- which is the
+    # host-backup mail storm in another form. It gets its own status instead
+    # of an alert; the pair is still checked and shown, just not judged.
+    standby_sources = {h.get("address") for h in load_hosts() if h.get("standby")}
+
     for cfg in configs:
         # A pair that still lives outside the tool's <source-ip>.conf layout
         # cannot be monitored yet: its cron marker names a path we do not
@@ -271,6 +283,9 @@ def run_checks_for_host(host: Dict[str, Any]) -> List[Dict[str, Any]]:
             log.warning("repl_monitor: check failed for %s on %s: %s",
                         cfg.get("path"), host.get("address"), e)
             continue
+        if _source_ip(cfg.get("source")) in standby_sources:
+            snapshot["status"] = "standby"
+            snapshot["standby"] = True
         out.append(snapshot)
         _maybe_alert(snapshot)
     return out
@@ -373,7 +388,7 @@ def health_snapshot() -> Dict[str, Any]:
         except Exception as e:
             log.warning("repl_monitor: host %s failed: %s",
                         host.get("address"), e)
-    summary = {"ok": 0, "warn": 0, "crit": 0, "pending": 0, "no_schedule": 0}
+    summary = {"ok": 0, "warn": 0, "crit": 0, "pending": 0, "no_schedule": 0, "standby": 0}
     for p in pairs:
         s = p.get("status", "pending")
         summary[s] = summary.get(s, 0) + 1
@@ -382,7 +397,8 @@ def health_snapshot() -> Dict[str, Any]:
 
 
 # Higher = worse; used to pick the worst status when a source feeds several pairs.
-_STATUS_RANK = {"ok": 0, "no_schedule": 1, "pending": 1, "warn": 2, "crit": 3}
+# "standby" sits with pending: not healthy, not a fault -- the source is off on purpose.
+_STATUS_RANK = {"ok": 0, "no_schedule": 1, "pending": 1, "standby": 1, "warn": 2, "crit": 3}
 
 
 def source_health_map() -> Dict[str, str]:

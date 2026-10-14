@@ -4337,6 +4337,7 @@ async function viewReplication() {
             crit: "badge-danger",
             pending: "badge-secondary",
             no_schedule: "badge-secondary",
+            standby: "badge-secondary",
         }[s] || "badge-secondary");
 
         // Top summary banner (hidden if everything is fine)
@@ -4351,6 +4352,7 @@ async function viewReplication() {
             row.appendChild(mkPill(t("repl_health_crit"),  summary.crit,  "badge-danger"));
             if (summary.pending)     row.appendChild(mkPill(t("repl_health_pending"),     summary.pending,     "badge-secondary"));
             if (summary.no_schedule) row.appendChild(mkPill(t("repl_health_no_schedule"), summary.no_schedule, "badge-secondary"));
+            if (summary.standby)     row.appendChild(mkPill(t("repl_health_standby"),     summary.standby,     "badge-secondary"));
             pairsBody.appendChild(row);
         }
 
