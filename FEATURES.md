@@ -26,6 +26,7 @@ start at the [README](README.md).
 - **Create Snapshots** -- Manual snapshots with custom names, recursive support
 - **Rollback** -- Smart rollback that auto-detects VMs/LXC containers, stops them before rollback and restarts them afterwards
 - **Clone** -- Clone snapshots via modal dialog with target datastore/pool selector, editable clone name (default: `{name}_CLONE`), supports cross-pool cloning via `zfs send | zfs recv`. A clone is created as a working copy: excluded from zfs-auto-snapshot and with no space reservation, so a cloned 2 TB volume does not reserve 2 TB and the clone's own snapshots never pin the origin
+- **Held-by Badge** -- A snapshot with dependent clones shows which dataset holds it, in timeline and table: the reason it cannot be destroyed and zfs-auto-snapshot never prunes it, visible before the refusal
 - **Diff** -- View changes for filesystem datasets (`zfs diff`) and zvol/VM snapshots (incremental send estimates, snapshot properties, size overview)
 - **Delete** -- Remove manually created snapshots only (auto-snapshots are protected from deletion)
 
@@ -33,6 +34,7 @@ start at the [README](README.md).
 - **Guest Overview** -- List all VMs and LXC containers with status
 - **Lifecycle Control** -- Start, graceful shutdown, reboot and hard stop per guest (status-dependent buttons, confirmation for disruptive actions, audit-logged)
 - **Per-Guest Snapshots** -- View ZFS snapshots specific to a VM or container
+- **Recovery Guest from Snapshot** -- Bring a whole VM or container up as it was at one point in time: every disk is cloned at one snapshot label into `<pool>/clone` (same pool, no extra space), the storage is registered, and a new guest is written with the original hardware but no network interface, `onboot 0`, a fresh UUID -- not started. A marker in the config identifies it; **Clean up** destroys the guest and its clones and reports whether the origin snapshots are free again. Any guest without the marker or with a disk outside the recovery root is refused
 - **Smart Rollback** -- Automatically stops VM/LXC before rollback and restarts afterwards
 - **Replication Status** -- Per-guest indicator in the guest list: green (all disks tagged & not lagging), yellow (only some disks tagged, or the source is lagging), red (not replicated); derived from the `bashclub:zsync` tags plus the replication monitor
 - **LXC File-Level Restore** -- Browse and restore individual files from LXC container snapshots:

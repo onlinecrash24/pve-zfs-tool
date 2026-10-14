@@ -515,7 +515,10 @@ def get_snapshots(host, dataset=None):
             dataset = validate_zfs_name(dataset, "Dataset")
         except ValueError:
             return []
-    cmd = "zfs list -t snapshot -H -o name,used,refer,creation -S creation"
+    # `clones` is the list of datasets that depend on the snapshot. It is why
+    # a snapshot cannot be destroyed and why zfs-auto-snapshot cannot prune it;
+    # the UI shows it as a badge so the holder is visible before the refusal.
+    cmd = "zfs list -t snapshot -H -o name,used,refer,creation,clones -S creation"
     if dataset:
         cmd += f" -r {dataset}"
     result = run_command(host, cmd, cache_ttl=_TTL_SHORT)
@@ -531,11 +534,13 @@ def get_snapshots(host, dataset=None):
                 ds_types[p[0]] = p[1]
     snapshots = []
     for line in result["stdout"].strip().splitlines():
-        parts = line.split("\t", 3)
+        parts = line.split("\t", 4)
         if len(parts) >= 4:
             full_name = parts[0]
             ds, snap = full_name.rsplit("@", 1) if "@" in full_name else (full_name, "")
+            clones_raw = parts[4].strip() if len(parts) >= 5 else "-"
             snapshots.append({
+                "clones": [c for c in clones_raw.split(",") if c and c != "-"],
                 "full_name": full_name,
                 "dataset": ds,
                 "snapshot": snap,

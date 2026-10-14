@@ -26,6 +26,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Snapshots erstellen** -- Manuelle Snapshots mit eigenem Namen, rekursiv möglich
 - **Rollback** -- Smart-Rollback erkennt VMs/LXC-Container automatisch, stoppt sie vor dem Rollback und startet sie danach neu
 - **Klonen** -- Snapshots per Modal-Dialog klonen, mit Ziel-Datastore/Pool-Auswahl und editierbarem Klonnamen (Standard: `{name}_CLONE`); unterstützt Pool-übergreifendes Klonen via `zfs send | zfs recv`. Ein Clone wird als Arbeitskopie angelegt: von zfs-auto-snapshot ausgenommen und ohne Platzreservierung, so dass ein geklontes 2-TB-Volume keine 2 TB reserviert und die eigenen Snapshots des Clones nie den Ursprung festhalten
+- **Gehalten-von-Badge** -- Ein Snapshot mit abhängigen Clones zeigt in Timeline und Tabelle, welches Dataset ihn hält: der Grund, warum er nicht gelöscht werden kann und zfs-auto-snapshot ihn nie ausdünnt, sichtbar vor der Verweigerung
 - **Diff** -- Änderungen für Filesystem-Datasets (`zfs diff`) und zvol/VM-Snapshots (Inkrement-Send-Größen, Snapshot-Properties, Größenübersicht)
 - **Löschen** -- Nur manuell angelegte Snapshots löschbar (Auto-Snapshots sind geschützt)
 
@@ -33,6 +34,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Guest-Übersicht** -- Alle VMs und LXC-Container mit Status
 - **Lifecycle-Steuerung** -- Start, sauberes Herunterfahren, Neustart und harter Stopp pro Gast (statusabhängige Buttons, Bestätigung bei eingreifenden Aktionen, im Audit-Log erfasst)
 - **Per-Guest-Snapshots** -- ZFS-Snapshots zu einer bestimmten VM bzw. Container anzeigen
+- **Recovery-Gast aus Snapshot** -- Eine ganze VM oder einen Container so hochbringen, wie er zu einem Zeitpunkt war: jede Disk wird zu einem Snapshot-Label nach `<pool>/clone` geklont (gleicher Pool, kein zusätzlicher Platz), der Storage registriert und ein neuer Gast mit der originalen Hardware geschrieben, aber ohne Netzwerkkarte, mit `onboot 0` und neuer UUID -- nicht gestartet. Ein Marker in der Config kennzeichnet ihn; **Aufräumen** löscht Gast und Clones und meldet, ob die Ursprungs-Snapshots wieder frei sind. Jeder Gast ohne Marker oder mit einer Disk außerhalb des Recovery-Roots wird verweigert
 - **Smart-Rollback** -- Stoppt VM/LXC automatisch vor dem Rollback und startet sie danach neu
 - **Replikations-Status** -- Anzeige pro Gast in der Liste: grün (alle Disks getaggt & kein Rückstand), gelb (nur manche Disks getaggt oder Quelle im Rückstand), rot (nicht repliziert); abgeleitet aus den `bashclub:zsync`-Tags plus dem Replikations-Monitor
 - **LXC-Datei-Restore** -- Einzelne Dateien aus LXC-Container-Snapshots durchsuchen und wiederherstellen:

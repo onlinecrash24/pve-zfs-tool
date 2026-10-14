@@ -7,6 +7,25 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.930 -- 2026-10-14
+
+v0.9.930 — pip-audit in the CI
+
+No behaviour change in the tool. The release pipeline gains a dependency
+audit: pip-audit checks the pinned runtime set and its transitives at
+source level, in the test job, before any image is built.
+
+Advisory on the dev branch, so a new upstream advisory cannot block the
+very branch where the bump lands. A gate on tag builds, so a release does
+not ship a known, fixable vulnerability -- this tag is the first that ran
+through it. What the audit cannot see is the Debian base layer and
+anything vendored inside another package; that remains the image scan's
+job, and the README says so in a new Development section (both
+languages) with the three maintainer commands.
+
+pip-audit 2.10.1 is pinned in requirements-dev.txt; it is not part of the
+runtime image.
+
 ## v0.9.929 -- 2026-10-14
 
 v0.9.929 — standby pairs, and two dependency bumps
