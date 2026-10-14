@@ -167,6 +167,9 @@ def test_the_monitor_skips_pairs_that_still_need_import(monkeypatch):
     ]})
     monkeypatch.setattr(rm, "_check_pair", lambda h, c: checked.append(c["path"]) or {"status": "ok"})
     monkeypatch.setattr(rm, "_maybe_alert", lambda snap: None)
+    # run_checks_for_host now reads the host list for standby flags; the real
+    # one creates /app/data, which the CI runner cannot write.
+    monkeypatch.setattr(rm, "load_hosts", lambda: [])
     rm.run_checks_for_host(_host())
     assert checked == ["/etc/bashclub/10.0.0.7.conf"]
 
