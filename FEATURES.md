@@ -26,6 +26,7 @@ start at the [README](README.md).
 - **Create Snapshots** -- Manual snapshots with custom names, recursive support
 - **Rollback** -- Smart rollback that auto-detects VMs/LXC containers, stops them before rollback and restarts them afterwards
 - **Clone** -- Clone snapshots via modal dialog with target datastore/pool selector, editable clone name (default: `{name}_CLONE`), supports cross-pool cloning via `zfs send | zfs recv`. A clone is created as a working copy: excluded from zfs-auto-snapshot and with no space reservation, so a cloned 2 TB volume does not reserve 2 TB and the clone's own snapshots never pin the origin
+- **Held-by Badge** -- A snapshot with dependent clones shows which dataset holds it, in timeline and table: the reason it cannot be destroyed and zfs-auto-snapshot never prunes it, visible before the refusal
 - **Diff** -- View changes for filesystem datasets (`zfs diff`) and zvol/VM snapshots (incremental send estimates, snapshot properties, size overview)
 - **Delete** -- Remove manually created snapshots only (auto-snapshots are protected from deletion)
 

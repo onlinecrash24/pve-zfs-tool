@@ -118,6 +118,19 @@ function h(tag, attrs = {}, children = []) {
     return el;
 }
 
+// A snapshot with dependent clones: shown before the destroy refusal, and the
+// reason zfs-auto-snapshot leaves it alone. Title carries the full list.
+function heldByBadge(snap) {
+    const clones = snap.clones || [];
+    if (!clones.length) return null;
+    const label = clones.length > 1 ? `${clones[0]} +${clones.length - 1}` : clones[0];
+    return h("span", {
+        className: "badge badge-degraded",
+        style: "font-size:9px",
+        title: clones.join(", ") + "\n" + t("snap_held_by_hint"),
+    }, t("snap_held_by", label));
+}
+
 function healthBadge(status) {
     const s = (status || "").toUpperCase();
     let cls = "badge-online";
@@ -1952,6 +1965,8 @@ function renderTimeline(snapshots) {
                 `${t("snap_frees")}: ${snap.used}`));
             metaRow.appendChild(h("span", {}, `${t("refer")}: ${snap.refer}`));
             if (isAuto) metaRow.appendChild(h("span", { className: "badge badge-stopped", style: "font-size:9px" }, "auto"));
+            const held = heldByBadge(snap);
+            if (held) metaRow.appendChild(held);
             content.appendChild(metaRow);
 
             const actions = h("div", { className: "tl-actions" });
@@ -2027,7 +2042,7 @@ function renderSnapshotTable(snapshots, datasetFilter) {
         const isVolume = snap.ds_type === "volume";
         const tr = h("tr");
         tr.appendChild(h("td", { style: "font-size:12px" }, snap.dataset));
-        tr.appendChild(h("td", {}, h("strong", {}, snap.snapshot)));
+        tr.appendChild(h("td", {}, [h("strong", {}, snap.snapshot), heldByBadge(snap)]));
         const typeTd = h("td");
         typeTd.appendChild(h("span", {
             className: `badge ${isVolume ? "badge-stopped" : "badge-online"}`,
