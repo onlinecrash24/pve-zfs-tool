@@ -7,6 +7,39 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.931 -- 2026-10-14
+
+v0.9.931 — recovery guest from a snapshot, and a "held by" badge
+
+Recovery guest. On the VM/CT page, "Recovery guest" brings a whole VM or
+container up as it was at one point in time, next to the live one: every
+disk is cloned at one snapshot label into <pool>/clone (same pool, no
+extra space), the storage is registered on the node, and a new guest is
+written with the original hardware -- BIOS, machine type, controllers,
+CPU, memory, mount points -- but without a network interface, with
+onboot 0 and a fresh UUID. It is not started; the human starts it. The
+dialog lists only labels that exist on every disk and says which disk
+breaks the set for the others. Container volumes get posix ACLs, xattr=sa
+and their refquota, which a clone would otherwise not inherit from its
+origin. Every failure undoes the clones made so far and writes no config.
+
+The guest carries a marker line, visible in PVE's Notes panel, and an
+amber "recovery" badge in the tool. "Clean up" destroys the guest and its
+clones -- but only a guest with the marker whose every disk lives under
+<pool>/clone, so a VMID typed wrong cannot take a production guest with
+it -- and reports which origin snapshots are free again and which another
+clone still holds.
+
+Held-by badge. A snapshot with dependent clones now shows which dataset
+holds it, in timeline and table, with the reason in the tooltip: it
+cannot be destroyed and zfs-auto-snapshot never prunes it until the clone
+is gone or promoted. Until now the tool knew that only at the moment the
+destroy was refused.
+
+Not verified against a live host in this release; the field check is
+to create a recovery guest from a small VM, start it in PVE, clean it
+up, and watch the held-by badge on the origin snapshot disappear.
+
 ## v0.9.930 -- 2026-10-14
 
 v0.9.930 — pip-audit in the CI
