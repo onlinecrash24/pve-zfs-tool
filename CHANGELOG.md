@@ -7,6 +7,32 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.929 -- 2026-10-14
+
+v0.9.929 — standby pairs, and two dependency bumps
+
+Follow-up to v0.9.928. The replication monitor did not look at the
+expected-offline flag either: a source that is deliberately off cannot
+sync, its replica ages, and the pair crossed into CRIT -- one transition
+alert, then a re-fire after every cooldown, for a condition the operator
+had already declared intentional.
+
+Such a pair now reads `standby`: still checked (the target is up and the
+replica's age is real), shown in the overview with a grey badge and its own
+summary pill, never judged. Coming back is not announced as a recovery,
+because nothing was alerted; a real fault after standby alerts like any
+new fault. With this, all three places that speak up about a dead host --
+offline monitor, host-backup scheduler, replication monitor -- honour the
+same marking.
+
+No known vulnerabilities in any pinned dependency (pip-audit). gunicorn
+26.2.0 carries an HTTP/2 security fix, which does not apply here (this tool
+serves cleartext HTTP/1 behind your proxy), and is the newest release on
+PyPI. The HTTP/1 chunked-body hardening announced for 26.2.1 is not
+published to PyPI at the time of this release and is not pinned from a git
+tag on purpose. fpdf2 2.8.9's security items concern SVG handling, which
+this tool never passes to it; the bump is hygiene.
+
 ## v0.9.928 -- 2026-10-10
 
 v0.9.928 — one mail per outage, and a narrower replication key
