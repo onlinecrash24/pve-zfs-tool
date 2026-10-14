@@ -43,6 +43,18 @@ jobs:
       - name: Run pytest
         run: pytest
 
+      # Known vulnerabilities in the pinned runtime dependencies and their
+      # transitives, checked at source level before any image is built.
+      #
+      # Advisory on dev: a new upstream advisory must not block the very
+      # branch where the bump lands. A gate on tag builds: a release does
+      # not ship a known, fixable vulnerability. What this cannot see is the
+      # Debian base layer and anything vendored inside another package --
+      # that remains the image scan's job.
+      - name: Audit dependencies (pip-audit)
+        run: pip-audit -r requirements.txt --progress-spinner off
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
   build-and-push:
     needs: test          # gate the image build on green tests
     runs-on: ubuntu-latest

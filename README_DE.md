@@ -367,6 +367,21 @@ pve-zfs-tool/
         └── js/i18n.js       # EN/DE-Übersetzungen
 ```
 
+## Entwicklung
+
+```bash
+pip install -r requirements-dev.txt
+pytest                              # die Testsuite, keine Hosts nötig
+pip-audit -r requirements.txt       # bekannte Schwachstellen in den gepinnten Abhängigkeiten
+```
+
+CI führt beides aus. Das Audit ist auf dem `dev`-Branch informativ und bei
+Release-Tags ein Gate -- ein Release liefert nie eine bekannte, behebbare
+Schwachstelle aus. Geprüft werden die Python-Abhängigkeiten auf
+Quellcode-Ebene; die Debian-Basisschicht und alles, was in einem anderen Paket
+einvendort ist, bleiben Sache eines Image-Scans (Trivy o. ä. gegen
+`ghcr.io/onlinecrash24/pve-zfs-tool`).
+
 ## Lizenz
 
 MIT

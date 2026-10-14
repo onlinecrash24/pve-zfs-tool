@@ -364,6 +364,20 @@ pve-zfs-tool/
         └── js/i18n.js       # EN/DE translations
 ```
 
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest                              # the test suite, no hosts needed
+pip-audit -r requirements.txt       # known vulnerabilities in the pinned dependencies
+```
+
+CI runs both. The audit is advisory on the `dev` branch and a gate on release
+tags, so a release never ships a known, fixable vulnerability. It checks the
+Python dependency set at source level; the Debian base layer and anything
+vendored inside another package are the image scan's job (Trivy or similar
+against `ghcr.io/onlinecrash24/pve-zfs-tool`).
+
 ## License
 
 MIT
