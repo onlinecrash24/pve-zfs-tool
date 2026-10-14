@@ -1237,6 +1237,78 @@ def api_pve_guest_snapshots():
 
 
 # ---------------------------------------------------------------------------
+# API: Recovery guest from a snapshot
+# ---------------------------------------------------------------------------
+
+@app.route("/api/recovery/preview")
+def api_recovery_preview():
+    """What a recovery guest of this VM/CT would consist of: disks, usable
+    snapshot labels, recovery root and storage, a free VMID. Read-only."""
+    from app.recovery_guest import preview
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify(preview(host, request.args.get("vmid", ""),
+                           request.args.get("type", "qemu")))
+
+
+@app.route("/api/recovery/list")
+def api_recovery_list():
+    """Guests on the host that are recovery guests (carry the marker)."""
+    from app.recovery_guest import list_recovery_guests
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    return jsonify({"guests": list_recovery_guests(host)})
+
+
+@app.route("/api/recovery/create", methods=["POST"])
+def api_recovery_create():
+    """Clone every disk of the guest at one snapshot label into <pool>/clone,
+    register the storage, write a config without NIC and with onboot 0.
+    Runs as a task; the guest is not started."""
+    from app.recovery_guest import create_async
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    vmid = str(data.get("vmid") or "").strip()
+    snapshot = str(data.get("snapshot") or "").strip()
+    if not vmid or not snapshot:
+        return jsonify({"success": False, "error": "vmid and snapshot required"}), 400
+    try:
+        task_id = create_async(host, vmid, str(data.get("type") or "qemu"), snapshot,
+                               str(data.get("new_vmid") or ""))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    audit_log("recovery.create", target=vmid, host=host["address"], success=True,
+              details={"task_id": task_id, "snapshot": snapshot,
+                       "new_vmid": str(data.get("new_vmid") or "")})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/recovery/destroy", methods=["POST"])
+def api_recovery_destroy():
+    """Destroy a recovery guest and its clones. Refuses any guest without
+    the marker or with a disk outside the recovery root."""
+    from app.recovery_guest import destroy_async
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    vmid = str(data.get("vmid") or "").strip()
+    if not vmid:
+        return jsonify({"success": False, "error": "vmid required"}), 400
+    try:
+        task_id = destroy_async(host, vmid, str(data.get("type") or "qemu"))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    audit_log("recovery.destroy", target=vmid, host=host["address"], success=True,
+              details={"task_id": task_id})
+    return jsonify({"success": True, "task_id": task_id})
+
+
+# ---------------------------------------------------------------------------
 # API: File-Level Restore (LXC)
 # ---------------------------------------------------------------------------
 

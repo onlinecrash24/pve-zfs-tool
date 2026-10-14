@@ -34,6 +34,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Guest-Übersicht** -- Alle VMs und LXC-Container mit Status
 - **Lifecycle-Steuerung** -- Start, sauberes Herunterfahren, Neustart und harter Stopp pro Gast (statusabhängige Buttons, Bestätigung bei eingreifenden Aktionen, im Audit-Log erfasst)
 - **Per-Guest-Snapshots** -- ZFS-Snapshots zu einer bestimmten VM bzw. Container anzeigen
+- **Recovery-Gast aus Snapshot** -- Eine ganze VM oder einen Container so hochbringen, wie er zu einem Zeitpunkt war: jede Disk wird zu einem Snapshot-Label nach `<pool>/clone` geklont (gleicher Pool, kein zusätzlicher Platz), der Storage registriert und ein neuer Gast mit der originalen Hardware geschrieben, aber ohne Netzwerkkarte, mit `onboot 0` und neuer UUID -- nicht gestartet. Ein Marker in der Config kennzeichnet ihn; **Aufräumen** löscht Gast und Clones und meldet, ob die Ursprungs-Snapshots wieder frei sind. Jeder Gast ohne Marker oder mit einer Disk außerhalb des Recovery-Roots wird verweigert
 - **Smart-Rollback** -- Stoppt VM/LXC automatisch vor dem Rollback und startet sie danach neu
 - **Replikations-Status** -- Anzeige pro Gast in der Liste: grün (alle Disks getaggt & kein Rückstand), gelb (nur manche Disks getaggt oder Quelle im Rückstand), rot (nicht repliziert); abgeleitet aus den `bashclub:zsync`-Tags plus dem Replikations-Monitor
 - **LXC-Datei-Restore** -- Einzelne Dateien aus LXC-Container-Snapshots durchsuchen und wiederherstellen:

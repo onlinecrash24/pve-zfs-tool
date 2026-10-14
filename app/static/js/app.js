@@ -2646,14 +2646,17 @@ function _backupUnreadableNote(bk) {
 async function viewGuests() {
     if (!requireHost()) return;
     setContent(loading());
-    const [guests, pools, repl, bk] = await Promise.all([
+    const [guests, pools, repl, bk, rg] = await Promise.all([
         API.get(`/api/pve/guests?host=${currentHost}`),
         API.get(`/api/pools?host=${currentHost}`),
         API.get(`/api/pve/guest-replication?host=${encodeURIComponent(currentHost)}`).catch(() => ({ states: {} })),
         API.get(`/api/pve/guest-backups?host=${encodeURIComponent(currentHost)}`).catch(() => ({ states: {} })),
+        API.get(`/api/recovery/list?host=${encodeURIComponent(currentHost)}`).catch(() => ({ guests: [] })),
     ]);
     const replStates = (repl && repl.states) || {};
     const bkStates = (bk && bk.states) || {};
+    const recovery = {};
+    for (const r of ((rg && rg.guests) || [])) recovery[String(r.vmid)] = r;
 
     const all = [...(guests.vms || []), ...(guests.cts || [])];
     const container = h("div");
@@ -2689,7 +2692,12 @@ async function viewGuests() {
         for (const g of all) {
             const tr = h("tr");
             tr.appendChild(h("td", {}, h("strong", {}, g.vmid)));
-            tr.appendChild(h("td", {}, g.name));
+            const rgInfo = recovery[String(g.vmid)];
+            tr.appendChild(h("td", {}, [
+                document.createTextNode(g.name),
+                rgInfo ? h("span", { className: "badge badge-degraded", style: "margin-left:6px;font-size:9px",
+                    title: t("rg_badge_hint", rgInfo.origin, rgInfo.snapshot) }, t("rg_badge")) : null,
+            ]));
             tr.appendChild(h("td", {}, g.type === "qemu" ? "VM" : "LXC"));
             const sTd = h("td"); sTd.appendChild(statusBadge(g.status)); tr.appendChild(sTd);
             const rTd = h("td"); rTd.appendChild(_replBadge(replStates[String(g.vmid)])); tr.appendChild(rTd);
@@ -2718,6 +2726,13 @@ async function viewGuests() {
                 className: "btn btn-sm",
                 onClick: () => createGuestSnapshot(g, pools),
             }, t("new_snapshot")));
+            if (rgInfo) {
+                bg.appendChild(h("button", { className: "btn btn-sm btn-danger",
+                    onClick: () => cleanupRecoveryGuest(g, rgInfo) }, t("rg_cleanup_btn")));
+            } else {
+                bg.appendChild(h("button", { className: "btn btn-sm",
+                    onClick: () => openRecoveryModal(g) }, t("rg_btn")));
+            }
             actTd.appendChild(bg);
             tr.appendChild(actTd);
             tbody.appendChild(tr);
@@ -2789,6 +2804,115 @@ async function createGuestSnapshot(guest, pools) {
     if (!snapName) return;
     const r = await API.post("/api/snapshots/create", { host: currentHost, dataset, name: snapName });
     toast(r.success ? t("snapshot_created") : (r.stderr || t("check_dataset_path")), r.success ? "success" : "error");
+}
+
+
+// ---------------------------------------------------------------------------
+// Recovery guest from a snapshot
+// ---------------------------------------------------------------------------
+// Every disk of the guest cloned at one snapshot label into <pool>/clone, a
+// config without NIC and with onboot 0, not started. The clones pin the
+// origin snapshots until the recovery guest is cleaned up, which is why the
+// table shows recovery guests with their own badge and a cleanup button.
+
+async function openRecoveryModal(g) {
+    const label = `${g.type === "qemu" ? "VM" : "LXC"} ${g.vmid} (${g.name})`;
+    const rendered = await openModalAsync(t("rg_title", label), async () => {
+        const pv = await API.get(`/api/recovery/preview?host=${encodeURIComponent(currentHost)}` +
+            `&vmid=${encodeURIComponent(g.vmid)}&type=${encodeURIComponent(g.type)}`);
+        if (!pv.success) return `<p style="color:var(--danger)">${escapeHtml(pv.error || t("failed"))}</p>`;
+        const mono = "font-family:monospace;font-size:12px";
+        let html = `<p style="margin-bottom:10px">${escapeHtml(t("rg_intro"))}</p>`;
+        html += `<table style="margin-bottom:10px"><thead><tr><th>${escapeHtml(t("rg_disk"))}</th><th>${escapeHtml(t("dataset_label"))}</th><th>${escapeHtml(t("used"))}</th></tr></thead><tbody>`;
+        for (const d of pv.disks) {
+            html += `<tr><td style="${mono}">${escapeHtml(d.key)}</td><td style="${mono}">${escapeHtml(d.dataset)}</td><td>${escapeHtml(d.used || "")}</td></tr>`;
+        }
+        html += `</tbody></table>`;
+        for (const b of pv.blockers) {
+            const key = b.startsWith("cross_pool") ? "rg_cross_pool" : b.startsWith("unresolved") ? "rg_unresolved" : "rg_no_disks";
+            html += `<p style="color:var(--danger)">${escapeHtml(t(key))} <span style="${mono}">${escapeHtml(b.split(": ").slice(1).join(": "))}</span></p>`;
+        }
+        const partial = pv.snapshots.filter(s => !s.on_all);
+        if (pv.usable.length) {
+            html += `<label style="display:block;margin-top:8px">${escapeHtml(t("rg_snapshot"))}
+                <select id="rg-snap" style="width:100%;margin-top:4px;${mono}">` +
+                pv.usable.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("") +
+                `</select></label>`;
+        } else {
+            html += `<p style="color:var(--danger);margin-top:8px">${escapeHtml(t("rg_snapshot_none"))}</p>`;
+        }
+        if (partial.length) {
+            html += `<details style="margin-top:6px;font-size:12px;color:var(--text-secondary)"><summary>${escapeHtml(t("rg_snapshot_partial", partial.length))}</summary>` +
+                partial.map(s => `<div style="${mono}">${escapeHtml(s.name)} — ${escapeHtml(t("rg_missing_on", s.missing.join(", ")))}</div>`).join("") +
+                `</details>`;
+        }
+        html += `<label style="display:block;margin-top:10px">${escapeHtml(t("rg_new_vmid"))}
+            <input id="rg-vmid" type="text" inputmode="numeric" pattern="[0-9]*" value="${escapeHtml(pv.next_vmid || "")}" style="width:120px;margin-left:8px"></label>`;
+        html += `<p style="margin-top:10px;font-size:12px;color:var(--text-secondary)">` +
+            escapeHtml(t("rg_storage_line", pv.root, pv.storage)) + " " +
+            escapeHtml(pv.storage_exists ? t("rg_storage_existing") : t("rg_storage_new")) + `</p>`;
+        html += `<p style="font-size:12px;color:var(--text-secondary)">${escapeHtml(t("rg_no_nic_note"))}</p>`;
+        html += `<p style="font-size:12px;color:var(--text-secondary)">${escapeHtml(t("rg_pin_note"))}</p>`;
+        const can = pv.usable.length && !pv.blockers.length;
+        html += `<div style="margin-top:12px"><button class="btn btn-primary" id="rg-create" ${can ? "" : "disabled"}>${escapeHtml(t("rg_create"))}</button></div>`;
+        html += `<div id="rg-progress" style="margin-top:10px;${mono};white-space:pre-wrap"></div>`;
+        return html;
+    });
+    if (!rendered) return;
+    const btn = document.getElementById("rg-create");
+    if (!btn) return;
+    btn.onclick = async () => {
+        const snap = (document.getElementById("rg-snap") || {}).value || "";
+        const newVmid = (document.getElementById("rg-vmid") || {}).value || "";
+        if (!snap) return;
+        btn.disabled = true;
+        const prog = document.getElementById("rg-progress");
+        const r = await API.post("/api/recovery/create", {
+            host: currentHost, vmid: g.vmid, type: g.type, snapshot: snap, new_vmid: newVmid.trim(),
+        });
+        if (!r.success || !r.task_id) {
+            toast(r.error || t("rg_failed"), "error");
+            btn.disabled = false;
+            return;
+        }
+        toast(t("rg_started"), "info");
+        pollReplicationTask(r.task_id, {
+            onTick: (rec) => { if (prog) prog.textContent = (rec.log || []).map(l => l.msg).join("\n"); },
+            onDone: (rec) => {
+                const res = rec.result || {};
+                if (prog) prog.textContent = (rec.log || []).map(l => l.msg).join("\n");
+                if (res.success) {
+                    toast(t("rg_done", res.new_vmid), "success");
+                    closeModal();
+                    viewGuests();
+                } else {
+                    toast(res.error || t("rg_failed"), "error");
+                    if (prog) prog.textContent += "\n" + (res.error || "");
+                    btn.disabled = false;
+                }
+            },
+            onError: (e) => { toast(e || t("rg_failed"), "error"); btn.disabled = false; },
+        });
+    };
+}
+
+async function cleanupRecoveryGuest(g, info) {
+    const label = `${g.type === "qemu" ? "VM" : "LXC"} ${g.vmid} (${g.name})`;
+    if (!confirm(t("rg_cleanup_confirm", label, info.origin || "?", info.snapshot || "?"))) return;
+    const r = await API.post("/api/recovery/destroy", { host: currentHost, vmid: g.vmid, type: g.type });
+    if (!r.success || !r.task_id) { toast(r.error || t("rg_cleanup_failed"), "error"); return; }
+    toast(t("rg_cleanup_started"), "info");
+    pollReplicationTask(r.task_id, {
+        onDone: (rec) => {
+            const res = rec.result || {};
+            if (!res.success) { toast(res.error || t("rg_cleanup_failed"), "error"); return; }
+            const held = Object.keys(res.still_held || {});
+            if (held.length) toast(t("rg_cleanup_pinned", held.join(", ")), "warning");
+            else toast(t("rg_cleanup_done", g.vmid), "success");
+            viewGuests();
+        },
+        onError: (e) => toast(e || t("rg_cleanup_failed"), "error"),
+    });
 }
 
 // Global guest snap actions
