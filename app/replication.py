@@ -1,7 +1,7 @@
 """bashclub-zsync replication integration.
 
 Manages the bashclub-zsync ZFS replication tool (pull-based, cron-driven) on
-remote hosts via SSH. Upstream: https://gitlab.bashclub.org/bashclub/zsync/
+remote hosts via SSH. Upstream: https://code.bashclub.org/bashclub/zsync
 
 Scope (Phase 1):
   * Detect install status + version
@@ -57,6 +57,51 @@ def _extract_ip(source: str) -> str:
     if "@" in s:
         s = s.split("@", 1)[1]
     return s
+
+
+# zsync's local mode -- an empty ``source``, replication without SSH -- was
+# removed upstream right after 1.0.19 ("source is empty" is a hard error on
+# main since 2026-10-15). Configs that rely on it keep working on 1.0.19 and
+# older and break with the next package update; the overview says which.
+LOCAL_MODE_LAST_VERSION = (1, 0, 19)
+
+# ``bashclub-zsync -v`` is NOT a version flag: ``-v`` is unknown to its getopts,
+# which prints the usage (version included) to stderr and exits 1 -- so the
+# old probe never saw a version at all. The package knows it, for every
+# release since 1.0.0; a manual install of 1.0.18 or older still carries a
+# literal __version__ line, and 1.0.19+ reads it from the package too.
+VERSION_PROBE = (
+    f"command -v {BINARY_NAME} 2>/dev/null && {{ "
+    f"dpkg-query -W -f='${{Version}}\\n' {BINARY_NAME} 2>/dev/null || "
+    f"grep -m1 -o '__version__=v[0-9][0-9.]*' \"$(command -v {BINARY_NAME})\" | cut -d= -f2; }}"
+)
+
+
+def parse_zsync_version(text: str) -> Optional[str]:
+    """``1.0.19``, ``v1.0.18``, ``1.0.19-1`` -> ``1.0.19``; None if nothing fits."""
+    m = re.search(r"\bv?(\d+\.\d+(?:\.\d+)?)", text or "")
+    return m.group(1) if m else None
+
+
+def version_tuple(version: Optional[str]) -> Optional[tuple]:
+    v = parse_zsync_version(version or "")
+    return tuple(int(p) for p in v.split(".")) if v else None
+
+
+def local_mode_removed(version: Optional[str]) -> Optional[bool]:
+    """True if this zsync no longer runs an empty-source config; None if the
+    version is unknown (then the overview warns, it does not condemn)."""
+    vt = version_tuple(version)
+    return None if vt is None else vt > LOCAL_MODE_LAST_VERSION
+
+
+def installed_version(host: Dict[str, Any], cache_ttl: int = 300) -> Optional[str]:
+    """The installed bashclub-zsync version, or None when not installed."""
+    r = run_command(host, VERSION_PROBE, timeout=10, cache_ttl=cache_ttl)
+    if not r.get("success"):
+        return None
+    lines = [ln.strip() for ln in (r.get("stdout") or "").splitlines() if ln.strip()]
+    return parse_zsync_version(lines[1]) if len(lines) >= 2 else None
 
 
 def _safe_filename(name: str) -> str:
@@ -198,15 +243,14 @@ def get_status(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, 
     out["repo_present"] = "__REPO__" in (r.get("stdout") or "")
 
     # Installed?
-    r = run_command(host, f"command -v {BINARY_NAME} 2>/dev/null && {BINARY_NAME} -v 2>/dev/null | head -n 1", timeout=10)
+    r = run_command(host, VERSION_PROBE, timeout=10)
     if r["success"] and r["stdout"].strip():
         lines = [ln for ln in r["stdout"].splitlines() if ln.strip()]
         out["installed"] = True
-        # Second line (if any) is the version banner; first is the path.
+        # First line is the path; the second, if any, the package version.
         if len(lines) >= 2:
-            out["version"] = lines[1].strip()
-        elif len(lines) == 1 and "/" not in lines[0]:
-            out["version"] = lines[0].strip()
+            out["version"] = parse_zsync_version(lines[1])
+        out["local_mode_removed"] = local_mode_removed(out["version"])
 
     # Config
     r = run_command(host, f"cat {shlex.quote(cfg_path)} 2>/dev/null", timeout=10)
@@ -631,7 +675,7 @@ def list_configs(host: Dict[str, Any], cache_ttl: int = 0) -> Dict[str, Any]:
             elif line == "__END__":
                 if cur:
                     parsed = _parse_config("\n".join(buf))
-                    src = parsed["values"].get("source", "")
+                    src = (parsed["values"].get("source") or "").strip()
                     canonical = config_path_for(src) if src else cur
                     out.append({
                         "path": cur,
@@ -639,6 +683,9 @@ def list_configs(host: Dict[str, Any], cache_ttl: int = 0) -> Dict[str, Any]:
                         "target": parsed["values"].get("target", ""),
                         "canonical_path": canonical,
                         "needs_import": cur != canonical,
+                        # zsync's local mode: no SSH, replication on one host.
+                        # Removed upstream after 1.0.19 -- see LOCAL_MODE_LAST_VERSION.
+                        "local_mode": not src,
                     })
                 cur = None
             elif cur is not None:
@@ -1363,7 +1410,10 @@ def import_config_preview(host: Dict[str, Any], path: str) -> Dict[str, Any]:
     values = dict(cfg["values"])
     source = (values.get("source") or "").strip()
     if not _extract_ip(source):
-        return {"success": False, "error": "config has no usable 'source' (expected user@host)"}
+        return {"success": False, "error": "config has no 'source' -- it relies on zsync's local "
+                                           "mode, which upstream removed after 1.0.19. Set "
+                                           "source=root@<this host's address> in the file, "
+                                           "run it once, then import"}
     canonical = config_path_for(source)
     if canonical == path:
         return {"success": False, "error": "already at the tool's path; open it instead"}

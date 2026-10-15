@@ -509,6 +509,18 @@ def get_snapshot_space(host, dataset=None):
             "total": sum(s for _, s in rows)}
 
 
+# What counts as an automatic snapshot: zfs-auto-snapshot's own prefix, the
+# older sanoid-style "autosnap", and the names bashclub-zsync's internal
+# engine (remote-snapshot-manager) writes -- "<label>-YYYY-MM-DD-HHMM", the
+# default for new zsync configs since 1.0.19. The UI hides the delete button
+# on these and badges them; the AI report counts them as auto.
+_AUTO_SNAP_RE = re.compile(r"^(?:zfs-auto-snap|autosnap)|^[A-Za-z0-9_]+-\d{4}-\d{2}-\d{2}-\d{4}$")
+
+
+def is_auto_snapshot_name(name):
+    return bool(_AUTO_SNAP_RE.search(name or ""))
+
+
 def get_snapshots(host, dataset=None):
     if dataset is not None:
         try:

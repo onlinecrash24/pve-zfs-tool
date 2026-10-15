@@ -11,6 +11,7 @@ import logging
 import urllib.request
 import urllib.error
 from app.timezone import now as tz_now
+from app.zfs_commands import is_auto_snapshot_name
 
 DATA_DIR = "/app/data"
 AI_CONFIG_FILE = os.path.join(DATA_DIR, "ai_config.json")
@@ -444,7 +445,7 @@ def collect_host_data(host_address=None):
                 if creation:
                     snap_by_dataset[ds]["oldest"] = creation
 
-                is_auto = sname.startswith("zfs-auto-snap") or sname.startswith("autosnap")
+                is_auto = is_auto_snapshot_name(sname)
                 if is_auto:
                     auto_count += 1
                     snap_by_dataset[ds]["auto"] += 1
