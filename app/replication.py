@@ -1204,6 +1204,37 @@ def list_tagged_datasets(host: Dict[str, Any], tag: str = "bashclub:zsync") -> D
 _GUEST_DISK_RE = re.compile(r"(?:^|/)(?:vm|subvol|base|basevol)-(\d+)-disk-\d+$")
 
 
+def replication_targets(host: Dict[str, Any]) -> List[str]:
+    """The replica roots on this host: the ``target`` of every zsync config,
+    placeholders left out. Datasets under them are copies of other guests."""
+    out = []
+    for c in list_configs(host, cache_ttl=30).get("configs") or []:
+        t = (c.get("target") or "").strip().strip("/")
+        if t and "/" in t and t.lower() != "pool/dataset":
+            out.append(t)
+    return out
+
+
+def without_replicas(datasets: List[Dict[str, Any]], targets: List[str]) -> List[Dict[str, Any]]:
+    """Drop the datasets that live under a replica root.
+
+    A replica is received with ``-x bashclub:zsync``, so it never carries the
+    tag -- and it is named after the SOURCE's guest. On pve1,
+    ``tankhdd/repl/tank/data/vm-111-disk-0`` is another host's VM 111; counted
+    next to the local ``subvol-111-disk-0`` it made the local guest look
+    half-replicated ("1/2"). Only datasets outside every target are guests
+    of this host.
+    """
+    roots = [t.strip("/") for t in (targets or []) if t]
+    out = []
+    for d in datasets or []:
+        name = d.get("name", "") or ""
+        if any(name == r or name.startswith(r + "/") for r in roots):
+            continue
+        out.append(d)
+    return out
+
+
 def guest_replication_map(datasets: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Group a list_tagged_datasets() ``datasets`` list by VMID.
 

@@ -1133,12 +1133,18 @@ def api_pve_guest_replication():
     yellow = only some disks tagged, or the source's replication is behind
     red    = no disk tagged (not replicated)
     """
-    from app.replication import list_tagged_datasets, guest_replication_states
+    from app.replication import (list_tagged_datasets, guest_replication_states,
+                                 replication_targets, without_replicas)
     from app.replication_monitor import source_health_map
     host, err, code = _require_host()
     if err:
         return err, code
-    datasets = list_tagged_datasets(host).get("datasets", [])
+    # Replicas this host holds for other sources are named after THEIR guests;
+    # left in, a foreign VM 111 under tankhdd/repl counts as a disk of the
+    # local 111 and the local guest reads "partial". Only this host's own
+    # datasets are guests of this host.
+    datasets = without_replicas(list_tagged_datasets(host).get("datasets", []),
+                                replication_targets(host))
     src_status = source_health_map().get(host.get("address"))
     states = guest_replication_states(datasets, src_status)
     return jsonify({"states": states, "source_status": src_status})
