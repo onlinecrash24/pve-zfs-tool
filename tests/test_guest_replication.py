@@ -43,6 +43,39 @@ def test_map_empty():
     assert r.guest_replication_map(None) == {}
 
 
+# --- replicas of other hosts' guests do not count ----------------------------
+
+def test_a_foreign_replica_with_the_same_vmid_does_not_make_the_local_guest_partial():
+    # pve1, verbatim: the local CT 111 is tagged; tankhdd/repl holds another
+    # host's VM 111 (received without the tag). Read 1/2 = partial before.
+    datasets = [
+        _ds("rpool/data/subvol-111-disk-0", True),
+        _ds("tankhdd/repl/tank/data/vm-111-disk-0", False),
+        _ds("tankhdd/repl", False),
+    ]
+    assert r.guest_replication_map(datasets)["111"]["state"] == "partial"      # the bug
+    kept = r.without_replicas(datasets, ["tankhdd/repl"])
+    assert [d["name"] for d in kept] == ["rpool/data/subvol-111-disk-0"]
+    assert r.guest_replication_map(kept)["111"] == {"total": 1, "tagged": 1, "state": "full"}
+
+
+def test_without_replicas_matches_on_the_dataset_boundary():
+    datasets = [_ds("tank/repl/x/vm-1-disk-0", False), _ds("tank/replica/vm-2-disk-0", True)]
+    kept = r.without_replicas(datasets, ["tank/repl"])
+    assert [d["name"] for d in kept] == ["tank/replica/vm-2-disk-0"]   # "tank/repl" is not a prefix of "tank/replica"
+    assert r.without_replicas(datasets, []) == datasets
+
+
+def test_replication_targets_come_from_the_configs_without_the_placeholder(monkeypatch):
+    monkeypatch.setattr(r, "list_configs", lambda h, cache_ttl=0: {"configs": [
+        {"path": "/etc/bashclub/195.201.84.113.conf", "target": "tankhdd/repl"},
+        {"path": "/etc/bashclub/46.4.76.216.conf", "target": "tankhdd/repl"},
+        {"path": "/etc/bashclub/zsync.conf", "target": "pool/dataset"},
+        {"path": "/etc/bashclub/odd.conf", "target": ""},
+    ]})
+    assert r.replication_targets({"address": "h"}) == ["tankhdd/repl", "tankhdd/repl"]
+
+
 # --- guest_replication_states ---------------------------------------------
 
 def _states(datasets, src=None):
