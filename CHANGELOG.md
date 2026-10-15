@@ -7,6 +7,26 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.934 -- 2026-10-15
+
+v0.9.934 — a foreign replica is not a local disk
+
+Field report. On a host that holds replicas for other sources, the VM/CT
+page marked local guests as "incompletely replicated -- not all disks
+tagged (1/2)" although every disk of theirs was tagged. The second "disk"
+was a replica of another host's guest with the same VMID, for example
+tankhdd/repl/tank/data/vm-111-disk-0 next to the local subvol-111-disk-0.
+zsync receives a replica with -x bashclub:zsync, so it never carries the
+tag, and it is named after the source's guest; grouped by VMID it looked
+like an untagged second disk of the local guest.
+
+The per-guest replication state now counts only datasets outside every
+zsync target of the host (the target= of each config in /etc/bashclub,
+the placeholder left out). A same-host pair falls under the same rule.
+The backup column has its own count and was not affected.
+
+The report's three shell lines are the test.
+
 ## v0.9.933 -- 2026-10-15
 
 v0.9.933 — "snapshot clone", not "recovery guest"
