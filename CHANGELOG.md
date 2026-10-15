@@ -7,6 +7,25 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.933 -- 2026-10-15
+
+v0.9.933 — "snapshot clone", not "recovery guest"
+
+A wording release. The guest-from-a-snapshot feature of v0.9.931 is what
+Proxmox itself calls a linked clone, taken at a point in time instead of
+now; "recovery guest" named one use of it and hid the mechanism. On the
+VM/CT page the button is now "Snapshot clone" (DE: "Snapshot-Klon"), the
+badge on such a guest reads "clone", the cleanup button "Remove clone",
+and the guest's name ends in -clone so the word recurs in the PVE UI.
+The dialog texts say "linked clone" where they describe what is made.
+
+The marker line in the guest config is "pve-zfs-tool-clone" for guests
+created from now on. The marker v0.9.931 wrote, "pve-zfs-tool-recovery",
+is still recognised by the listing and by cleanup, so guests created
+under the old name stay removable through the tool.
+
+No change in behaviour, commands or API.
+
 ## v0.9.932 -- 2026-10-15
 
 v0.9.932 — keeping up with bashclub-zsync 1.0.19
