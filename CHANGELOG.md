@@ -7,6 +7,37 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.932 -- 2026-10-15
+
+v0.9.932 — keeping up with bashclub-zsync 1.0.19
+
+bashclub-zsync 1.0.19 was released on 2026-10-15, followed the same day by
+a refactor on upstream main that turns an empty `source` -- zsync's local
+mode, replication on one host without SSH -- into a hard error. Nothing
+in this tool breaks with either; five adjustments follow upstream, and
+none of them needs the new version. A host on 1.0.18 is served exactly as
+before.
+
+The installed zsync version is read from the package and shown in the
+setup badge. This fixes an old blind spot: the previous probe called
+`bashclub-zsync -v`, which is not a version flag -- zsync prints its usage
+to stderr and exits 1 -- so no version was ever read.
+
+A config without a source is flagged in the pair overview: a warning on a
+zsync up to 1.0.19 (it still runs, and stops with the next package
+update), broken on anything newer, with the fix in the tooltip. The import
+preview, which already refused such a file, now says why.
+
+New configs default to the internal snapshot engine, as upstream does
+since 1.0.19; the field hint explains both engines and that the setting
+only matters with keep > 1. The internal engine names its snapshots
+<label>-YYYY-MM-DD-HHMM; the snapshot views and the AI report count those
+as automatic now, so they get the badge and lose the delete button like
+zfs-auto-snapshot's own.
+
+Not verified against a live host: the version badge and the local-mode
+warning are best checked on a target that runs 1.0.19.
+
 ## v0.9.931 -- 2026-10-14
 
 v0.9.931 — recovery guest from a snapshot, and a "held by" badge

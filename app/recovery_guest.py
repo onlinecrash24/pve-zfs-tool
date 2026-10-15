@@ -46,7 +46,10 @@ from app.tasks import start_task
 from app.validators import validate_vmid, validate_vm_type
 from app.zfs_commands import CLONE_PROPS
 
-MARKER = "pve-zfs-tool-recovery"
+# The marker was "pve-zfs-tool-recovery" in v0.9.931; guests made then carry
+# it and must still be recognised by cleanup. New guests get the clone wording.
+MARKER = "pve-zfs-tool-clone"
+LEGACY_MARKERS = ("pve-zfs-tool-recovery",)
 RECOVERY_LEAF = "clone"
 HOLD_TAG = "pve-zfs-tool-recovery"
 
@@ -179,7 +182,7 @@ def parse_marker(text: str) -> Optional[Dict[str, str]]:
         if not line.startswith("#"):
             continue
         dec = unquote(line[1:])
-        if not dec.startswith(MARKER):
+        if not dec.startswith((MARKER,) + LEGACY_MARKERS):
             continue
         fields = dict(re.findall(r"(\w+)=(\S+)", dec))
         return {"origin": fields.get("origin", ""), "snapshot": fields.get("snapshot", ""),
@@ -213,10 +216,10 @@ def build_recovery_config(text: str, gtype: str, new_vmid: str,
                 out.append(f"{key}: {volid_map[volid]}{rest}")
                 continue
             if key == "name" and gtype != "lxc":
-                out.append(f"name: {value.strip()}-recovery")
+                out.append(f"name: {value.strip()}-clone")
                 continue
             if key == "hostname" and gtype == "lxc":
-                out.append(f"hostname: {value.strip()}-recovery")
+                out.append(f"hostname: {value.strip()}-clone")
                 continue
         out.append(s)
     out.append("onboot: 0")
@@ -291,7 +294,7 @@ def preview(host: Dict[str, Any], vmid: str, gtype: str) -> Dict[str, Any]:
     if not cfg.get("success"):
         return {"success": False, "error": cfg.get("error", "no guest config")}
     if parse_marker(cfg["content"]):
-        return {"success": False, "error": "this guest is itself a recovery guest"}
+        return {"success": False, "error": "this guest is itself a snapshot clone"}
     disc = discover_guest_disks(host, vmid, gtype, cfg["content"])
     disks = disc.get("disks") or []
     blockers: List[str] = []
@@ -325,7 +328,8 @@ def preview(host: Dict[str, Any], vmid: str, gtype: str) -> Dict[str, Any]:
 def list_recovery_guests(host: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Guests on the host that carry the marker -- for the badge and the
     cleanup button. One grep over both config directories."""
-    r = run_command(host, f"grep -l {shlex.quote(MARKER)} /etc/pve/qemu-server/*.conf "
+    pattern = "|".join(re.escape(m) for m in (MARKER,) + LEGACY_MARKERS)
+    r = run_command(host, f"grep -lE {shlex.quote(pattern)} /etc/pve/qemu-server/*.conf "
                           f"/etc/pve/lxc/*.conf 2>/dev/null", timeout=15)
     out = []
     for path in (r.get("stdout") or "").split():
@@ -380,7 +384,7 @@ def create_job(progress: Callable, host: Dict[str, Any], vmid: str, gtype: str,
     if not cfg.get("success"):
         return {"success": False, "error": cfg.get("error", "no guest config")}
     if parse_marker(cfg["content"]):
-        return {"success": False, "error": "this guest is itself a recovery guest"}
+        return {"success": False, "error": "this guest is itself a snapshot clone"}
     disc = discover_guest_disks(host, vmid, gtype, cfg["content"])
     if not disc.get("success") or not disc.get("disks"):
         return {"success": False, "error": "not every disk resolves to a ZFS dataset: "
@@ -506,7 +510,7 @@ def destroy_job(progress: Callable, host: Dict[str, Any], vmid: str,
         return {"success": False, "error": cfg.get("error", "no guest config")}
     mk = parse_marker(cfg["content"])
     if not mk:
-        return {"success": False, "error": f"VMID {vmid} is not a recovery guest "
+        return {"success": False, "error": f"VMID {vmid} is not a snapshot clone "
                                            f"(no {MARKER} marker) -- refusing"}
     disc = discover_guest_disks(host, vmid, gtype, cfg["content"])
     disks = disc.get("disks") or []

@@ -91,7 +91,7 @@ def test_hardware_is_kept_and_disks_point_at_the_clones():
 def test_the_copy_is_a_new_machine_that_stays_down():
     out = _cfg(QEMU_CFG, "qemu", QEMU_MAP)
     assert "onboot: 0" in out and "onboot: 1" not in out
-    assert "name: web-recovery" in out
+    assert "name: web-clone" in out
     assert "uuid=11111111-2222-3333-4444-555555555555" not in out
     assert re.search(r"^smbios1: uuid=[0-9a-f-]{36}$", out, re.M)
     assert re.search(r"^vmgenid: [0-9a-f-]{36}$", out, re.M)
@@ -101,7 +101,7 @@ def test_the_copy_is_a_new_machine_that_stays_down():
 def test_the_marker_is_the_first_line_and_round_trips():
     out = _cfg(QEMU_CFG, "qemu", QEMU_MAP)
     first = out.splitlines()[0]
-    assert first.startswith("#pve-zfs-tool-recovery origin=100 snapshot=zfs-auto-snap_daily-2026-10-13-0025 created=")
+    assert first.startswith("#pve-zfs-tool-clone origin=100 snapshot=zfs-auto-snap_daily-2026-10-13-0025 created=")
     mk = rg.parse_marker(out)
     assert mk["origin"] == "100" and mk["snapshot"] == "zfs-auto-snap_daily-2026-10-13-0025"
     # PVE re-encodes notes edited in its UI; the marker must survive that
@@ -110,12 +110,19 @@ def test_the_marker_is_the_first_line_and_round_trips():
     assert rg.parse_marker(QEMU_CFG) is None
 
 
+def test_guests_made_under_the_old_marker_are_still_recognised():
+    # v0.9.931 wrote "pve-zfs-tool-recovery"; those guests must stay cleanable.
+    old = "#pve-zfs-tool-recovery origin=100 snapshot=daily created=2026-10-14T10:00:00\ncores: 1\n"
+    mk = rg.parse_marker(old)
+    assert mk and mk["origin"] == "100" and mk["snapshot"] == "daily"
+
+
 def test_lxc_keeps_mountpoints_and_loses_its_nic():
     out = _cfg(LXC_CFG, "lxc", {"local-zfs:subvol-253-disk-0": "rpool-clone:subvol-900-disk-0",
                                 "local-zfs:subvol-253-disk-1": "rpool-clone:subvol-900-disk-1"})
     assert "rootfs: rpool-clone:subvol-900-disk-0,size=8G" in out
     assert "mp0: rpool-clone:subvol-900-disk-1,mp=/data,size=100G" in out
-    assert "hostname: files-recovery" in out
+    assert "hostname: files-clone" in out
     assert "net0" not in out and "unprivileged: 1" in out and "features: nesting=1" in out
     assert "smbios1" not in out and "vmgenid" not in out
 
@@ -272,9 +279,9 @@ def test_create_refuses_a_used_vmid(monkeypatch):
 
 # --- the destroy job -------------------------------------------------------------
 
-RECOVERY_CFG = """#pve-zfs-tool-recovery origin=100 snapshot=daily created=2026-10-14T10:00:00
+RECOVERY_CFG = """#pve-zfs-tool-clone origin=100 snapshot=daily created=2026-10-14T10:00:00
 cores: 4
-name: web-recovery
+name: web-clone
 onboot: 0
 scsi0: rpool-clone:vm-900-disk-0,size=32G
 """
@@ -328,7 +335,7 @@ def test_destroy_reports_an_origin_another_clone_still_holds(monkeypatch):
 def test_destroy_refuses_a_guest_without_the_marker(monkeypatch):
     calls = _fake_recovery_host(monkeypatch, cfg=RECOVERY_CFG.split("\n", 1)[1])
     res = rg.destroy_job(_progress, HOST, "900", "qemu")
-    assert not res["success"] and "not a recovery guest" in res["error"]
+    assert not res["success"] and "not a snapshot clone" in res["error"]
     assert not any(c.startswith(("qm destroy", "zfs destroy", "qm stop")) for c in calls)
 
 
@@ -344,4 +351,4 @@ def test_destroy_refuses_a_marked_guest_whose_disk_is_outside_the_root(monkeypat
 def test_preview_refuses_a_recovery_guest_as_origin(monkeypatch):
     _fake_recovery_host(monkeypatch)
     res = rg.preview(HOST, "900", "qemu")
-    assert not res["success"] and "itself a recovery guest" in res["error"]
+    assert not res["success"] and "itself a snapshot clone" in res["error"]
