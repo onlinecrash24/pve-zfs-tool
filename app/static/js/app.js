@@ -118,6 +118,14 @@ function h(tag, attrs = {}, children = []) {
     return el;
 }
 
+// Automatic snapshots: zfs-auto-snapshot's prefix, sanoid-style "autosnap",
+// and "<label>-YYYY-MM-DD-HHMM" from bashclub-zsync's internal engine (the
+// default for new zsync configs since 1.0.19). Mirrors is_auto_snapshot_name
+// in zfs_commands.py -- the delete button stays hidden on all of them.
+function isAutoSnapshotName(name) {
+    return /^(?:zfs-auto-snap|autosnap)|^[A-Za-z0-9_]+-\d{4}-\d{2}-\d{2}-\d{4}$/.test(name || "");
+}
+
 // A snapshot with dependent clones: shown before the destroy refusal, and the
 // reason zfs-auto-snapshot leaves it alone. Title carries the full list.
 function heldByBadge(snap) {
@@ -1833,7 +1841,7 @@ async function viewSnapshots() {
     statsGrid.appendChild(makeStatCard(t("total_snapshots"), _allSnapshots.length, ""));
     const datasets = [...new Set(_allSnapshots.map(s => s.dataset))];
     statsGrid.appendChild(makeStatCard(t("datasets"), datasets.length, ""));
-    const autoSnaps = _allSnapshots.filter(s => s.snapshot.startsWith("zfs-auto-snap") || s.snapshot.startsWith("autosnap"));
+    const autoSnaps = _allSnapshots.filter(s => isAutoSnapshotName(s.snapshot));
     statsGrid.appendChild(makeStatCard(t("auto_snapshots"), autoSnaps.length, ""));
     container.appendChild(statsGrid);
 
@@ -1948,7 +1956,7 @@ function renderTimeline(snapshots) {
 
         for (let i = 0; i < snaps.length; i++) {
             const snap = snaps[i];
-            const isAuto = snap.snapshot.startsWith("zfs-auto-snap") || snap.snapshot.startsWith("autosnap");
+            const isAuto = isAutoSnapshotName(snap.snapshot);
             const isFirst = i === 0;
 
             const node = h("div", { className: `tl-node ${isFirst ? "tl-node-latest" : ""} ${isAuto ? "tl-node-auto" : "tl-node-manual"}` });
@@ -2056,7 +2064,7 @@ function renderSnapshotTable(snapshots, datasetFilter) {
         bg.appendChild(h("button", { className: "btn btn-sm btn-warning", onClick: () => rollbackSnap(snap) }, t("rollback")));
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => cloneSnap(snap) }, t("clone")));
         bg.appendChild(h("button", { className: "btn btn-sm", onClick: () => diffSnap(snap) }, t("diff")));
-        const isAutoSnap = snap.snapshot.startsWith("zfs-auto-snap") || snap.snapshot.startsWith("autosnap");
+        const isAutoSnap = isAutoSnapshotName(snap.snapshot);
         if (!isAutoSnap) {
             bg.appendChild(h("button", { className: "btn btn-sm btn-danger", onClick: () => destroySnap(snap) }, t("delete_btn")));
         }
@@ -4420,6 +4428,9 @@ async function viewReplication() {
         const probes = await Promise.all(hosts.map(async (hst) => {
             try {
                 const r = await API.get("/api/replication/configs?host=" + encodeURIComponent(hst.address));
+                // local_mode_removed: true (this zsync refuses an empty source),
+                // false (still runs), null (version unknown) -- per host.
+                (r.configs || []).forEach(c => { c.local_mode_removed = r.local_mode_removed; c.zsync_version = r.zsync_version; });
                 return { host: hst, configs: r.configs || [] };
             } catch (e) {
                 return { host: hst, configs: [] };
@@ -4537,9 +4548,21 @@ async function viewReplication() {
                 style: "min-width:60px;display:inline-block;text-align:center"
             }, t("repl_status_" + status) || status.toUpperCase());
 
+            // A config without a source runs in zsync's local mode, which
+            // upstream removed after 1.0.19: still fine on this host, or
+            // already broken -- the badge says which, the title says the fix.
+            let localBadge = null;
+            if (p.local_mode) {
+                const broken = p.local_mode_removed === true;
+                localBadge = h("span", {
+                    className: "badge " + (broken ? "badge-danger" : "badge-warning"),
+                    style: "margin-left:6px;font-size:9px",
+                    title: broken ? t("repl_local_mode_broken", p.zsync_version || "?") : t("repl_local_mode_hint"),
+                }, t("repl_local_mode"));
+            }
             tb.appendChild(h("tr", {}, [
                 h("td", {}, statusBadge),
-                h("td", { style: "font-family:monospace;font-size:12px" }, p.source || "—"),
+                h("td", { style: "font-family:monospace;font-size:12px" }, [document.createTextNode(p.source || "—"), localBadge]),
                 h("td", {}, (p.targetHost.name || p.targetHost.address)),
                 h("td", { style: "font-family:monospace;font-size:12px" }, p.target || "—"),
                 h("td", { style: "font-size:12px" }, fmtAbs(lastTs)),
@@ -4834,7 +4857,8 @@ async function viewReplication() {
         const mkZsyncBadge = (label, st) => {
             const cls = st.installed ? "badge-success" : "badge-danger";
             return h("span", { className: "badge " + cls },
-                (st.installed ? "\u2713 " : "\u2717 ") + label + " " + t("repl_setup_zsync") + ": " + (st.installed ? t("repl_installed") : t("repl_not_installed")));
+                (st.installed ? "\u2713 " : "\u2717 ") + label + " " + t("repl_setup_zsync") + ": " +
+                (st.installed ? t("repl_installed") + (st.version ? " " + st.version : "") : t("repl_not_installed")));
         };
         const srcLabel = "[" + t("repl_source_short") + "]";
         const tgtLabel = "[" + t("repl_target_short") + "]";
@@ -5165,7 +5189,7 @@ async function viewReplication() {
             { key: "min_keep",                     label: "repl_f_min_keep",                     hint: "repl_h_min_keep",                     def: "2" },
             { key: "zfs_auto_snapshot_keep",       label: "repl_f_zas_keep",                     hint: "repl_h_zas_keep",                     def: "0" },
             { key: "zfs_auto_snapshot_label",      label: "repl_f_zas_label",                    hint: "repl_h_zas_label",                    def: "backup" },
-            { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       def: "zas" },
+            { key: "zfs_auto_snapshot_engine",     label: "repl_f_engine",                       hint: "repl_h_engine",                       def: "internal" },
             { key: "prefix",                       label: "repl_f_prefix",                       hint: "",                                    def: "" },
             { key: "suffix",                       label: "repl_f_suffix",                       hint: "",                                    def: "" },
             { key: "checkzfs_disabled",            label: "repl_f_checkzfs_disabled",            hint: "repl_h_checkzfs_disabled",            def: "0" },

@@ -3235,11 +3235,17 @@ def api_dr_restore_all_configs():
 @app.route("/api/replication/configs")
 @login_required
 def api_replication_configs():
-    from app.replication import list_configs
+    from app.replication import list_configs, installed_version, local_mode_removed
     host, err, code = _require_host()
     if err:
         return err, code
-    return jsonify(list_configs(host))
+    out = list_configs(host)
+    # The overview needs the version only to say whether a local-mode config
+    # still runs on this host; cached, so the per-host probe stays cheap.
+    if any(c.get("local_mode") for c in out.get("configs", [])):
+        out["zsync_version"] = installed_version(host)
+        out["local_mode_removed"] = local_mode_removed(out["zsync_version"])
+    return jsonify(out)
 
 
 @app.route("/api/replication/import/preview")
