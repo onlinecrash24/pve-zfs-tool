@@ -624,10 +624,32 @@ def _call_ollama(provider_cfg, messages, timeout=300):
         return {"success": False, "error": str(e)}
 
 
+def provider_problem(config):
+    """Why no request may be sent with this configuration, or None.
+
+    Before this check the default provider was OpenAI with an empty key, and
+    the request went out without an Authorization header -- host names, IPs,
+    dataset names, SMART and serial numbers reached api.openai.com and only
+    then came the 401. SECURITY.md promised the opposite; now it is true.
+    """
+    provider = (config or {}).get("provider", "openai")
+    pc = (config or {}).get(provider, {}) or {}
+    if provider in ("openai", "anthropic") and not (pc.get("api_key") or "").strip():
+        return f"AI provider {provider} has no API key configured -- nothing was sent"
+    if provider == "custom" and not (pc.get("base_url") or "").strip():
+        return "custom AI provider has no base URL configured -- nothing was sent"
+    if provider == "ollama" and not (pc.get("base_url") or "").strip():
+        return "Ollama has no base URL configured -- nothing was sent"
+    return None
+
+
 def call_llm(messages):
     """Dispatch to the configured LLM provider."""
     config = load_config()
     provider = config.get("provider", "openai")
+    problem = provider_problem(config)
+    if problem:
+        return {"success": False, "error": problem}
 
     if provider == "anthropic":
         return _call_anthropic(config.get("anthropic", {}), messages)
@@ -647,6 +669,9 @@ def test_connection():
     """Send a minimal test message to verify LLM connectivity."""
     config = load_config()
     provider = config.get("provider", "openai")
+    problem = provider_problem(config)
+    if problem:
+        return {"success": False, "error": problem}
 
     messages = [
         {"role": "system", "content": "Respond with exactly: OK"},

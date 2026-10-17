@@ -31,10 +31,16 @@ ostype: l26
 parent: before-upgrade
 protection: 1
 scsi0: local-zfs:vm-100-disk-0,discard=on,size=32G
+scsi2: /dev/disk/by-id/ata-WDC_WD40EFRX-68N32N0_WD-WCC7K1234567,size=4T
 scsihw: virtio-scsi-single
+serial0: socket
+serial1: /dev/ttyUSB0
 smbios1: uuid=11111111-2222-3333-4444-555555555555
 startup: order=2,up=30
 tpmstate0: local-zfs:vm-100-disk-2,size=4M,version=v2.0
+hostpci0: 0000:01:00.0,pcie=1
+usb0: host=1-1.2
+usb1: spice
 unused0: local-zfs:vm-100-disk-9
 vmgenid: 66666666-7777-8888-9999-000000000000
 [before-upgrade]
@@ -48,6 +54,10 @@ features: nesting=1
 hostname: files
 memory: 1024
 mp0: local-zfs:subvol-253-disk-1,mp=/data,size=100G
+mp1: /media/Fotos/immich/upload,mp=/upload
+dev0: /dev/dri/renderD128,gid=104
+lxc.cgroup2.devices.allow: c 226:128 rwm
+lxc.mount.entry: /dev/dri/renderD128 dev/dri/renderD128 none bind,optional,create=file
 net0: name=eth0,bridge=vmbr0,hwaddr=AA:BB:CC:DD:EE:FF,ip=dhcp
 onboot: 1
 ostype: debian
@@ -86,6 +96,31 @@ def test_hardware_is_kept_and_disks_point_at_the_clones():
     assert "efidisk0: rpool-clone:vm-900-disk-1,efitype=4m,size=4M" in out
     assert "tpmstate0: rpool-clone:vm-900-disk-2,size=4M,version=v2.0" in out
     assert "ide2: local:iso/debian.iso,media=cdrom" in out    # an ISO is not a disk
+
+
+def test_host_bound_entries_are_named_and_left_out_qemu():
+    # Field report: passthrough disks, PCI/USB devices and a host serial port
+    # would make the clone fight the original for the hardware.
+    found = {(e["key"], e["reason"]) for e in rg.host_bound_entries(QEMU_CFG, "qemu")}
+    assert found == {("scsi2", "passthrough"), ("hostpci0", "passthrough"),
+                     ("usb0", "passthrough"), ("serial1", "device")}
+    out = _cfg(QEMU_CFG, "qemu", QEMU_MAP)
+    for key in ("scsi2", "hostpci0", "usb0", "serial1"):
+        assert not re.search(rf"^{key}:", out, re.M), key
+    assert "usb1: spice" in out and "serial0: socket" in out       # not host-bound
+
+
+def test_host_bound_entries_are_named_and_left_out_lxc():
+    # Field report: a bind mount copied 1:1 lets the clone write into the
+    # original's live upload directory, with the clone's older database.
+    found = {(e["key"], e["reason"]) for e in rg.host_bound_entries(LXC_CFG, "lxc")}
+    assert found == {("mp1", "bind_mount"), ("dev0", "device"),
+                     ("lxc.cgroup2.devices.allow", "device"), ("lxc.mount.entry", "bind_mount")}
+    out = _cfg(LXC_CFG, "lxc", {"local-zfs:subvol-253-disk-0": "rpool-clone:subvol-900-disk-0",
+                                "local-zfs:subvol-253-disk-1": "rpool-clone:subvol-900-disk-1"})
+    assert "/media/Fotos" not in out and "dev0" not in out
+    assert "lxc.mount.entry" not in out and "devices.allow" not in out
+    assert "mp0: rpool-clone:subvol-900-disk-1,mp=/data,size=100G" in out   # the volume stays
 
 
 def test_the_copy_is_a_new_machine_that_stays_down():
@@ -171,10 +206,13 @@ def test_storage_id_is_pve_safe():
 # --- the create job --------------------------------------------------------------
 
 def _fake_host(monkeypatch, *, fail_clone_nr=None, snaps=("daily", "hourly"), running=False,
-               next_id="900", storage_cfg="", used=False):
-    """A host with VM 100 on rpool/data, two disks, both snapshotted."""
+               next_id="900", storage_cfg="", used=(), root_props="", holds_stuck=False):
+    """A host with VM 100 on rpool/data, three volumes, all snapshotted.
+    ``used`` lists VMIDs that exist; ``root_props`` is what ``zfs get all``
+    prints for rpool/clone; ``holds_stuck`` makes every release fail."""
     calls = []
     state = {"clones": 0}
+    used = {str(u) for u in (used if isinstance(used, (set, list, tuple)) else [used] if used else [])}
 
     def run(host, cmd, **kw):
         calls.append(cmd)
@@ -198,7 +236,13 @@ def _fake_host(monkeypatch, *, fail_clone_nr=None, snaps=("daily", "hourly"), ru
         if cmd.startswith("pvesh get /cluster/nextid"):
             return ok(next_id + "\n")
         if cmd.startswith("([ -e /etc/pve/qemu-server/"):
-            return ok("__USED__" if used else "__FREE__")
+            vid = cmd.split("/etc/pve/qemu-server/", 1)[1].split(".conf", 1)[0]
+            return ok("__USED__" if vid in used else "__FREE__")
+        if cmd.startswith("zfs get -H -o property,value,source all"):
+            return ok(root_props)
+        if cmd.startswith("zfs holds -H"):
+            snap = cmd.split()[3]
+            return ok(f"{snap}\tpve-zfs-tool-recovery\tFri Oct 17 10:00 2026\n" if holds_stuck else "")
         if cmd == "hostname":
             return ok("pve1\n")
         if cmd.startswith("zfs clone"):
@@ -228,10 +272,12 @@ def test_create_does_the_steps_in_order(monkeypatch):
     calls = _fake_host(monkeypatch)
     res = rg.create_job(_progress, HOST, "100", "qemu", "daily")
     assert res["success"], res
-    assert res["new_vmid"] == "900" and res["storage"] == "rpool-clone"
+    assert res["new_vmid"] == "9100" and res["storage"] == "rpool-clone"   # 9 + original, free
     # config order (efidisk0 before scsi0), one clone per attached volume
-    assert res["clones"] == ["rpool/clone/vm-900-disk-1", "rpool/clone/vm-900-disk-0",
-                             "rpool/clone/vm-900-disk-2"]
+    assert res["clones"] == ["rpool/clone/vm-9100-disk-1", "rpool/clone/vm-9100-disk-0",
+                             "rpool/clone/vm-9100-disk-2"]
+    assert res["holds_left"] == [] and res["tags_excluded"] == []
+    assert {e["key"] for e in res["left_out"]} == {"scsi2", "hostpci0", "usb0", "serial1"}
     seq = [c for c in calls if c.startswith(("zfs create", "pvesm add", "zfs hold", "zfs clone",
                                              "zfs release")) or "base64 -d" in c]
     kinds = [c.split()[0] + " " + c.split()[1] if c.startswith("zfs") else c.split()[0]
@@ -257,8 +303,8 @@ def test_a_failed_clone_undoes_the_earlier_ones_and_writes_no_config(monkeypatch
     calls = _fake_host(monkeypatch, fail_clone_nr=2)
     res = rg.create_job(_progress, HOST, "100", "qemu", "daily")
     assert not res["success"] and "out of space" in res["error"]
-    assert res["undone"] == ["rpool/clone/vm-900-disk-1"]       # the first clone, config order
-    assert any(c.startswith("zfs destroy rpool/clone/vm-900-disk-1") for c in calls)
+    assert res["undone"] == ["rpool/clone/vm-9100-disk-1"]      # the first clone, config order
+    assert any(c.startswith("zfs destroy rpool/clone/vm-9100-disk-1") for c in calls)
     assert not any("base64 -d" in c for c in calls)
     assert sum(c.startswith("zfs release") for c in calls) == 3     # holds never linger
 
@@ -270,8 +316,38 @@ def test_create_refuses_a_label_that_is_not_on_every_disk(monkeypatch):
     assert not any(c.startswith(("zfs clone", "zfs create", "pvesm add")) for c in calls)
 
 
+def test_the_vmid_proposal_falls_back_to_the_next_free_id(monkeypatch):
+    _fake_host(monkeypatch, used={"9100"}, next_id="777")
+    res = rg.create_job(_progress, HOST, "100", "qemu", "daily")
+    assert res["success"] and res["new_vmid"] == "777"
+    assert rg.suggest_vmid(HOST, "100") == "777"
+
+
+def test_the_recovery_root_is_excluded_from_replication(monkeypatch):
+    # Field report: bashclub:<tag>=subvols set on the pool root is inherited by
+    # <pool>/clone, and the next zsync pull takes every clone as a full copy.
+    calls = _fake_host(monkeypatch, root_props=(
+        "com.sun:auto-snapshot\tfalse\tlocal\n"
+        "bashclub:zsync\tsubvols\tinherited from rpool\n"
+        "bashclub:miyagi-offsite\tall\tinherited from rpool\n"
+        "bashclub:other\texclude\tlocal\n"))
+    res = rg.create_job(_progress, HOST, "100", "qemu", "daily")
+    assert res["success"]
+    assert res["tags_excluded"] == ["bashclub:zsync", "bashclub:miyagi-offsite"]
+    assert "zfs set bashclub:zsync=exclude rpool/clone 2>&1" in calls
+    assert not any("bashclub:other=exclude" in c for c in calls)        # already excluded
+
+
+def test_a_hold_that_will_not_release_is_reported_not_swallowed(monkeypatch):
+    _fake_host(monkeypatch, holds_stuck=True)
+    res = rg.create_job(_progress, HOST, "100", "qemu", "daily")
+    assert res["success"]
+    assert res["holds_left"] == ["rpool/data/vm-100-disk-1@daily", "rpool/data/vm-100-disk-0@daily",
+                                 "rpool/data/vm-100-disk-2@daily"]
+
+
 def test_create_refuses_a_used_vmid(monkeypatch):
-    calls = _fake_host(monkeypatch, used=True)
+    calls = _fake_host(monkeypatch, used={"105"})
     res = rg.create_job(_progress, HOST, "100", "qemu", "daily", new_vmid="105")
     assert not res["success"] and "105" in res["error"]
     assert not any(c.startswith("zfs clone") for c in calls)
@@ -288,7 +364,7 @@ scsi0: rpool-clone:vm-900-disk-0,size=32G
 
 
 def _fake_recovery_host(monkeypatch, cfg=RECOVERY_CFG, path_prefix="/dev/zvol/rpool/clone/",
-                        clones_after=""):
+                        clones_after="", holds_stuck=False):
     calls = []
 
     def run(host, cmd, **kw):
@@ -305,6 +381,9 @@ def _fake_recovery_host(monkeypatch, cfg=RECOVERY_CFG, path_prefix="/dev/zvol/rp
             return ok("rpool/data/vm-100-disk-0@daily\n")
         if cmd.startswith("zfs get -H -o value clones"):
             return ok(clones_after + "\n")
+        if cmd.startswith("zfs holds -H"):
+            snap = cmd.split()[3]
+            return ok(f"{snap}\tpve-zfs-tool-recovery\tFri Oct 17 10:00 2026\n" if holds_stuck else "")
         if cmd.startswith("zfs list -H -o name "):
             return ok("")                                   # gone after qm destroy
         if cmd.startswith("qm status"):
@@ -323,6 +402,16 @@ def test_destroy_removes_the_guest_and_reports_released_origins(monkeypatch):
     assert res["success"], res
     assert any(c.startswith("qm destroy 900 --purge") for c in calls)
     assert res["released"] == ["rpool/data/vm-100-disk-0@daily"] and res["still_held"] == {}
+    assert res["holds_left"] == []
+    assert any(c.startswith("zfs release pve-zfs-tool-recovery rpool/data/vm-100-disk-0@daily") for c in calls)
+
+
+def test_destroy_reports_a_hold_it_could_not_release(monkeypatch):
+    _fake_recovery_host(monkeypatch, holds_stuck=True)
+    res = rg.destroy_job(_progress, HOST, "900", "qemu")
+    assert res["success"]
+    assert res["holds_left"] == ["rpool/data/vm-100-disk-0@daily"]
+    assert res["released"] == []
 
 
 def test_destroy_reports_an_origin_another_clone_still_holds(monkeypatch):

@@ -164,7 +164,7 @@ depends_on:
 
 Web-UI öffnen unter `http://DOCKER-HOST-IP:5000`
 
-> **Wichtig:** `SECRET_KEY`, `ADMIN_USER` und `ADMIN_PASSWORD` vor dem Produktiv-Einsatz ändern. Beim Start werden Warnungen geloggt, wenn noch Standardwerte aktiv sind.
+> **Wichtig:** `SECRET_KEY`, `ADMIN_USER` und `ADMIN_PASSWORD` vor dem Produktiv-Einsatz ändern. Ein Platzhalter-`SECRET_KEY` wird beim Start durch einen zufälligen ersetzt (und geloggt). Ein Platzhalter, ein leeres oder ein kurzes `ADMIN_PASSWORD` (unter 12 Zeichen) lässt den Container **nicht starten**, der Grund steht im Log -- diese Oberfläche ist root auf jedem Node, ein erratbares Login ist keine Warnung wert.
 
 ## Einrichtung
 
@@ -306,7 +306,7 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 |----------|---------|--------------|
 | `SECRET_KEY` | `dev-key-change-me` | Flask-Session-Secret -- **muss geändert werden!** |
 | `ADMIN_USER` | `admin` | Login-Benutzername -- **sollte geändert werden** |
-| `ADMIN_PASSWORD` | `password` | Login-Passwort -- **muss geändert werden!** |
+| `ADMIN_PASSWORD` | *(keins)* | Login-Passwort, **Pflicht**: mindestens 12 Zeichen, kein Platzhalter -- sonst startet der Container nicht |
 | `FORCE_HTTPS` | `true` | Sichere Session-Cookies -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
 | `TRUST_PROXY` | nicht gesetzt | Client-Adresse aus `X-Forwarded-For` übernehmen. **Nur** hinter einem Reverse-Proxy -- auf einem direkt erreichbaren Port könnte jeder Client seine Adresse selbst wählen und die Login-Sperre umgehen |
 | `TZ` | `UTC` | Zeitzone für Reports und Scheduler (z. B. `Europe/Berlin`, `America/New_York`) |

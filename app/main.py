@@ -148,9 +148,35 @@ if is_placeholder_secret_key(app.secret_key):
     # Auto-generate a random key so sessions are at least unpredictable
     app.secret_key = secrets.token_hex(32)
     log.warning("Auto-generated random SECRET_KEY for this session (will change on restart, logging everyone out).")
-if is_placeholder_password(ADMIN_PASSWORD):
-    log.warning("ADMIN_PASSWORD is a placeholder or default value! Anyone who has read this "
-                "repository knows it. Set ADMIN_USER and ADMIN_PASSWORD environment variables.")
+MIN_PASSWORD_LENGTH = 12
+
+
+def admin_password_problem(value):
+    """Why this ADMIN_PASSWORD must not be used, or None.
+
+    This UI is root on every node. A placeholder from the compose file or
+    the README is public knowledge, and a short one is a dictionary away;
+    with 5000:5000 published on all interfaces either is an open door. The
+    SECRET_KEY case is handled by replacing the value; a password cannot be
+    replaced for the user, so the start is refused with the reason in the
+    log. The healthcheck never goes green, which is the point.
+    """
+    v = (value or "")
+    if not v.strip():
+        return "is empty"
+    if is_placeholder_password(v):
+        return "is a placeholder or default value that anyone who has read this repository knows"
+    if len(v) < MIN_PASSWORD_LENGTH:
+        return f"is shorter than {MIN_PASSWORD_LENGTH} characters"
+    return None
+
+
+_pw_problem = admin_password_problem(ADMIN_PASSWORD)
+if _pw_problem:
+    log.critical("Refusing to start: ADMIN_PASSWORD %s. Set ADMIN_USER and ADMIN_PASSWORD "
+                 "(at least %d characters) in the environment and start again.",
+                 _pw_problem, MIN_PASSWORD_LENGTH)
+    raise SystemExit(78)   # EX_CONFIG
 if TRUST_PROXY:
     log.info("Trusting X-Forwarded-* headers (TRUST_PROXY=true) -- make sure only your reverse proxy can reach this port.")
 else:
@@ -2384,6 +2410,10 @@ def api_replication_config_delete():
     if err:
         return err, code
     source = request.args.get("source") or None
+    if not source:
+        # Without a source the path falls back to /etc/bashclub/zsync.conf --
+        # a file and a cron line the tool does not own.
+        return jsonify({"success": False, "error": "source required"}), 400
     purge = (request.args.get("purge") or "").lower() in ("1", "true", "yes")
     purge_children = (request.args.get("purge_children") or "").lower() in ("1", "true", "yes")
 

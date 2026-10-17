@@ -218,7 +218,7 @@ def test_import_writes_then_moves_the_cron_then_parks_the_old_file(monkeypatch):
     run, cmds = _run_with([("cat /etc/bashclub/zsync.conf", CONF),
                            ("[ -e /etc/bashclub/10.0.0.5.conf ]", "__NO__"),
                            ("__CRONTAB__", CRONS),
-                           ("grep -vF", "__OK__"),
+                           ("grep -vE", "__OK__"),
                            ("mv ", "__PARKED__ /etc/bashclub/zsync.conf.imported-20260916120000")])
     monkeypatch.setattr(r, "run_command", run)
     written, crons = [], []
@@ -234,8 +234,10 @@ def test_import_writes_then_moves_the_cron_then_parks_the_old_file(monkeypatch):
     # the old file is parked last
     steps = [s["step"] for s in out["steps"]]
     assert steps == ["write_config", "set_cron", "remove_old_cron", "park_old_config"]
-    rm_cmd = [c for c in cmds if "grep -vF" in c][0]
-    assert "bashclub-zsync -c /etc/bashclub/zsync.conf" in rm_cmd
+    rm_cmd = [c for c in cmds if "grep -vE" in c][0]
+    # the pattern travels base64-encoded; it must be the anchored one for the old path
+    import base64
+    assert base64.b64encode(r.own_cron_line_pattern("/etc/bashclub/zsync.conf").encode()).decode() in rm_cmd
     assert ".imported-$(date" in [c for c in cmds if c.startswith("P=")][0]
 
 
@@ -249,7 +251,7 @@ def test_two_cron_entries_for_one_file_leave_the_cron_untouched(monkeypatch):
     monkeypatch.setattr(r, "set_cron", lambda *a, **k: pytest.fail("set_cron must not run"))
     out = r.import_config(_host(), "/etc/bashclub/zsync.conf", adopt_cron=True)
     assert out["success"] is True and out["cron"] == "ambiguous"
-    assert not any("grep -vF" in c for c in cmds)
+    assert not any("grep -vE" in c for c in cmds)
 
 
 def test_a_failed_write_stops_the_import_before_cron_or_parking(monkeypatch):
@@ -264,7 +266,7 @@ def test_a_failed_write_stops_the_import_before_cron_or_parking(monkeypatch):
 
 
 def test_removing_a_cron_d_line_rewrites_the_file_in_place(monkeypatch):
-    run, cmds = _run_with([("grep -vF", "__OK__")])
+    run, cmds = _run_with([("grep -vE", "__OK__")])
     monkeypatch.setattr(r, "run_command", run)
     assert r._remove_cron_line(_host(), "/etc/cron.d/zsync", "/etc/bashclub/zsync.conf")["success"] is True
     assert 'cat "$TMP" > "$F"' in cmds[0]           # keeps owner and mode

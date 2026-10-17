@@ -73,7 +73,7 @@ it looks alarming and is the design.
 
 - **That the tool runs privileged commands on your hosts.** That is the whole
   feature. A logged-in user destroying a dataset is the product working.
-- **The default credentials** (`admin` / `password`) when they are left unset.
+- **A weak `ADMIN_PASSWORD`** beyond what the start-up check refuses: a placeholder, an empty or a short one (fewer than 12 characters) stops the container; a long but guessable one is yours to avoid.
   They are a documented fallback and the application warns loudly about them at
   startup. Note that the repository's own `docker-compose.yml` — the one the
   build-from-source path uses — still carries those literal values, while the

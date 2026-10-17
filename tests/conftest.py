@@ -15,3 +15,7 @@ if _ROOT not in sys.path:
 # under test write there, but set a sane HOME/TMP just in case a module does
 # an os.makedirs at import on some platform.
 os.environ.setdefault("TMPDIR", tempfile.gettempdir())
+
+# app.main refuses to start with a placeholder or short ADMIN_PASSWORD (it is
+# root on every node). The tests import that module; give it one it accepts.
+os.environ.setdefault("ADMIN_PASSWORD", "pytest-only-password-123")
