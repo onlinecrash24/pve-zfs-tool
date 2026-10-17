@@ -7,6 +7,51 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.936 -- 2026-10-17
+
+v0.9.936 — security: the file and zvol restore path, closed
+
+Round 2 of the confidential review (see v0.9.935) read the file-restore
+code line by line and found a chain that needed no login: a file name
+with a newline inside a guest forges a second `ls` line that the restore
+browser rendered unescaped the moment the admin opened the folder; from
+the admin's session one request to the zvol unmount route ran a shell
+command as root on the node, through the single unvalidated, unquoted
+line of that section. Please update. Until you have, do not open the
+file restore on guests that others can write into.
+
+Closed in this release:
+
+- Shell injection through zvol_dev (critical): validated as
+  /dev/zvol/<dataset>@<snapshot> and quoted; an invalid value sends
+  nothing at all.
+- HTML injection through a file name with a newline (high): ls runs with
+  -q, the parser accepts only lines of ls's shape, every column is
+  escaped in the browser.
+- zfs destroy -r on any dataset through the restore-clone unmount (high):
+  only <pool>/restore-<name> is destroyed; a snapshot destroy requires an
+  @, so a bare dataset no longer dies under a "snapshot.destroy" entry.
+- Mounting any block device through /dev/mapper/<prefix> (medium): only a
+  single-component name whose mapping dmsetup reports as sitting on a
+  zvol (zd<N>) is mounted; /dev/mapper/pve-root and /dev/mapper/../sda2
+  are refused.
+- Unmount of any mount point through ".." (medium): the path must be
+  <base>/<mapping>.
+- dmsetup remove on LVM-thin volumes (medium): cleanup, the active list
+  and the per-snapshot unmount use the zvol-backed criterion, never a
+  name grep.
+- Audit view without escaping (medium with TRUST_PROXY): every field is
+  escaped; escapeHtml escapes quotes too, so it is safe inside title="".
+- Cron log path outside the log directory (low): must be a file under
+  /var/log/bashclub-zsync.
+
+restore mount/unmount/cleanup and the partition mount write audit entries
+now. The report's payloads are the tests.
+
+Still open, for a later release: DR reverse-sync bound to known replica
+roots, the migration plan derived server-side, the login throttle, the
+minor items of round 1, unsafe-inline in the CSP.
+
 ## v0.9.935 -- 2026-10-17
 
 v0.9.935 — security fixes from a confidential review, and clone field report
