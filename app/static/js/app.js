@@ -3055,7 +3055,7 @@ async function browseRestorePath(subpath) {
         tableHtml += `<tr>
             <td style="font-size:14px">${icon}</td>
             <td style="${nameStyle}" ${nameClick}>${escapeHtml(entry.name)}</td>
-            <td style="font-size:12px;color:var(--text-secondary)">${sizeDisplay}</td>
+            <td style="font-size:12px;color:var(--text-secondary)">${escapeHtml(sizeDisplay)}</td>
             <td style="font-size:11px;color:var(--text-secondary)">${escapeHtml(entry.date)}</td>
             <td><div class="btn-group">${actions}</div></td>
         </tr>`;
@@ -3336,7 +3336,7 @@ async function browseZvolPath(subpath) {
         tableHtml += `<tr>
             <td style="font-size:14px">${icon}</td>
             <td style="${nameStyle}" ${nameClick}>${escapeHtml(entry.name)}</td>
-            <td style="font-size:12px;color:var(--text-secondary)">${sizeDisplay}</td>
+            <td style="font-size:12px;color:var(--text-secondary)">${escapeHtml(sizeDisplay)}</td>
             <td style="font-size:11px;color:var(--text-secondary)">${escapeHtml(entry.date)}</td>
             <td><div class="btn-group">${actions}</div></td>
         </tr>`;
@@ -4358,13 +4358,13 @@ async function viewAudit() {
                 : (e.details || "");
             html += `<tr>
                 <td>${_auditFmt(e.timestamp)}</td>
-                <td>${e.user || "—"}</td>
-                <td style="font-family:monospace;font-size:0.85em">${e.ip || "—"}</td>
-                <td style="font-family:monospace;font-size:0.85em">${e.host || "—"}</td>
-                <td><code style="font-size:0.85em">${e.action}</code></td>
-                <td style="font-family:monospace;font-size:0.85em">${(e.target || "").replace(/</g, "&lt;")}</td>
+                <td>${escapeHtml(e.user || "—")}</td>
+                <td style="font-family:monospace;font-size:0.85em">${escapeHtml(e.ip || "—")}</td>
+                <td style="font-family:monospace;font-size:0.85em">${escapeHtml(e.host || "—")}</td>
+                <td><code style="font-size:0.85em">${escapeHtml(e.action || "")}</code></td>
+                <td style="font-family:monospace;font-size:0.85em">${escapeHtml(e.target || "")}</td>
                 <td>${statusBadgeHtml}</td>
-                <td style="font-size:0.85em;color:#666" title="${(e.details || "").replace(/"/g, "&quot;")}">${det.replace(/</g, "&lt;")}</td>
+                <td style="font-size:0.85em;color:#666" title="${escapeHtml(e.details || "")}">${escapeHtml(det)}</td>
             </tr>`;
         }
         html += "</tbody></table>";
@@ -8779,10 +8779,13 @@ function closeModal() {
     }
 }
 
+// Escapes for text AND attribute context. The textContent/innerHTML trick
+// left " and ' alone, and escapeHtml is used inside title="..." with stderr
+// of a remote host in it -- one quote broke out of the attribute.
 function escapeHtml(s) {
-    const div = document.createElement("div");
-    div.textContent = s || "";
-    return div.innerHTML;
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // ---------------------------------------------------------------------------

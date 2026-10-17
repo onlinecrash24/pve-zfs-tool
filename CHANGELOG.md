@@ -7,6 +7,57 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.935 -- 2026-10-17
+
+v0.9.935 — security fixes from a confidential review, and clone field report
+
+Security. A read-only review of v0.9.934 reported seven findings; this
+release closes five. Please update: the first two are serious for a UI
+that is root on every node.
+
+- XSS through file names in the file-restore browser. File names from
+  inside a guest were placed into inline onclick handlers as JavaScript
+  string literals; escaping covered the HTML layer, not the JS layer.
+  Anyone able to create a file in a guest could run code in the admin's
+  session with one click. All inline handlers carrying data are gone;
+  elements carry an allowlisted action name and JSON arguments, one
+  delegated listener dispatches, nothing is parsed as JavaScript. A test
+  keeps the pattern out.
+- Placeholder password. ADMIN_PASSWORD=password or the compose placeholder
+  only logged a warning. A placeholder, empty or short (fewer than 12
+  characters) password now refuses to start, with the reason in the log.
+  If your container does not come up after this update, that is why:
+  set a real ADMIN_PASSWORD and start again.
+- Crontab rewrite fail-open. A read error of `crontab -l` replaced root's
+  whole crontab with the one zsync line, and the match was a substring, so
+  a foreign line with the same path and another flag, a X.conf.alt, or a
+  commented line disappeared with it. The rewrite reads first and aborts
+  on a read error, keeps ~/crontab.bak-<timestamp>, and removes only the
+  tool's own line. Schedule and delete operations require a source and
+  never touch /etc/bashclub/zsync.conf.
+- Host keys. The ad-hoc password path forgot a registered host's pinned
+  key and accepted whatever answered; keys were stored under a name
+  paramiko does not consult for ports other than 22. A pinned key is now
+  enforced for every connection, the forget-and-accept applies only to
+  unregistered hosts, keys are stored as [address]:port, a host without
+  a pin is pinned on first use.
+- AI opt-in. With the default provider and no key the report request went
+  out anyway and failed with 401 at OpenAI -- after the data had left.
+  Nothing is sent without a key now, as SECURITY.md always said.
+
+Remaining findings (migration plan derived server-side, the login
+throttle, several minor items, unsafe-inline in the CSP) follow in a
+later release.
+
+Snapshot clone, from a field report after a full round on PVE 9.2:
+config entries that point at the host (bind mounts, passthrough disks,
+PCI/USB devices, host serial ports) are shown in the dialog and left out
+of the clone -- a started clone no longer writes into the original's live
+data; <pool>/clone has every bashclub:* replication tag it would inherit
+set to exclude, so a zsync pull never takes the clones along; the
+proposed VMID is 9 + the original's when free; a hold that could not be
+released is reported instead of swallowed.
+
 ## v0.9.934 -- 2026-10-15
 
 v0.9.934 — a foreign replica is not a local disk

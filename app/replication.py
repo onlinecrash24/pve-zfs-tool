@@ -1604,6 +1604,13 @@ def set_cron(host: Dict[str, Any], schedule: str,
         return {"success": False, "error": "invalid cron schedule (expected 5 fields, digits / * - , /)"}
     if not re.match(r"^[A-Za-z0-9._/-]+$", log_path or ""):
         return {"success": False, "error": "invalid log path"}
+    # The cron line appends zsync's output as root to this file. Bound to
+    # the log directory, no "..": otherwise it is an append to any file,
+    # /root/.ssh/authorized_keys included.
+    import posixpath
+    norm = posixpath.normpath(log_path)
+    if norm != log_path or not norm.startswith(LOG_DIR + "/") or norm == LOG_DIR + "/":
+        return {"success": False, "error": f"log path must be a file under {LOG_DIR}"}
 
     marker = _cron_marker(cfg_path)
     new_line = f"{schedule.strip()} {BINARY_NAME} -c {cfg_path} >> {log_path} 2>&1"
