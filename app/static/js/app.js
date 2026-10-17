@@ -2836,6 +2836,12 @@ async function openRecoveryModal(g) {
             html += `<tr><td style="${mono}">${escapeHtml(d.key)}</td><td style="${mono}">${escapeHtml(d.dataset)}</td><td>${escapeHtml(d.used || "")}</td></tr>`;
         }
         html += `</tbody></table>`;
+        if ((pv.left_out || []).length) {
+            html += `<div style="margin:8px 0;padding:8px 10px;border:1px solid var(--warning,#d29922);border-radius:6px;font-size:12px">
+                <div style="color:var(--warning,#d29922);font-weight:600">${escapeHtml(t("rg_left_out", pv.left_out.length))}</div>` +
+                pv.left_out.map(e => `<div style="${mono}">${escapeHtml(e.key)}: ${escapeHtml(e.value)} <span style="color:var(--text-secondary)">(${escapeHtml(t("rg_reason_" + e.reason))})</span></div>`).join("") +
+                `<div style="color:var(--text-secondary);margin-top:4px">${escapeHtml(t("rg_left_out_hint"))}</div></div>`;
+        }
         for (const b of pv.blockers) {
             const key = b.startsWith("cross_pool") ? "rg_cross_pool" : b.startsWith("unresolved") ? "rg_unresolved" : "rg_no_disks";
             html += `<p style="color:var(--danger)">${escapeHtml(t(key))} <span style="${mono}">${escapeHtml(b.split(": ").slice(1).join(": "))}</span></p>`;
@@ -2891,6 +2897,7 @@ async function openRecoveryModal(g) {
                 if (prog) prog.textContent = (rec.log || []).map(l => l.msg).join("\n");
                 if (res.success) {
                     toast(t("rg_done", res.new_vmid), "success");
+                    if ((res.holds_left || []).length) toast(t("rg_holds_left", res.holds_left.join(", ")), "warning");
                     closeModal();
                     viewGuests();
                 } else {
@@ -2915,6 +2922,7 @@ async function cleanupRecoveryGuest(g, info) {
             const res = rec.result || {};
             if (!res.success) { toast(res.error || t("rg_cleanup_failed"), "error"); return; }
             const held = Object.keys(res.still_held || {});
+            if ((res.holds_left || []).length) toast(t("rg_holds_left", res.holds_left.join(", ")), "warning");
             if (held.length) toast(t("rg_cleanup_pinned", held.join(", ")), "warning");
             else toast(t("rg_cleanup_done", g.vmid), "success");
             viewGuests();

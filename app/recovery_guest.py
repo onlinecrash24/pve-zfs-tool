@@ -161,6 +161,53 @@ def clone_command(dataset: str, snapshot: str, target: str, gtype: str,
             f"{shlex.quote(target)}")
 
 
+# Config entries that point at the HOST, not at a volume: a bind mount into a
+# directory of the host, a passthrough disk, PCI or USB device, a host serial
+# port. Copied 1:1 they would make the clone write into the original's live
+# data (a bind-mounted upload directory, with the clone's older database) or
+# fight the original for a device. Field report: Immich, Plex, Syncthing
+# containers with bind mounts. These are left out of the clone and shown in
+# the dialog before anything is created.
+_QEMU_DISK_KEY = re.compile(r"^(?:scsi|virtio|sata|ide)\d+$")
+
+
+def host_bound_entries(text: str, gtype: str) -> List[Dict[str, str]]:
+    """``[{key, value, reason}]`` -- reason is bind_mount, passthrough or device."""
+    out: List[Dict[str, str]] = []
+    for line in split_main_section(text).splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if gtype == "lxc" and s.startswith("lxc.mount.entry:"):
+            out.append({"key": "lxc.mount.entry", "value": s.split(":", 1)[1].strip(),
+                        "reason": "bind_mount"})
+            continue
+        if gtype == "lxc" and re.match(r"^lxc\.cgroup2?\.devices\.allow:", s):
+            out.append({"key": s.split(":", 1)[0], "value": s.split(":", 1)[1].strip(),
+                        "reason": "device"})
+            continue
+        m = re.match(r"^([a-z]+\d*):\s*(.*)$", s)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        first = value.split(",", 1)[0].strip()
+        if gtype == "lxc":
+            if re.match(r"^mp\d+$", key) and ":" not in first:
+                out.append({"key": key, "value": value, "reason": "bind_mount"})
+            elif re.match(r"^dev\d+$", key):
+                out.append({"key": key, "value": value, "reason": "device"})
+        else:
+            if re.match(r"^hostpci\d+$", key):
+                out.append({"key": key, "value": value, "reason": "passthrough"})
+            elif re.match(r"^usb\d+$", key) and re.search(r"(^|,)(host|mapping)=", value):
+                out.append({"key": key, "value": value, "reason": "passthrough"})
+            elif _QEMU_DISK_KEY.match(key) and first.startswith("/") and "media=cdrom" not in value:
+                out.append({"key": key, "value": value, "reason": "passthrough"})
+            elif re.match(r"^(serial|parallel)\d+$", key) and first.startswith("/dev/"):
+                out.append({"key": key, "value": value, "reason": "device"})
+    return out
+
+
 def marker_line(origin_vmid: str, snapshot: str, now: Optional[float] = None) -> str:
     """The config comment that makes a guest recognisable as a recovery guest.
 
@@ -201,11 +248,15 @@ def build_recovery_config(text: str, gtype: str, new_vmid: str,
     sections are not carried over (the clone has none of them).
     """
     out = [marker_line(origin_vmid, snapshot, now)]
+    left_out = {(e["key"], e["value"]) for e in host_bound_entries(text, gtype)}
     for line in split_main_section(text).splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
             continue
         if _DROP_RE.match(s):
+            continue
+        k, _, v = s.partition(":")
+        if (k.strip(), v.strip()) in left_out:
             continue
         m = re.match(r"^([a-z]+\d*):\s*(.*)$", s)
         if m:
@@ -248,6 +299,16 @@ def _next_vmid(host) -> str:
     r = run_command(host, "pvesh get /cluster/nextid 2>/dev/null", timeout=15)
     m = re.search(r"\b(\d{3,})\b", r.get("stdout") or "") if r.get("success") else None
     return m.group(1) if m else ""
+
+
+def suggest_vmid(host, vmid: str) -> str:
+    """``9`` + the original's VMID (2015 -> 92015) when that is free and within
+    PVE's range, so the clone sorts next to its original; else the next free
+    ID. Field convention, reported as what people type anyway."""
+    cand = "9" + str(vmid)
+    if len(cand) <= 9 and not vmid_in_use(host, cand):
+        return cand
+    return _next_vmid(host)
 
 
 def _node_name(host) -> str:
@@ -320,7 +381,8 @@ def preview(host: Dict[str, Any], vmid: str, gtype: str) -> Dict[str, Any]:
         "storage_exists": bool(storage),
         "snapshots": snaps,
         "usable": [s["name"] for s in snaps if s["on_all"]],
-        "next_vmid": _next_vmid(host),
+        "next_vmid": suggest_vmid(host, vmid),
+        "left_out": host_bound_entries(cfg["content"], gtype),
         "blockers": blockers,
     }
 
@@ -359,9 +421,47 @@ def _destroy_quietly(host, datasets: List[str]) -> None:
         _run(host, f"zfs destroy {shlex.quote(ds)} 2>&1")
 
 
-def _release_holds(host, snaps: List[str]) -> None:
+def _holds_left(host, snaps: List[str]) -> List[str]:
+    """The snapshots that still carry our hold tag."""
+    left = []
+    for s in snaps:
+        r = _run(host, f"zfs holds -H {shlex.quote(s)} 2>/dev/null")
+        tags = [ln.split("\t")[1] for ln in (r.get("stdout") or "").splitlines()
+                if ln.count("\t") >= 1]
+        if HOLD_TAG in tags:
+            left.append(s)
+    return left
+
+
+def _release_holds(host, snaps: List[str]) -> List[str]:
+    """Release our hold on every snapshot and return the ones still held.
+
+    A release that fails silently would pin the origin forever, invisible
+    until someone wonders why a snapshot never prunes -- so the result is
+    verified with ``zfs holds`` and reported, not assumed.
+    """
     for s in snaps:
         _run(host, f"zfs release {HOLD_TAG} {shlex.quote(s)} 2>/dev/null")
+    return _holds_left(host, snaps)
+
+
+# 2. The recovery root must not inherit a replication tag. A bashclub:* user
+# property set on the pool root (seen in the field: bashclub:<tag>=subvols
+# directly on tank) is inherited by <pool>/clone, and the next zsync pull
+# would replicate every clone as a full copy. Every bashclub:* property the
+# root sees is set to "exclude" -- upstream's own word for "not this one".
+def _exclude_replication_tags(host, root: str) -> List[str]:
+    r = _run(host, f"zfs get -H -o property,value,source all {shlex.quote(root)} 2>/dev/null")
+    done = []
+    for ln in (r.get("stdout") or "").splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 2 or not parts[0].startswith("bashclub:"):
+            continue
+        if parts[1] == "exclude":
+            continue
+        if _run(host, f"zfs set {shlex.quote(parts[0])}=exclude {shlex.quote(root)} 2>&1").get("success"):
+            done.append(parts[0])
+    return done
 
 
 def create_job(progress: Callable, host: Dict[str, Any], vmid: str, gtype: str,
@@ -403,7 +503,7 @@ def create_job(progress: Callable, host: Dict[str, Any], vmid: str, gtype: str,
         if snapshot not in _snapshots_of(host, d["dataset"]):
             return {"success": False, "error": f"snapshot {snapshot} missing on {d['dataset']}"}
 
-    new_vmid = str(new_vmid or "").strip() or _next_vmid(host)
+    new_vmid = str(new_vmid or "").strip() or suggest_vmid(host, vmid)
     if not new_vmid:
         return {"success": False, "error": "no free VMID could be determined"}
     new_vmid = validate_vmid(new_vmid)
@@ -417,6 +517,9 @@ def create_job(progress: Callable, host: Dict[str, Any], vmid: str, gtype: str,
         if not r.get("success"):
             return {"success": False, "error": f"zfs create {root} failed: "
                     + (r.get("stderr") or r.get("stdout") or "")[:300]}
+    excluded = _exclude_replication_tags(host, root)
+    if excluded:
+        progress(f"Excluded {root} from replication: " + ", ".join(excluded))
 
     # 2. storage entry, so PVE can address the clones
     storage = _storage_for_root(host, root)
@@ -454,7 +557,9 @@ def create_job(progress: Callable, host: Dict[str, Any], vmid: str, gtype: str,
             created.append(target)
             volid_map[d["volid"]] = f"{storage}:{target.rsplit('/', 1)[-1]}"
     finally:
-        _release_holds(host, origins)
+        holds_left = _release_holds(host, origins)
+        if holds_left:
+            progress("Hold could not be released on: " + ", ".join(holds_left), ok=False)
 
     # 4. config -- never over an existing one
     from app.dr import restore_guest_config
@@ -466,10 +571,12 @@ def create_job(progress: Callable, host: Dict[str, Any], vmid: str, gtype: str,
         return {"success": False, "error": "config write failed: "
                 + (wr.get("error") or wr.get("stderr") or ""), "undone": created}
 
-    progress(f"Recovery guest {new_vmid} is ready -- not started, no network", ok=True)
+    progress(f"Snapshot clone {new_vmid} is ready -- not started, no network", ok=True)
     return {"success": True, "new_vmid": new_vmid, "gtype": gtype, "origin_vmid": vmid,
             "snapshot": snapshot, "storage": storage, "clones": created,
-            "config": wr.get("dest", "")}
+            "config": wr.get("dest", ""), "holds_left": holds_left,
+            "left_out": host_bound_entries(cfg["content"], gtype),
+            "tags_excluded": excluded}
 
 
 def create_async(host: Dict[str, Any], vmid: str, gtype: str, snapshot: str,
@@ -541,12 +648,15 @@ def destroy_job(progress: Callable, host: Dict[str, Any], vmid: str,
         progress(f"Destroying leftover {ds} …")
         _run(host, f"zfs destroy {shlex.quote(ds)} 2>&1")
 
+    # A hold left behind by an interrupted creation would pin the origin
+    # after the clone is gone; release ours and say if that did not work.
+    holds_left = _release_holds(host, origins) if origins else []
     still_held = {o: c for o in origins if (c := _clones_of(host, o))}
-    progress("Cleanup finished" + (" -- some origins still held" if still_held else ""),
-             ok=not still_held)
+    progress("Cleanup finished" + (" -- some origins still held" if still_held or holds_left else ""),
+             ok=not (still_held or holds_left))
     return {"success": True, "vmid": vmid, "origins": origins,
-            "released": [o for o in origins if o not in still_held],
-            "still_held": still_held, "marker": mk}
+            "released": [o for o in origins if o not in still_held and o not in holds_left],
+            "still_held": still_held, "holds_left": holds_left, "marker": mk}
 
 
 def destroy_async(host: Dict[str, Any], vmid: str, gtype: str) -> str:
