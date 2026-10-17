@@ -1351,6 +1351,9 @@ def api_restore_mount():
     if not host:
         return jsonify({"error": "Host not found"}), 404
     result = snapshot_mount(host, data.get("snapshot", ""))
+    audit_log("restore.mount", target=str(data.get("snapshot", "")), host=host["address"],
+              success=bool(result.get("success")),
+              details={"clone_ds": result.get("clone_ds", ""), "error": result.get("stderr", "")})
     return jsonify(result)
 
 
@@ -1361,6 +1364,8 @@ def api_restore_unmount():
     if not host:
         return jsonify({"error": "Host not found"}), 404
     result = snapshot_unmount(host, data.get("clone_ds", ""))
+    audit_log("restore.unmount", target=str(data.get("clone_ds", "")), host=host["address"],
+              success=bool(result.get("success")), details={"error": result.get("stderr", "")})
     return jsonify(result)
 
 
@@ -1379,7 +1384,11 @@ def api_restore_cleanup():
     if err:
         return err, code
     from app.zfs_commands import cleanup_restore_clones
-    return jsonify(cleanup_restore_clones(host))
+    result = cleanup_restore_clones(host)
+    audit_log("restore.cleanup", target=host["address"], host=host["address"],
+              success=bool(result.get("success", True)),
+              details={"destroyed": result.get("destroyed", result.get("cleaned", ""))})
+    return jsonify(result)
 
 
 @app.route("/api/restore/browse")
@@ -1471,6 +1480,8 @@ def api_zvol_partition_mount():
     if not host:
         return jsonify({"error": "Host not found"}), 404
     result = zvol_partition_mount(host, data.get("device", ""), data.get("fstype", ""))
+    audit_log("zvol.partition_mount", target=str(data.get("device", "")), host=host["address"],
+              success=bool(result.get("success")), details={"error": result.get("error", "")})
     return jsonify(result)
 
 

@@ -585,6 +585,11 @@ def destroy_snapshot(host, full_name, recursive=False):
         full_name = validate_zfs_name(full_name, "Snapshot")
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
+    # The name charset allows a bare dataset; "zfs destroy rpool/data" would
+    # then run under an audit entry that says snapshot.destroy. A snapshot
+    # has an @ -- nothing else is destroyed here.
+    if "@" not in full_name:
+        return {"success": False, "stderr": f"{full_name} is not a snapshot (no @) -- refusing"}
     cmd = "zfs destroy"
     if recursive:
         cmd += " -r"
@@ -1283,6 +1288,37 @@ ZVOL_MOUNT_BASE = "/tmp/zfs-tool-zvol-restore"
 # Zvol Restore (VM volumes — kpartx-based)
 # ---------------------------------------------------------------------------
 
+# A kpartx mapping of a zvol snapshot is the ONLY device-mapper node the
+# restore code may mount or remove. The name alone does not prove that:
+# LVM-thin volumes live in /dev/mapper too (pve-vm--100--disk--0 matches a
+# "vm-" grep), and "/dev/mapper/../sda2" starts with the prefix. What proves
+# it is the mapping's dependency: kpartx maps onto the zvol's block device,
+# which the kernel names zd<N>. Everything below asks dmsetup for that.
+_MAPPER_NAME_RE = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
+_ZVOL_DEV_RE = re.compile(r"^/dev/zvol/([A-Za-z0-9_.:/-]+@[A-Za-z0-9_.:-]+)$")
+_ZVOL_BACKED_MAPPINGS_SH = (
+    "for p in /dev/mapper/*; do n=${p##*/}; [ \"$n\" = control ] && continue; "
+    "d=$(dmsetup deps -o devname \"$n\" 2>/dev/null); "
+    "case \"$d\" in *zd[0-9]*) echo \"$n\";; esac; done"
+)
+
+
+def _zvol_backed_mappings(host):
+    """Names under /dev/mapper whose mapping sits on a zd<N> device."""
+    r = run_command(host, _ZVOL_BACKED_MAPPINGS_SH)
+    if not r.get("success"):
+        return []
+    return [ln.strip() for ln in (r.get("stdout") or "").splitlines()
+            if ln.strip() and _MAPPER_NAME_RE.match(ln.strip())]
+
+
+def _is_zvol_backed(host, dev_name):
+    if not _MAPPER_NAME_RE.match(dev_name or ""):
+        return False
+    r = run_command(host, f"dmsetup deps -o devname {shlex.quote(dev_name)} 2>/dev/null")
+    return bool(r.get("success")) and re.search(r"\bzd\d+\b", r.get("stdout") or "") is not None
+
+
 def zvol_snapshot_mount(host, snapshot):
     """Expose partitions of a zvol snapshot via kpartx and list them."""
     try:
@@ -1407,12 +1443,14 @@ def _format_size(size_bytes):
 
 def zvol_partition_mount(host, device, fstype=""):
     """Mount a specific partition from a kpartx-exposed zvol snapshot."""
-    # Validate device path: must be /dev/mapper/...
-    if not device.startswith("/dev/mapper/"):
-        return {"success": False, "error": "Invalid device path — must be /dev/mapper/*"}
-
-    # Sanitize device name for mount directory
-    dev_name = device.replace("/dev/mapper/", "")
+    # /dev/mapper/<name>, one path component, and the mapping must sit on a
+    # zvol. "/dev/mapper/pve-root" or "/dev/mapper/../sda2" passed the old
+    # prefix check and gave the browser /etc/shadow of the host, read-only.
+    dev_name = device[len("/dev/mapper/"):] if (device or "").startswith("/dev/mapper/") else ""
+    if not _MAPPER_NAME_RE.match(dev_name):
+        return {"success": False, "error": "Invalid device path -- must be /dev/mapper/<name>"}
+    if not _is_zvol_backed(host, dev_name):
+        return {"success": False, "error": f"{device} is not a kpartx mapping of a zvol snapshot -- refusing"}
     mount_path = f"{ZVOL_MOUNT_BASE}/{dev_name}"
 
     # Create mount directory
@@ -1478,10 +1516,17 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
     """Unmount a zvol partition and optionally remove kpartx mappings."""
     errors = []
 
-    # Validate mount path
-    # Boundary, not prefix: "<base>-something" starts with the base too.
-    if mount_path and not mount_path.startswith(ZVOL_MOUNT_BASE + "/"):
-        return {"success": False, "error": "Invalid mount path — must be under zvol restore base"}
+    # The mount path is <base>/<mapper name>, created by zvol_partition_mount;
+    # anything else (".." included) is refused, not normalised.
+    if mount_path and not re.match(r"^" + re.escape(ZVOL_MOUNT_BASE) + r"/[A-Za-z0-9_.:@+-]+$", mount_path):
+        return {"success": False, "error": "Invalid mount path -- must be <zvol restore base>/<mapping>"}
+    # zvol_dev names the snapshot device kpartx was run on. It ends up in a
+    # zfs set, so it is validated as a ZFS snapshot name and quoted -- the
+    # one unquoted line of this section was a root shell for whoever could
+    # reach the route.
+    zvol_dev = (zvol_dev or "").strip()
+    if zvol_dev and not _ZVOL_DEV_RE.match(zvol_dev):
+        return {"success": False, "error": "Invalid zvol device -- expected /dev/zvol/<pool>/<dataset>@<snapshot>"}
 
     # Unmount
     if mount_path:
@@ -1496,23 +1541,17 @@ def zvol_unmount(host, mount_path, zvol_dev=""):
         # First try kpartx -d (needs the device to still exist)
         kp_rm = run_command(host, f"kpartx -d {shlex.quote(zvol_dev)} 2>/dev/null")
 
-        # Fallback: remove any leftover dm mappings via dmsetup
-        # Extract the base name from zvol_dev for matching mapper entries
-        zvol_path = zvol_dev.replace("/dev/zvol/", "")
-        ds_name = zvol_path.rsplit("@", 1)[0] if "@" in zvol_path else ""
-        snap_part = zvol_path.split("/")[-1] if "/" in zvol_path else zvol_path  # e.g. vm-100-disk-0@snap
-
-        if snap_part:
-            dm_list = run_command(host, f"ls /dev/mapper/ 2>/dev/null | grep {shlex.quote(snap_part)}")
-            if dm_list["success"] and dm_list["stdout"].strip():
-                for dm_name in dm_list["stdout"].strip().splitlines():
-                    dm_name = dm_name.strip()
-                    if dm_name:
-                        run_command(host, f"dmsetup remove {shlex.quote(dm_name)} 2>/dev/null")
+        # Fallback: leftover mappings of THIS snapshot. kpartx names them
+        # <basename><p?><N>; only zvol-backed mappings are candidates at all.
+        zvol_path = zvol_dev[len("/dev/zvol/"):]
+        ds_name = zvol_path.rsplit("@", 1)[0]
+        snap_part = zvol_path.rsplit("/", 1)[-1]                    # vm-100-disk-0@snap
+        for dm_name in _zvol_backed_mappings(host):
+            if dm_name.startswith(snap_part) and re.match(r"^p?\d+$", dm_name[len(snap_part):]):
+                run_command(host, f"dmsetup remove {shlex.quote(dm_name)} 2>/dev/null")
 
         # Restore snapdev=hidden AFTER kpartx/dmsetup cleanup
-        if ds_name:
-            run_command(host, f"zfs set snapdev=hidden {ds_name}")
+        run_command(host, f"zfs set snapdev=hidden {shlex.quote(ds_name)}")
 
     _invalidate(host)
     return {
@@ -1538,12 +1577,7 @@ def zvol_list_active(host):
                 active["mounts"].append({"device": device, "mount_path": mp, "fstype": fstype})
 
     # kpartx/dm mappings
-    dm_check = run_command(host, "ls /dev/mapper/ 2>/dev/null | grep -E '(vm-|zd[0-9])'")
-    if dm_check["success"] and dm_check["stdout"].strip():
-        for dm_name in dm_check["stdout"].strip().splitlines():
-            dm_name = dm_name.strip()
-            if dm_name:
-                active["mappings"].append(dm_name)
+    active["mappings"].extend(_zvol_backed_mappings(host))
 
     # Volumes with snapdev=visible
     snapdev_check = run_command(host, "zfs get snapdev -t volume -s local -H -o name,value")
@@ -1579,15 +1613,14 @@ def zvol_cleanup_all(host):
     # Clean up mount base directory
     run_command(host, f"rmdir {ZVOL_MOUNT_BASE}/* 2>/dev/null")
 
-    # 2. Remove leftover kpartx/dm mappings (vm-* and zd* patterns in mapper)
-    dm_check = run_command(host, "ls /dev/mapper/ 2>/dev/null | grep -E '(vm-|zd[0-9])'")
-    if dm_check["success"] and dm_check["stdout"].strip():
-        for dm_name in dm_check["stdout"].strip().splitlines():
-            dm_name = dm_name.strip()
-            if dm_name:
-                r = run_command(host, f"dmsetup remove {shlex.quote(dm_name)} 2>/dev/null")
-                if r["success"]:
-                    cleaned["mappings"].append(dm_name)
+    # 2. Remove leftover kpartx mappings -- those on a zvol, and only those.
+    # The old grep for "(vm-|zd[0-9])" also hit LVM-thin volumes
+    # (pve-vm--100--disk--0): running guests failed with "busy", stopped
+    # ones would not start until lvchange -ay.
+    for dm_name in _zvol_backed_mappings(host):
+        r = run_command(host, f"dmsetup remove {shlex.quote(dm_name)} 2>/dev/null")
+        if r["success"]:
+            cleaned["mappings"].append(dm_name)
 
     # 3. Reset any snapdev=visible back to hidden
     snapdev_check = run_command(host, "zfs get snapdev -t volume -s local -H -o name,value")
@@ -1648,7 +1681,12 @@ def snapshot_unmount(host, clone_ds):
         clone_ds = validate_zfs_name(clone_ds, "Clone dataset")
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    result = run_command(host, f"zfs destroy -r {clone_ds}")
+    # Only what snapshot_mount creates: <pool>/restore-<name>. The charset
+    # check alone let "rpool/data" through -- into zfs destroy -r.
+    if not re.match(r"^[^/@]+/restore-[A-Za-z0-9_.:-]+$", clone_ds):
+        return {"success": False, "stderr": f"{clone_ds} is not a restore clone "
+                                            f"(<pool>/restore-...) -- refusing"}
+    result = run_command(host, f"zfs destroy -r {shlex.quote(clone_ds)}")
     if result.get("success"):
         _invalidate(host)
     return result
@@ -1727,6 +1765,11 @@ def _verify_under_mount(host, path, mount_path, what="Path"):
     return None
 
 
+_LS_PERMS_RE = re.compile(r"^[-dlcbps][-rwxsStT]{9}[.+@]?$")
+_LS_SIZE_RE = re.compile(r"^(\d+|\d+,\s*\d+)$")           # bytes, or major, minor for devices
+_LS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2}(\.\d+)?)?( [+-]\d{4})?$")
+
+
 def snapshot_browse(host, mount_path, subpath=""):
     """List files/directories at a path inside a mounted snapshot."""
     try:
@@ -1741,7 +1784,9 @@ def snapshot_browse(host, mount_path, subpath=""):
     if esc:
         return esc
 
-    result = run_command(host, f"ls -la --time-style=long-iso {shlex.quote(full_path)} 2>/dev/null")
+    # -q: a control character in a file name -- a newline above all -- becomes
+    # "?" instead of a second output line whose columns the guest chooses.
+    result = run_command(host, f"ls -laq --time-style=long-iso {shlex.quote(full_path)} 2>/dev/null")
     if not result["success"]:
         return {"success": False, "stderr": result.get("stderr", "Cannot list directory")}
 
@@ -1750,12 +1795,22 @@ def snapshot_browse(host, mount_path, subpath=""):
         if line.startswith("total"):
             continue
         parts = line.split(None, 7)
+        if len(parts) >= 8 and parts[4].endswith(","):
+            # a device file: "8, 1" (major, minor) takes two columns
+            parts = line.split(None, 8)
+            if len(parts) < 9:
+                continue
+            parts = parts[:4] + [parts[4] + " " + parts[5]] + parts[6:]
         if len(parts) >= 8:
             perms = parts[0]
             size = parts[4]
             date = f"{parts[5]} {parts[6]}"
             name = parts[7]
             if name in (".", ".."):
+                continue
+            # Every column but the name has a fixed shape; a line that does
+            # not fit is not an ls line and is dropped.
+            if not (_LS_PERMS_RE.match(perms) and _LS_SIZE_RE.match(size) and _LS_DATE_RE.match(date)):
                 continue
             entry_type = "dir" if perms.startswith("d") else ("link" if perms.startswith("l") else "file")
             entries.append({
