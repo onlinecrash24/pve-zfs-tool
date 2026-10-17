@@ -2792,9 +2792,9 @@ async function _guestSnapshotsHtml(guest, pools, guestType) {
                 <td>${s.used}</td><td>${s.refer}</td><td style="font-size:12px">${escapeHtml(s.creation)}</td>
                 <td>
                     <div class="btn-group">
-                        <button class="btn btn-sm btn-warning" onclick="rollbackGuestSnap('${escapeHtml(s.full_name)}')">${escapeHtml(t("rollback"))}</button>
-                        ${isLxc ? `<button class="btn btn-sm btn-success" onclick="openFileRestore('${escapeHtml(s.full_name)}')">${escapeHtml(t("restore_files"))}</button>` : ''}
-                        ${!isLxc ? `<button class="btn btn-sm btn-success" onclick="openVmFileRestore('${escapeHtml(s.full_name)}')">${escapeHtml(t("restore_files"))}</button>` : ''}
+                        <button class="btn btn-sm btn-warning" ${dataAction("rollbackGuestSnap", s.full_name)}>${escapeHtml(t("rollback"))}</button>
+                        ${isLxc ? `<button class="btn btn-sm btn-success" ${dataAction("openFileRestore", s.full_name)}>${escapeHtml(t("restore_files"))}</button>` : ''}
+                        ${!isLxc ? `<button class="btn btn-sm btn-success" ${dataAction("openVmFileRestore", s.full_name)}>${escapeHtml(t("restore_files"))}</button>` : ''}
                     </div>
                 </td>
             </tr>`;
@@ -2989,7 +2989,7 @@ async function browseRestorePath(subpath) {
     for (const part of pathParts) {
         cumulative += (cumulative ? "/" : "") + part;
         const p = cumulative;
-        breadcrumb += ` / <span class="restore-crumb" onclick="browseRestorePath('${escapeAttr(p)}')">${escapeHtml(part)}</span>`;
+        breadcrumb += ` / <span class="restore-crumb" ${dataAction("browseRestorePath", p)}>${escapeHtml(part)}</span>`;
     }
 
     const modalHtml = `
@@ -3033,7 +3033,7 @@ async function browseRestorePath(subpath) {
     let tableHtml = `<table><thead><tr><th style="width:24px"></th><th>${escapeHtml(t("name"))}</th><th>${escapeHtml(t("size"))}</th><th>${escapeHtml(t("created"))}</th><th>${escapeHtml(t("actions"))}</th></tr></thead><tbody>`;
     if (subpath) {
         const parentPath = pathParts.slice(0, -1).join("/");
-        tableHtml += `<tr style="cursor:pointer" onclick="browseRestorePath('${escapeAttr(parentPath)}')">
+        tableHtml += `<tr style="cursor:pointer" ${dataAction("browseRestorePath", parentPath)}>
             <td style="font-size:16px">&#x1F519;</td><td colspan="3" style="color:var(--accent)">..</td><td></td></tr>`;
     }
 
@@ -3041,15 +3041,15 @@ async function browseRestorePath(subpath) {
         const entryPath = subpath ? `${subpath}/${entry.name}` : entry.name;
         const icon = entry.type === "dir" ? "&#x1F4C1;" : (entry.type === "link" ? "&#x1F517;" : "&#x1F4C4;");
         const nameStyle = entry.type === "dir" ? "color:var(--accent);cursor:pointer" : "";
-        const nameClick = entry.type === "dir" ? `onclick="browseRestorePath('${escapeAttr(entryPath)}')"` : "";
+        const nameClick = entry.type === "dir" ? dataAction("browseRestorePath", entryPath) : "";
         const sizeDisplay = entry.type === "dir" ? "-" : entry.size;
 
         let actions = "";
         if (entry.type === "file") {
-            actions += `<button class="btn btn-sm" onclick="previewRestoreFile('${escapeAttr(entryPath)}')">${escapeHtml(t("preview"))}</button> `;
-            actions += `<button class="btn btn-sm btn-success" onclick="restoreFile('${escapeAttr(entryPath)}')">${escapeHtml(t("restore"))}</button>`;
+            actions += `<button class="btn btn-sm" ${dataAction("previewRestoreFile", entryPath)}>${escapeHtml(t("preview"))}</button> `;
+            actions += `<button class="btn btn-sm btn-success" ${dataAction("restoreFile", entryPath)}>${escapeHtml(t("restore"))}</button>`;
         } else if (entry.type === "dir") {
-            actions += `<button class="btn btn-sm btn-success" onclick="restoreDir('${escapeAttr(entryPath)}')">${escapeHtml(t("restore_dir"))}</button>`;
+            actions += `<button class="btn btn-sm btn-success" ${dataAction("restoreDir", entryPath)}>${escapeHtml(t("restore_dir"))}</button>`;
         }
 
         tableHtml += `<tr>
@@ -3205,7 +3205,7 @@ function showPartitionSelect() {
                 `;
             } else if (isMountable) {
                 html += `
-                    <div class="card" style="cursor:pointer;transition:border-color 0.2s" onclick="mountZvolPartition('${escapeAttr(p.device)}','${escapeAttr(p.fstype)}')"
+                    <div class="card" style="cursor:pointer;transition:border-color 0.2s" ${dataAction("mountZvolPartition", p.device, p.fstype)}
                          onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
                         <div class="card-body" style="padding:16px;text-align:center">
                             <div style="font-size:28px;margin-bottom:8px">${fsIcon}</div>
@@ -3267,7 +3267,7 @@ async function browseZvolPath(subpath) {
     for (const part of pathParts) {
         cumulative += (cumulative ? "/" : "") + part;
         const p = cumulative;
-        breadcrumb += ` / <span class="restore-crumb" onclick="browseZvolPath('${escapeAttr(p)}')">${escapeHtml(part)}</span>`;
+        breadcrumb += ` / <span class="restore-crumb" ${dataAction("browseZvolPath", p)}>${escapeHtml(part)}</span>`;
     }
 
     const modalHtml = `
@@ -3314,7 +3314,7 @@ async function browseZvolPath(subpath) {
     let tableHtml = `<table><thead><tr><th style="width:24px"></th><th>${escapeHtml(t("name"))}</th><th>${escapeHtml(t("size"))}</th><th>${escapeHtml(t("created") || "Date")}</th><th>${escapeHtml(t("actions"))}</th></tr></thead><tbody>`;
     if (subpath) {
         const parentPath = pathParts.slice(0, -1).join("/");
-        tableHtml += `<tr style="cursor:pointer" onclick="browseZvolPath('${escapeAttr(parentPath)}')">
+        tableHtml += `<tr style="cursor:pointer" ${dataAction("browseZvolPath", parentPath)}>
             <td style="font-size:16px">&#x1F519;</td><td colspan="3" style="color:var(--accent)">..</td><td></td></tr>`;
     }
 
@@ -3322,15 +3322,15 @@ async function browseZvolPath(subpath) {
         const entryPath = subpath ? `${subpath}/${entry.name}` : entry.name;
         const icon = entry.type === "dir" ? "&#x1F4C1;" : (entry.type === "link" ? "&#x1F517;" : "&#x1F4C4;");
         const nameStyle = entry.type === "dir" ? "color:var(--accent);cursor:pointer" : "";
-        const nameClick = entry.type === "dir" ? `onclick="browseZvolPath('${escapeAttr(entryPath)}')"` : "";
+        const nameClick = entry.type === "dir" ? dataAction("browseZvolPath", entryPath) : "";
         const sizeDisplay = entry.type === "dir" ? "-" : entry.size;
 
         let actions = "";
         if (entry.type === "file") {
-            actions += `<button class="btn btn-sm" onclick="previewZvolFile('${escapeAttr(entryPath)}')">${escapeHtml(t("preview"))}</button> `;
-            actions += `<button class="btn btn-sm btn-success" onclick="downloadZvolFile('${escapeAttr(entryPath)}')">${escapeHtml(t("download") || "Download")}</button>`;
+            actions += `<button class="btn btn-sm" ${dataAction("previewZvolFile", entryPath)}>${escapeHtml(t("preview"))}</button> `;
+            actions += `<button class="btn btn-sm btn-success" ${dataAction("downloadZvolFile", entryPath)}>${escapeHtml(t("download") || "Download")}</button>`;
         } else if (entry.type === "dir") {
-            actions += `<button class="btn btn-sm" onclick="browseZvolPath('${escapeAttr(entryPath)}')">${escapeHtml(t("open") || "Open")}</button>`;
+            actions += `<button class="btn btn-sm" ${dataAction("browseZvolPath", entryPath)}>${escapeHtml(t("open") || "Open")}</button>`;
         }
 
         tableHtml += `<tr>
@@ -8662,8 +8662,47 @@ async function _saveAIConfig() {
 }
 
 function escapeAttr(s) {
-    return (s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return (s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;")
+                    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
+// ---------------------------------------------------------------------------
+// Click actions carrying data: never as JavaScript inside an attribute.
+//
+// An onclick attribute built around escapeAttr(path) put a value into a JS
+// string literal inside HTML. escapeAttr covered the HTML layer; the JS layer -- a quote or
+// a backslash in a file name -- was open, and the names in the file-restore
+// browser come straight from `ls` inside a guest. Anyone able to create a
+// file in a guest could run code in the admin's session with one click.
+//
+// Now the element carries data-action (a name from the allowlist below) and
+// data-args (a JSON array, HTML-escaped). One delegated listener reads the
+// attributes back -- the browser decodes them, no JavaScript is ever parsed
+// from the value -- and calls the handler. tests/test_security_stage1.py
+// fails the build if the old pattern comes back.
+// ---------------------------------------------------------------------------
+const DATA_ACTIONS = new Set([
+    "rollbackGuestSnap", "openFileRestore", "openVmFileRestore",
+    "browseRestorePath", "previewRestoreFile", "restoreFile", "restoreDir",
+    "mountZvolPartition", "browseZvolPath", "previewZvolFile", "downloadZvolFile",
+]);
+
+function dataAction(name, ...args) {
+    if (!DATA_ACTIONS.has(name)) throw new Error("unknown data action " + name);
+    return `data-action="${escapeAttr(name)}" data-args="${escapeAttr(JSON.stringify(args))}"`;
+}
+
+document.addEventListener("click", (e) => {
+    const el = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
+    if (!el) return;
+    const name = el.dataset.action;
+    if (!DATA_ACTIONS.has(name) || typeof window[name] !== "function") return;
+    let args;
+    try { args = JSON.parse(el.dataset.args || "[]"); } catch (_) { return; }
+    if (!Array.isArray(args)) return;
+    e.preventDefault();
+    window[name](...args);
+});
 
 // ---------------------------------------------------------------------------
 // Modal

@@ -121,7 +121,7 @@ def add_host(name, address, port=22, user="root", identity=None):
             except Exception:
                 pass
         raw_key = fp_result["raw_key"]
-        host_keys.add(address, raw_key.get_name(), raw_key)
+        host_keys.add(known_hosts_name(address, port), raw_key.get_name(), raw_key)
         host_keys.save(KNOWN_HOSTS)
         log.info("Stored host key for %s (%s)", address, fp_result.get("fingerprint", "?"))
 
@@ -176,6 +176,41 @@ def set_host_standby(address, standby):
     return False, "Host not found"
 
 
+def known_hosts_name(address, port=22):
+    """The name paramiko looks a host key up under: bare for port 22,
+    ``[address]:port`` otherwise. A key stored under the bare name is never
+    consulted for a host on another port -- pinning that does not pin."""
+    port = int(port or 22)
+    return address if port == 22 else f"[{address}]:{port}"
+
+
+def _has_pinned_key(host_keys, address, port=22):
+    return host_keys.lookup(known_hosts_name(address, port)) is not None
+
+
+def host_key_policy(registered, pinned, password):
+    """Which trust rule applies to a connection.
+
+    * ``adhoc``  -- password login to a host that is NOT registered (the DR
+                    reach-a-reinstalled-box case): nothing is pinned for it,
+                    accept the key for this one connection, store nothing.
+    * ``reject`` -- a pinned key exists: it must match, whatever the auth.
+                    A registered host that was reinstalled is removed and
+                    added again by the operator, which pins the new key;
+                    the tool never drops a pin on its own because a password
+                    was typed -- that is exactly what a man in the middle
+                    would want.
+    * ``tofu``   -- no pin yet (host added before pinning existed, or pinned
+                    under the bare name while it listens on another port):
+                    accept, store, and be strict from then on.
+    """
+    if password and not registered:
+        return "adhoc"
+    if pinned:
+        return "reject"
+    return "tofu"
+
+
 def _forget_host_key(address):
     """Drop any known_hosts entry for ``address`` (e.g. a reinstalled host whose
     SSH host key changed), so a fresh TOFU can accept the new one."""
@@ -226,22 +261,27 @@ def discard_unregistered(address):
 def get_ssh_client(host):
     client = paramiko.SSHClient()
     password = host.get("password")
-    if password:
-        # Ad-hoc / DR: authenticate with a (transient, never-stored) password.
-        # A reinstalled host has a NEW host key, so forget any stale entry and
-        # accept the current one -- the user vouching for it via the password
-        # is the trust anchor here.
-        _forget_host_key(host["address"])
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    address = host["address"]
+    port = int(host.get("port", 22) or 22)
+    registered = any(h.get("address") == address for h in load_hosts())
+    if password and not registered:
+        # Ad-hoc: a stale entry from an earlier probe would only block the
+        # test; nothing registered depends on it.
+        _forget_host_key(address)
+    if os.path.exists(KNOWN_HOSTS):
+        try:
+            client.load_host_keys(KNOWN_HOSTS)
+        except Exception:
+            pass
+    policy = host_key_policy(registered, _has_pinned_key(client.get_host_keys(), address, port),
+                             bool(password))
+    if policy == "reject":
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
     else:
-        # Load known hosts for host key verification
-        if os.path.exists(KNOWN_HOSTS):
-            try:
-                client.load_host_keys(KNOWN_HOSTS)
-            except Exception:
-                pass
-        # Warn if unknown key, but still allow (TOFU: key stored at add_host time)
-        client.set_missing_host_key_policy(paramiko.WarningPolicy())
+        if policy == "tofu":
+            log.warning("No pinned host key for %s -- trusting on first use and storing it",
+                        known_hosts_name(address, port))
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     connect_kwargs = dict(
         hostname=host["address"],
@@ -256,16 +296,19 @@ def get_ssh_client(host):
 
     try:
         client.connect(**connect_kwargs)
+    except paramiko.BadHostKeyException as e:
+        # The key changed under a pin: a man in the middle, or a reinstalled
+        # host. The operator decides which by removing and re-adding the host.
+        raise ConnectionError(
+            f"SSH host key of {address} does not match the pinned key -- possible "
+            f"man-in-the-middle. If the host was reinstalled, remove it and add it "
+            f"again to pin the new key. ({e})")
     except paramiko.ssh_exception.SSHException as e:
-        # A changed host key is a potential MITM for key-auth -- reject. (The
-        # password path already re-TOFU'd above, so this only guards key-auth.)
-        if not password and ("not found in known_hosts" in str(e).lower()
-                             or "does not match" in str(e).lower()):
-            raise ConnectionError(f"SSH host key verification failed for {host['address']}: {e}")
+        if "not found in known_hosts" in str(e).lower() or "does not match" in str(e).lower():
+            raise ConnectionError(f"SSH host key verification failed for {address}: {e}")
         raise
-    # Persist newly-seen host keys for the key-auth path (the password path is
-    # one-shot and intentionally doesn't write the shared known_hosts).
-    if not password:
+    # Persist a first-use key; the ad-hoc path is one-shot and stores nothing.
+    if policy == "tofu":
         try:
             client.get_host_keys().save(KNOWN_HOSTS)
         except Exception:

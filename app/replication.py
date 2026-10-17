@@ -473,6 +473,10 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
     """Delete a per-source replication config and (optionally) the
     zfs-auto-snapshots underneath the replica target.
 
+    A source is required: without one the path would fall back to the
+    legacy /etc/bashclub/zsync.conf, a file and a cron line the tool does
+    not own.
+
     Steps:
       1. Read the config to discover ``target=...``.
       2. Remove the cron entry for this config (if any).
@@ -483,6 +487,8 @@ def delete_config(host: Dict[str, Any], source: Optional[str] = None,
 
     Returns a structured result so the UI can show what happened.
     """
+    if not source:
+        return {"success": False, "error": "source required"}
     cfg_path = config_path_for(source)
     cfg = read_config(host, source=source)
     target_ds = (cfg.get("values") or {}).get("target", "").strip()
@@ -1332,6 +1338,53 @@ def set_dataset_tags(host: Dict[str, Any], tag: str,
     return {"success": all_ok, "results": results}
 
 
+def _ere_escape(s: str) -> str:
+    return re.sub(r"([.\[\]{}()*+?^$|\\])", r"\\\1", s)
+
+
+# The tool's own cron line for a config, and nothing else. Field report: a
+# foreign line with the same path plus another flag (``-c X.conf -d``), a
+# ``X.conf.alt``, and a commented-out line all vanished because the marker
+# was matched as a bare substring. This pattern needs the path to END the
+# command, or to be followed only by the tool's own redirect; a commented
+# line never matches. One template, two flavours: ERE for grep on the host,
+# Python for the tests -- so they cannot drift.
+_OWN_CRON_LINE_TEMPLATE = "^{ws}*[^#{ws}].*{ws}(/usr/bin/)?bashclub-zsync -c {path}({ws}+>>.*)?{ws}*$"
+
+
+def own_cron_line_pattern(cfg_path: str, flavor: str = "ere") -> str:
+    if flavor == "python":
+        return _OWN_CRON_LINE_TEMPLATE.format(ws=r"\s", path=re.escape(cfg_path))
+    return _OWN_CRON_LINE_TEMPLATE.format(ws="[[:space:]]", path=_ere_escape(cfg_path))
+
+
+def _crontab_rewrite_script(cfg_path: str, append_b64: Optional[str] = None) -> str:
+    """Shell for: read root's crontab, back it up, drop the tool's own line
+    for ``cfg_path``, optionally append a new one, install.
+
+    Fail closed: ``crontab -l`` failing for any reason other than "no crontab
+    for root" aborts before anything is written. The old form piped
+    ``(crontab -l || true)`` straight into the replacement -- a read error
+    silently installed a crontab consisting of the one zsync line. The
+    previous content is kept as ~/crontab.bak-<timestamp> when it was not
+    empty.
+    """
+    re_b64 = base64.b64encode(own_cron_line_pattern(cfg_path).encode("utf-8")).decode("ascii")
+    s = (
+        f"RE=$(echo {shlex.quote(re_b64)} | base64 -d); "
+        "TMP=$(mktemp); CUR=\"$TMP.cur\"; ERR=\"$TMP.err\"; "
+        "if crontab -l > \"$CUR\" 2> \"$ERR\"; then :; "
+        "elif grep -qi 'no crontab for' \"$ERR\"; then : > \"$CUR\"; "
+        "else echo __CRONTAB_UNREADABLE__; cat \"$ERR\"; rm -f \"$TMP\" \"$CUR\" \"$ERR\"; exit 1; fi; "
+        "if [ -s \"$CUR\" ]; then cp \"$CUR\" \"${HOME:-/root}/crontab.bak-$(date +%Y%m%d-%H%M%S)\"; fi; "
+        "grep -vE -- \"$RE\" \"$CUR\" > \"$TMP\" || true; "
+    )
+    if append_b64:
+        s += f"echo {shlex.quote(append_b64)} | base64 -d >> \"$TMP\"; printf '\\n' >> \"$TMP\"; "
+    s += "crontab \"$TMP\"; rm -f \"$TMP\" \"$CUR\" \"$ERR\"; "
+    return s
+
+
 def _cron_marker(cfg_path: str) -> str:
     """Stable, grep-able marker that uniquely identifies a zsync cron line for
     a specific config file. Used to find/replace/remove the entry without
@@ -1408,16 +1461,15 @@ def _remove_cron_line(host: Dict[str, Any], where: str, cfg_path: str) -> Dict[s
     from one /etc/cron.d file. The cron.d file is rewritten in place (``cat >``
     into the existing inode) so its ownership and mode survive -- cron ignores
     a file that is group-writable or not root-owned."""
-    marker = _cron_marker(cfg_path)
     if where == "crontab":
-        cmd = (f"M={shlex.quote(marker)}; TMP=$(mktemp); "
-               f"crontab -l 2>/dev/null | grep -vF \"$M\" > \"$TMP\"; "
-               f"crontab \"$TMP\" && rm -f \"$TMP\" && echo __OK__")
+        cmd = "set -e; " + _crontab_rewrite_script(cfg_path) + "echo __OK__"
     else:
         if not _CROND_PATH_RE.match(where or ""):
             return {"success": False, "stderr": "invalid cron.d path"}
-        cmd = (f"M={shlex.quote(marker)}; F={shlex.quote(where)}; TMP=$(mktemp); "
-               f"grep -vF \"$M\" \"$F\" > \"$TMP\"; cat \"$TMP\" > \"$F\" && rm -f \"$TMP\" && echo __OK__")
+        re_b64 = base64.b64encode(own_cron_line_pattern(cfg_path).encode("utf-8")).decode("ascii")
+        cmd = (f"RE=$(echo {shlex.quote(re_b64)} | base64 -d); F={shlex.quote(where)}; TMP=$(mktemp); "
+               f"cp \"$F\" \"$F.bak-$(date +%Y%m%d-%H%M%S)\"; "
+               f"grep -vE -- \"$RE\" \"$F\" > \"$TMP\" || true; cat \"$TMP\" > \"$F\" && rm -f \"$TMP\" && echo __OK__")
     r = run_command(host, cmd, timeout=15)
     ok = "__OK__" in (r.get("stdout") or "")
     return {"success": ok, "stderr": "" if ok else (r.get("stderr") or r.get("stdout") or "")}
@@ -1557,30 +1609,19 @@ def set_cron(host: Dict[str, Any], schedule: str,
     new_line = f"{schedule.strip()} {BINARY_NAME} -c {cfg_path} >> {log_path} 2>&1"
     # Build a small awk filter that drops existing zsync lines for THIS config
     # but keeps everything else. Then append the new line.
+    if not source:
+        return {"success": False, "error": "source required -- the tool does not schedule "
+                                           "the legacy /etc/bashclub/zsync.conf"}
     appended = base64.b64encode(new_line.encode("utf-8")).decode("ascii")
-    marker_b64 = base64.b64encode(marker.encode("utf-8")).decode("ascii")
-    # IMPORTANT: cron requires a trailing newline on the last line, otherwise
-    # "crontab" rejects the file with "missing newline before EOF". base64 -d
-    # writes raw bytes without a trailing newline, so we explicitly append one.
-    # IMPORTANT: cron requires a trailing newline on the last line, otherwise
-    # "crontab" rejects the file with "missing newline before EOF". base64 -d
-    # writes raw bytes without a trailing newline, so we explicitly append one.
-    # The "crontab" utility itself signals cron via the spool file's mtime,
-    # but we additionally trigger an explicit reload so the new schedule is
-    # picked up deterministically (covers both Debian's cron and any setup
-    # that uses cronie / systemd-cron).
+    # cron requires a trailing newline on the last line ("missing newline
+    # before EOF" otherwise); base64 -d writes none, so one is appended. The
+    # explicit reload afterwards covers Debian's cron, cronie and systemd-cron.
     log_dir = os.path.dirname(log_path)
     script = (
         "set -e; "
         # ensure the log directory exists (upstream: /var/log/bashclub-zsync)
         + (f"mkdir -p {shlex.quote(log_dir)}; " if log_dir and log_dir != "/var/log" else "")
-        + f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
-        "TMP=$(mktemp); "
-        "(crontab -l 2>/dev/null || true) | grep -vF \"$M\" > \"$TMP\" || true; "
-        f"echo {shlex.quote(appended)} | base64 -d >> \"$TMP\"; "
-        "printf '\\n' >> \"$TMP\"; "
-        "crontab \"$TMP\"; "
-        "rm -f \"$TMP\"; "
+        + _crontab_rewrite_script(cfg_path, appended)
         + _cron_reload_snippet() +
         "echo __OK__"
     )
@@ -1593,18 +1634,11 @@ def set_cron(host: Dict[str, Any], schedule: str,
 
 def remove_cron(host: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
     """Remove the zsync cron entry for the given config file."""
+    if not source:
+        return {"success": False, "error": "source required"}
     cfg_path = config_path_for(source)
-    marker = _cron_marker(cfg_path)
-    marker_b64 = base64.b64encode(marker.encode("utf-8")).decode("ascii")
-    script = (
-        f"M=$(echo {shlex.quote(marker_b64)} | base64 -d); "
-        "TMP=$(mktemp); "
-        "(crontab -l 2>/dev/null || true) | grep -vF \"$M\" > \"$TMP\" || true; "
-        "crontab \"$TMP\"; "
-        "rm -f \"$TMP\"; "
-        + _cron_reload_snippet() +
-        "echo __OK__"
-    )
+    script = ("set -e; " + _crontab_rewrite_script(cfg_path)
+              + _cron_reload_snippet() + "echo __OK__")
     r = run_command(host, script, timeout=15)
     ok = r.get("success", False) and "__OK__" in (r.get("stdout") or "")
     return {"success": ok, "stderr": r.get("stderr", "")}

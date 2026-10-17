@@ -162,7 +162,7 @@ depends_on:
 
 Open the web UI at `http://DOCKER-HOST-IP:5000`
 
-> **Important:** Change `SECRET_KEY`, `ADMIN_USER`, and `ADMIN_PASSWORD` before deploying to production. The application will log warnings at startup if default values are detected.
+> **Important:** Change `SECRET_KEY`, `ADMIN_USER`, and `ADMIN_PASSWORD` before deploying to production. A placeholder `SECRET_KEY` is replaced by a random one at startup (and logged). A placeholder, empty or short `ADMIN_PASSWORD` (fewer than 12 characters) makes the container **refuse to start**, with the reason in its log -- this UI is root on every node, so a guessable login is not a warning.
 
 ## Setup
 
@@ -303,7 +303,7 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 |----------|---------|-------------|
 | `SECRET_KEY` | `dev-key-change-me` | Flask session secret key -- **must be changed!** |
 | `ADMIN_USER` | `admin` | Login username -- **should be changed** |
-| `ADMIN_PASSWORD` | `password` | Login password -- **must be changed!** |
+| `ADMIN_PASSWORD` | *(none)* | Login password, **required**: at least 12 characters, no placeholder -- the container refuses to start otherwise |
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
 | `TRUST_PROXY` | unset | Take the client address from `X-Forwarded-For`. **Only** behind a reverse proxy -- on a directly reachable port any client could pick its own address and bypass the login rate limit |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
