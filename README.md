@@ -11,6 +11,10 @@
   <b>English</b> &middot; <a href="README_DE.md">Deutsch</a>
 </p>
 
+<p align="center">
+  <a href="https://buymeacoffee.com/onlinecrash24" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-%23FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
+</p>
+
 ## What it is
 
 Manage ZFS across several Proxmox VE hosts from one place: pull a single file
@@ -377,6 +381,12 @@ tags, so a release never ships a known, fixable vulnerability. It checks the
 Python dependency set at source level; the Debian base layer and anything
 vendored inside another package are the image scan's job (Trivy or similar
 against `ghcr.io/onlinecrash24/pve-zfs-tool`).
+
+## Support the project
+
+The tool is free and stays free. If it saves you an afternoon, a coffee is a
+nice way to say so: [buymeacoffee.com/onlinecrash24](https://buymeacoffee.com/onlinecrash24). Bug reports and
+field reports are worth just as much -- most of what is in here came from one.
 
 ## License
 

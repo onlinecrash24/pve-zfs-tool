@@ -670,3 +670,30 @@ pre.output {
     .grid-2, .grid-3, .grid-4, .grid-5 { grid-template-columns: 1fr; }
     .form-row { flex-direction: column; }
 }
+
+/* Buy Me a Coffee: the same yellow pill everywhere it appears */
+.bmc-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: #FFDD00;
+    color: #000 !important;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    text-decoration: none !important;
+    white-space: nowrap;
+    transition: background 0.15s, transform 0.1s;
+}
+.bmc-btn:hover {
+    background: #ffe84d;
+    transform: translateY(-1px);
+}
+.sidebar-support {
+    padding: 10px 20px 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: center;
+}
