@@ -7,6 +7,30 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.937 -- 2026-10-18
+
+v0.9.937 — mute per host, with an expiry
+
+Field report: a host went dark for a company move, and the only way to
+stop its mails was to delete the replication cron and switch mail off
+for the whole estate. Expected Offline (since v0.9.928) is the switch
+for a host that is meant to be off; this release adds the general one.
+
+On the Hosts page, "Mute" drops every notification about one host, on
+every channel, for 1 day, 1 week, 4 weeks or until switched off. A muted
+host carries a badge with the expiry; an expired mute switches itself
+off. Nothing else changes: monitoring, host-config backups and
+replication checks keep running, only their messages stop -- including
+those of a replication pair whose source is the muted host, since the
+host that moved is the source and the alert about it fires on the
+target. Every notification in the tool names its host now, so the one
+check in the notification layer covers all of them.
+
+Also in this release: the compose file and both READMEs say on the port
+line itself that 5000:5000 publishes plain HTTP on every interface, and
+show the 127.0.0.1:5000:5000 form that keeps it reachable for a reverse
+proxy only -- a recommendation from the security review.
+
 ## v0.9.936 -- 2026-10-17
 
 v0.9.936 — security: the file and zvol restore path, closed
