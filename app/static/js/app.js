@@ -8892,6 +8892,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateLangButtons();
     updateSidebarLanguage();
 
+    // A weak ADMIN_PASSWORD is the operator's call -- but it must be seen,
+    // not buried in a container log. One banner, every session, until the
+    // password changes.
+    API.get("/api/system/notice").then((n) => {
+        if (!n || !n.password_warning) return;
+        const main = document.querySelector(".main-content");
+        if (!main || document.getElementById("pw-notice")) return;
+        main.insertBefore(h("div", { id: "pw-notice", className: "pw-notice" }, [
+            h("strong", {}, t("pw_weak_title")),
+            document.createTextNode(" " + t("pw_weak_text", n.min_password_length)),
+        ]), main.firstChild);
+    }).catch(() => {});
+
     loadHostSelector();
 
     document.getElementById("host-select").addEventListener("change", (e) => {
