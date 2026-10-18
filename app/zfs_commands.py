@@ -75,21 +75,18 @@ def _monitor_scrub(host, pool_name):
                 send_notification(
                     "scrub_finished",
                     "Scrub Finished",
-                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}",
-                )
+                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}", host=host["address"])
             elif "scrub canceled" in stdout:
                 send_notification(
                     "scrub_finished",
                     "Scrub Cancelled",
-                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}",
-                )
+                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}", host=host["address"])
             else:
                 # Scrub not in progress and no clear result – it finished
                 send_notification(
                     "scrub_finished",
                     "Scrub Finished",
-                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}",
-                )
+                    f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})\n{scrub_info}", host=host["address"])
             break
     except Exception as e:
         log.error("Scrub monitor error for %s: %s", key, e)
@@ -281,8 +278,7 @@ def _monitor_trim(host, pool_name):
             send_notification(
                 "trim_finished",
                 "Trim Finished",
-                f"Pool: {pool_name}\nHost: {host.get('name')} ({host['address']})",
-            )
+                f"Pool: {pool_name}\nHost: {host.get('name')} ({host['address']})", host=host["address"])
             return
     except Exception as e:
         log.warning("Trim monitor for %s failed: %s", key, e)

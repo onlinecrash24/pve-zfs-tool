@@ -206,6 +206,7 @@ start at the [README](README.md).
 - **Connection Test** -- Verify SSH connectivity per host
 - **Wake-on-LAN** -- Wake an offline host from the Hosts view: the management NIC's MAC is captured automatically while the host is online; magic packets are sent from the container **and** relayed via every other reachable host (a bridged Docker network usually can't broadcast into the LAN, a sibling PVE node can)
 - **Expected Offline** -- Mark a host as expected-offline (e.g. a backup server that is powered off most of the time and woken via WOL): no offline notifications for its up/down cycles, no scheduled host-config backup attempts (and none of their failure mails) while it is marked, replication pairs fed by it read `standby` instead of CRIT, a neutral gray "Expected Offline" badge instead of red, and the HOSTS dashboard tile stays green. While awake it is monitored normally
+- **Mute per Host** -- Drop every notification about one host on every channel for 1 day, 1 week, 4 weeks or until switched off, with a badge in the host list. Nothing else changes: monitoring, host-config backups and replication checks keep running, only their messages stop -- including those of a replication pair whose source is the muted host. An expired mute switches itself off
 - **Clean Removal** -- Deleting a host also clears all of its monitoring state (offline flag, pool health, stale-snapshot counts, replication-lag rows) so no ghost entries linger on the dashboard
 
 ## Host Config Backup

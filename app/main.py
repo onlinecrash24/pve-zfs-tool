@@ -573,6 +573,28 @@ def api_host_standby():
     return jsonify({"success": ok, "message": msg})
 
 
+@app.route("/api/hosts/mute", methods=["POST"])
+@login_required
+def api_host_mute():
+    """Mute or unmute every notification about a host, optionally with an
+    expiry in hours. Monitoring, backups and replication checks continue."""
+    from app.ssh_manager import set_host_mute
+    data = request.json or {}
+    addr = data.get("address", "")
+    enable = bool(data.get("enable", True))
+    hours = data.get("hours")
+    try:
+        hours = float(hours) if hours not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "hours must be a number"}), 400
+    if hours is not None and not (0 < hours <= 24 * 365):
+        return jsonify({"success": False, "message": "hours out of range"}), 400
+    ok, msg = set_host_mute(addr, enable, hours)
+    audit_log("host.mute", target=addr, host=addr, success=ok,
+              details={"enable": enable, "hours": hours})
+    return jsonify({"success": ok, "message": msg})
+
+
 @app.route("/api/hosts/test", methods=["POST"])
 def api_test_host():
     data = request.json
@@ -687,7 +709,7 @@ def api_pool_scrub():
               success=result.get("success", False))
     if result.get("success"):
         send_notification("scrub_started", "Scrub Started",
-                          f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})")
+                          f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})", host=host["address"])
         # Start background monitor to detect scrub completion
         start_scrub_monitor(host, pool_name)
     return jsonify(result)
@@ -708,7 +730,7 @@ def api_pool_trim():
               success=result.get("success", False))
     if result.get("success"):
         send_notification("trim_started", "Trim Started",
-                          f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})")
+                          f"Pool: {pool_name}\nHost: {host['name']} ({host['address']})", host=host["address"])
         start_trim_monitor(host, pool_name)
     return jsonify(result)
 
@@ -743,7 +765,7 @@ def api_pool_upgrade():
               success=result.get("success", False))
     if result.get("success"):
         send_notification("pool_error", "Pool Upgraded",
-                          f"Pool: {pool}\nHost: {host['name']} ({host['address']})")
+                          f"Pool: {pool}\nHost: {host['name']} ({host['address']})", host=host["address"])
     return jsonify(result)
 
 
@@ -849,7 +871,7 @@ def api_create_snapshot():
               details={"recursive": recursive})
     if result.get("success"):
         send_notification("snapshot_created", "Snapshot Created",
-                          f"Dataset: {data['dataset']}@{snap_name}\nHost: {host['name']} ({host['address']})")
+                          f"Dataset: {data['dataset']}@{snap_name}\nHost: {host['name']} ({host['address']})", host=host["address"])
     return jsonify(result)
 
 
@@ -866,7 +888,7 @@ def api_destroy_snapshot():
               details={"recursive": recursive})
     if result.get("success"):
         send_notification("snapshot_deleted", "Snapshot Deleted",
-                          f"Snapshot: {data['snapshot']}\nHost: {host['name']} ({host['address']})")
+                          f"Snapshot: {data['snapshot']}\nHost: {host['name']} ({host['address']})", host=host["address"])
     return jsonify(result)
 
 
@@ -892,7 +914,7 @@ def api_rollback_snapshot():
     if result.get("success"):
         send_notification("rollback", "Rollback Performed",
                           f"Snapshot: {data['snapshot']}\nHost: {host['name']} ({host['address']})",
-                          priority=8)
+                          priority=8, host=host["address"])
     return jsonify(result)
 
 
@@ -1429,7 +1451,7 @@ def api_restore_file():
     if result.get("success"):
         send_notification("rollback", "File Restored",
                           f"File: {data.get('file_path')}\nTo: {data.get('dest_path')}\nHost: {host['name']}",
-                          priority=5)
+                          priority=5, host=host["address"])
     return jsonify(result)
 
 
@@ -1451,7 +1473,7 @@ def api_restore_dir():
     if result.get("success"):
         send_notification("rollback", "Directory Restored",
                           f"Dir: {data.get('dir_path')}\nTo: {data.get('dest_path')}\nHost: {host['name']}",
-                          priority=5)
+                          priority=5, host=host["address"])
     return jsonify(result)
 
 
@@ -1780,8 +1802,7 @@ def api_send_notification():
         data.get("event_type", ""),
         data.get("title", "Test"),
         data.get("message", "Test notification"),
-        data.get("priority", 5),
-    )
+        data.get("priority", 5))
     return jsonify(result)
 
 

@@ -572,8 +572,7 @@ def _notify_failure(host, error):
             f"Weitere Versuche laufen alle {_RETRY_THROTTLE_SEC // 60} Minuten ohne weitere "
             f"Meldung; die nächste Mail kommt, wenn ein Backup wieder gelingt. "
             f"Ist der Host absichtlich aus, unter Hosts als „Erwartet offline“ markieren.",
-            priority=7,
-        )
+            priority=7, host=host.get("address"))
     except Exception as e:
         log.warning("host backup failure notification failed: %s", e)
 
@@ -586,8 +585,7 @@ def _notify_recovered(host, since):
             f"Host-Backup wieder erfolgreich: {host.get('name') or host.get('address')}",
             f"Host: {host.get('address')}\nFehlgeschlagen seit: "
             f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(since))}",
-            priority=3,
-        )
+            priority=3, host=host.get("address"))
     except Exception as e:
         log.warning("host backup recovery notification failed: %s", e)
 

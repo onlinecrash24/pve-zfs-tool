@@ -361,9 +361,19 @@ def _maybe_alert_locked(snap: Dict[str, Any]) -> None:
             if snap.get("last_sync_ts") else "—"
         ),
     ]
+    # A muted SOURCE silences the pair as well -- the host that moved is the
+    # source, and the alert about it fires on the target.
+    try:
+        from app.ssh_manager import load_hosts as _lh, host_is_muted as _hm
+        src_ip = _source_ip(snap.get("source"))
+        if any(_hm(h) for h in _lh() if h.get("address") == src_ip):
+            log.info("repl_monitor: alert for %s suppressed, source host muted", snap.get("source"))
+            return
+    except Exception as e:
+        log.debug("repl_monitor: mute lookup failed: %s", e)
     try:
         send_notification("replication_lag", title, "\n".join(msg_lines),
-                          priority=8 if new_status == "crit" else 5)
+                          priority=8 if new_status == "crit" else 5, host=snap.get("host_address"))
     except Exception as e:
         log.warning("repl_monitor: send_notification failed: %s", e)
     # Mark alert ts

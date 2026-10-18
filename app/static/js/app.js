@@ -782,7 +782,7 @@ async function viewHosts() {
         const tbody = h("tbody");
         for (const host of hosts) {
             const tr = h("tr");
-            tr.appendChild(h("td", {}, host.name));
+            tr.appendChild(h("td", {}, [document.createTextNode(host.name), hostMuteBadge(host)]));
             tr.appendChild(h("td", {}, host.address));
             tr.appendChild(h("td", {}, String(host.port)));
             tr.appendChild(h("td", {}, host.user));
@@ -816,6 +816,11 @@ async function viewHosts() {
                 title: t("standby_hint"),
                 onClick: () => toggleStandby(host.address, !host.standby),
             }, t("standby")));
+            btnGroup.appendChild(h("button", {
+                className: "btn btn-sm" + (isHostMuted(host) ? " btn-primary" : ""),
+                title: t("mute_hint"),
+                onClick: () => toggleMute(host),
+            }, t("mute_btn")));
             btnGroup.appendChild(h("button", {
                 className: "btn btn-sm",
                 onClick: () => openHostBackupModal(host),
@@ -977,6 +982,48 @@ async function _probeHostBadge(addr) {
             wolBtn.title = t("wol_hint");
         }
     }
+}
+
+// Per-host mute: every notification about this host is dropped, for every
+// channel, until the expiry -- or until switched off. Monitoring, backups
+// and replication checks keep running; only the messages stop. Expected
+// Offline is the other switch: that one changes what the tool does.
+function isHostMuted(host) {
+    if (!host || !host.muted) return false;
+    return !host.muted_until || host.muted_until * 1000 > Date.now();
+}
+
+function hostMuteBadge(host) {
+    if (!isHostMuted(host)) return null;
+    const label = host.muted_until
+        ? t("mute_badge_until", new Date(host.muted_until * 1000).toLocaleString())
+        : t("mute_badge");
+    return h("span", { className: "badge badge-stopped", style: "margin-left:6px;font-size:9px",
+                       title: t("mute_hint") }, label);
+}
+
+async function toggleMute(host) {
+    if (isHostMuted(host)) {
+        const r = await API.post("/api/hosts/mute", { address: host.address, enable: false });
+        if (r && r.success) { toast(t("mute_off", host.name), "success"); viewHosts(); }
+        else toast((r && r.message) || t("failed"), "error");
+        return;
+    }
+    const body = `<p style="margin-bottom:10px">${escapeHtml(t("mute_intro"))}</p>
+        <select id="mute-hours" class="form-control">
+            <option value="24">${escapeHtml(t("mute_1d"))}</option>
+            <option value="168" selected>${escapeHtml(t("mute_1w"))}</option>
+            <option value="672">${escapeHtml(t("mute_4w"))}</option>
+            <option value="">${escapeHtml(t("mute_forever"))}</option>
+        </select>`;
+    openModal(t("mute_title", host.name), body, async () => {
+        const v = (document.getElementById("mute-hours") || {}).value;
+        const r = await API.post("/api/hosts/mute", { address: host.address, enable: true,
+                                                      hours: v ? parseInt(v, 10) : null });
+        closeModal();
+        if (r && r.success) { toast(t("mute_on", host.name), "success"); viewHosts(); }
+        else toast((r && r.message) || t("failed"), "error");
+    });
 }
 
 async function toggleStandby(addr, enable) {
