@@ -734,6 +734,22 @@ def _send_webhook(cfg, values):
         return {"success": False, "detail": str(e)}
 
 
+def _muted_host(host_ref):
+    """The registered host ``host_ref`` names (by name or address) if it is
+    muted right now, else None. Callers pass whichever they have."""
+    if not host_ref:
+        return None
+    try:
+        from app.ssh_manager import load_hosts, host_is_muted
+        ref = str(host_ref).strip()
+        for h in load_hosts():
+            if ref in (h.get("name"), h.get("address")) and host_is_muted(h):
+                return h
+    except Exception as e:  # never let the mute lookup break a notification
+        log.debug("mute lookup failed: %s", e)
+    return None
+
+
 def send_notification(event_type, title, message, priority=5, pdf_attachment=None,
                       email_short=None, lang=None, state="new", key=None, host=None):
     """Send notification through all enabled channels if event type is active.
@@ -751,6 +767,16 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
 
     if not config.get("events", {}).get(event_type, False):
         return {"skipped": True, "reason": f"Event '{event_type}' is disabled"}
+
+    # One switch per host, for every channel and every event. Field report:
+    # a host went dark for a company move and the only way to stop its
+    # mails was to delete the replication cron and switch mail off for the
+    # whole estate.
+    muted = _muted_host(host)
+    if muted:
+        log.info("notification %s for %s dropped: host is muted", event_type, host)
+        return {"skipped": True, "muted": True,
+                "reason": f"host {muted.get('name') or muted.get('address')} is muted"}
 
     results = {}
     timestamp = tz_now_str()

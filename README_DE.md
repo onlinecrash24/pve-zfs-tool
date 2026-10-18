@@ -109,7 +109,7 @@ services:
     container_name: zfs-tool
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5000:5000"   # alle Interfaces, Klartext-HTTP -- hinter einem Reverse-Proxy nur an den Proxy binden, z. B. "127.0.0.1:5000:5000"
     volumes:
       - ssh-keys:/root/.ssh
       - zfs-data:/app/data

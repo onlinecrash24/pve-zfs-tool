@@ -161,6 +161,41 @@ def remove_host(address):
     return True, "Host removed"
 
 
+def host_is_muted(host, now=None):
+    """True while notifications about this host are muted.
+
+    ``muted_until`` is an epoch; None means "until switched off". An expired
+    mute counts as off without anyone having to clear it -- the point of
+    the expiry is that a host muted for a move does not stay silent for a
+    year because nobody remembered.
+    """
+    if not host or not host.get("muted"):
+        return False
+    until = host.get("muted_until")
+    if until is None:
+        return True
+    try:
+        return (now if now is not None else time.time()) < float(until)
+    except (TypeError, ValueError):
+        return False
+
+
+def set_host_mute(address, enable, hours=None):
+    """Mute (``enable``) or unmute notifications about a host. ``hours`` sets
+    an expiry; None mutes until switched off. Unlike standby this changes
+    nothing in what the tool DOES -- backups, monitors and replication
+    checks keep running, only their messages are dropped."""
+    with _lock:
+        hosts = load_hosts()
+        for h in hosts:
+            if h["address"] == address:
+                h["muted"] = bool(enable)
+                h["muted_until"] = (time.time() + float(hours) * 3600) if (enable and hours) else None
+                save_hosts(hosts)
+                return True, "Host updated"
+    return False, "Host not found"
+
+
 def set_host_standby(address, standby):
     """Mark a host as expected-offline (UI label "Expected Offline" — internal
     field/param name kept as "standby" for brevity) -- e.g. a backup server

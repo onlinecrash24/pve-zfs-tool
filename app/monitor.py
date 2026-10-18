@@ -292,8 +292,7 @@ def clear_vanished_pool_state(host, pools):
                     f"Pool {pool_name}: removed while {value}",
                     f"Pool '{pool_name}' on {name} is no longer present; its "
                     f"last known state was {value}. Monitoring state cleared.",
-                    priority=6,
-                )
+                    priority=6, host=host["address"])
             _state_delete(scope, key)
 
 
@@ -378,8 +377,7 @@ def check_pool_topology(host, pools_status):
             f"These hold data the rest of the pool cannot be read without -- "
             f"losing one of these devices loses the entire pool, and it will "
             f"report ONLINE until it does.",
-            priority=8,
-        )
+            priority=8, host=host["address"])
 
 
 def check_capacity(host, pools):
@@ -410,8 +408,7 @@ def check_capacity(host, pools):
                 f"(threshold {limit:.0f}%).\n\n"
                 "Snapshots often account for the difference between used data "
                 "and pool usage -- check the snapshot list if this is unexpected.",
-                priority=9 if crit else 7,
-            )
+                priority=9 if crit else 7, host=host["address"])
             _state_set(scope, key, level, last_alert_ts=int(time.time()))
         else:
             _state_set(scope, key, level)
@@ -446,8 +443,7 @@ def check_pool_errors(host, pools_status):
                 f"I/O Errors: {pool_name}",
                 f"Pool '{pool_name}' on {name} reports "
                 f"read={r} write={w} cksum={c}.",
-                priority=8,
-            )
+                priority=8, host=host["address"])
             _state_set(scope, key, str(total), last_alert_ts=int(time.time()))
         else:
             _state_set(scope, key, str(total))
@@ -530,8 +526,7 @@ def check_auto_snapshots(host):
             f"Stale {label} snapshots on {name}",
             f"{len(norm)} dataset(s) have no recent '{label}' snapshot "
             f"on {name} ({host['address']}):\n{ds_list}{more}",
-            priority=5,
-        )
+            priority=5, host=host["address"])
         _state_set(scope, key, json.dumps({"count": len(norm)}),
                    last_alert_ts=now)
 
