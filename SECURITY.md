@@ -73,7 +73,7 @@ it looks alarming and is the design.
 
 - **That the tool runs privileged commands on your hosts.** That is the whole
   feature. A logged-in user destroying a dataset is the product working.
-- **A weak `ADMIN_PASSWORD`** beyond what the start-up check refuses: a placeholder, an empty or a short one (fewer than 12 characters) stops the container; a long but guessable one is yours to avoid.
+- **A weak `ADMIN_PASSWORD`.** Only an empty one refuses to start. A placeholder or a short one (fewer than 12 characters) is logged at start-up and shown as a banner in the UI after every login; whether to keep it is the operator's decision.
   They are a documented fallback and the application warns loudly about them at
   startup. Note that the repository's own `docker-compose.yml` — the one the
   build-from-source path uses — still carries those literal values, while the

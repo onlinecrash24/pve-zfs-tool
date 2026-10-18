@@ -62,6 +62,30 @@ def test_admin_password_rules():
     assert m.MIN_PASSWORD_LENGTH == 12
 
 
+def test_only_an_empty_password_refuses_the_start_the_rest_warns():
+    # Maintainer's decision: the operator is responsible for the password;
+    # the tool says so where it is seen, it does not refuse to run.
+    import app.main as m
+    assert m.password_policy("") == ("refuse", "is empty")
+    assert m.password_policy("   ")[0] == "refuse"
+    assert m.password_policy("password")[0] == "warn"
+    assert m.password_policy("your-strong-password")[0] == "warn"
+    assert m.password_policy("Tr0ub4dor")[0] == "warn"
+    assert m.password_policy("correct horse battery staple") == (None, None)
+
+
+def test_the_notice_route_carries_the_warning(monkeypatch):
+    import app.main as m
+    monkeypatch.setattr(m, "PASSWORD_WARNING", "ADMIN_PASSWORD is shorter than 12 characters")
+    c = m.app.test_client()
+    with c.session_transaction() as s:
+        s["authenticated"] = True
+    r = c.get("/api/system/notice")
+    assert r.status_code == 200
+    assert r.get_json() == {"password_warning": "ADMIN_PASSWORD is shorter than 12 characters",
+                            "min_password_length": 12}
+
+
 # --- 3. crontab -----------------------------------------------------------------
 
 CFG = "/etc/bashclub/10.0.0.5.conf"

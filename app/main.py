@@ -152,15 +152,9 @@ MIN_PASSWORD_LENGTH = 12
 
 
 def admin_password_problem(value):
-    """Why this ADMIN_PASSWORD must not be used, or None.
-
-    This UI is root on every node. A placeholder from the compose file or
-    the README is public knowledge, and a short one is a dictionary away;
-    with 5000:5000 published on all interfaces either is an open door. The
-    SECRET_KEY case is handled by replacing the value; a password cannot be
-    replaced for the user, so the start is refused with the reason in the
-    log. The healthcheck never goes green, which is the point.
-    """
+    """What is wrong with this ADMIN_PASSWORD, or None: empty, a placeholder
+    from the compose file or the README (public knowledge), or shorter than
+    MIN_PASSWORD_LENGTH."""
     v = (value or "")
     if not v.strip():
         return "is empty"
@@ -171,12 +165,33 @@ def admin_password_problem(value):
     return None
 
 
-_pw_problem = admin_password_problem(ADMIN_PASSWORD)
-if _pw_problem:
+def password_policy(value):
+    """``("refuse" | "warn" | None, reason)``.
+
+    Only an EMPTY password refuses the start: that is not a weak password,
+    it is none, and the login would accept an empty field. Everything else
+    -- a placeholder, a short one -- is the operator's call: logged at
+    startup and shown as a banner in the UI after login, so it is seen
+    where it matters and cannot be mistaken for a healthy setup. This UI
+    is root on every node; the choice stays with whoever runs it.
+    """
+    problem = admin_password_problem(value)
+    if problem is None:
+        return None, None
+    return ("refuse" if problem == "is empty" else "warn"), problem
+
+
+_pw_action, _pw_problem = password_policy(ADMIN_PASSWORD)
+PASSWORD_WARNING = ""
+if _pw_action == "refuse":
     log.critical("Refusing to start: ADMIN_PASSWORD %s. Set ADMIN_USER and ADMIN_PASSWORD "
-                 "(at least %d characters) in the environment and start again.",
-                 _pw_problem, MIN_PASSWORD_LENGTH)
+                 "in the environment and start again.", _pw_problem)
     raise SystemExit(78)   # EX_CONFIG
+elif _pw_action == "warn":
+    PASSWORD_WARNING = f"ADMIN_PASSWORD {_pw_problem}"
+    log.warning("%s. This UI is root on every node; choose at least %d characters "
+                "that are not in this repository. The UI shows this notice after login.",
+                PASSWORD_WARNING, MIN_PASSWORD_LENGTH)
 if TRUST_PROXY:
     log.info("Trusting X-Forwarded-* headers (TRUST_PROXY=true) -- make sure only your reverse proxy can reach this port.")
 else:
@@ -446,6 +461,13 @@ def api_public_key():
 # ---------------------------------------------------------------------------
 # API: Host management
 # ---------------------------------------------------------------------------
+
+@app.route("/api/system/notice")
+def api_system_notice():
+    """Start-up notices the UI shows as a banner: today the password one."""
+    return jsonify({"password_warning": PASSWORD_WARNING,
+                    "min_password_length": MIN_PASSWORD_LENGTH})
+
 
 @app.route("/api/hosts", methods=["GET"])
 def api_hosts():
