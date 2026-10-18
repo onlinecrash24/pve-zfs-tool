@@ -7,6 +7,21 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.938 -- 2026-10-18
+
+v0.9.938 — buy me a coffee
+
+No change in behaviour. The tool is free and stays free; this release adds
+the one button for those who want to say thanks: on the GitHub repository
+page (Sponsor), under the language switch in both READMEs together with a
+short "Support the project" section, in the footer of the login card and
+at the bottom of the sidebar. The button is the Buy Me a Coffee yellow
+pill with an inline icon, so the content security policy stays as strict
+as before -- no external image is loaded.
+
+A field report is worth as much as a coffee; most of what is in this tool
+came from one.
+
 ## v0.9.937 -- 2026-10-18
 
 v0.9.937 — mute per host, with an expiry
