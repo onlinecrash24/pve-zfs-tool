@@ -7,6 +7,26 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.939 -- 2026-10-18
+
+v0.9.939 — weak admin password: a notice, not a refused start
+
+v0.9.935 refused to start when ADMIN_PASSWORD was a placeholder, empty or
+shorter than 12 characters. That was more than the maintainer wants the
+tool to decide: the password is the operator's responsibility. From this
+release only an EMPTY ADMIN_PASSWORD refuses the start -- that is not a
+weak password, it is none, and the login would accept an empty field.
+
+A placeholder from the repository or a short password starts the
+container as before v0.9.935, but is no longer silent: the start-up log
+carries a warning, and after every login a banner at the top of the UI
+says what is wrong and how to fix it, in both languages, until the
+password is changed. README, README_DE and SECURITY.md describe this.
+
+If you updated to v0.9.935 through v0.9.938 and your container did not
+come up because of the password check, it comes up again with this
+release -- and shows the banner.
+
 ## v0.9.938 -- 2026-10-18
 
 v0.9.938 — buy me a coffee
