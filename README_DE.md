@@ -11,6 +11,10 @@
   <a href="README.md">English</a> &middot; <b>Deutsch</b>
 </p>
 
+<p align="center">
+  <a href="https://buymeacoffee.com/onlinecrash24" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-%23FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
+</p>
+
 ## Worum es geht
 
 ZFS über mehrere Proxmox-VE-Hosts von einer Stelle verwalten: eine einzelne
@@ -381,6 +385,13 @@ Schwachstelle aus. Geprüft werden die Python-Abhängigkeiten auf
 Quellcode-Ebene; die Debian-Basisschicht und alles, was in einem anderen Paket
 einvendort ist, bleiben Sache eines Image-Scans (Trivy o. ä. gegen
 `ghcr.io/onlinecrash24/pve-zfs-tool`).
+
+## Projekt unterstützen
+
+Das Tool ist kostenlos und bleibt es. Wenn es dir einen Nachmittag erspart,
+ist ein Kaffee eine schöne Art, das zu sagen:
+[buymeacoffee.com/onlinecrash24](https://buymeacoffee.com/onlinecrash24). Fehlerberichte und Praxisbefunde
+sind genauso viel wert -- das meiste hier ist aus einem entstanden.
 
 ## Lizenz
 
