@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
@@ -16,10 +16,14 @@ COPY requirements.txt .
 # vendors them at whatever version it was released with. An image without a
 # package manager is also one less tool for anyone who gets a shell in it.
 # Same layer as the install, so the removed files do not survive underneath.
+# The site-packages path is asked from the interpreter, not spelled out, so a
+# base-image bump cannot leave a stale python3.N path behind; and no brace
+# expansion, because RUN executes under dash, which has none.
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y pip setuptools \
-    && rm -rf /usr/local/lib/python3.13/site-packages/{pip,setuptools,pkg_resources,_distutils_hack}* \
-              /usr/local/lib/python3.13/site-packages/distutils-precedence.pth
+    && SP="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && rm -rf "$SP"/pip "$SP"/pip-* "$SP"/setuptools "$SP"/setuptools-* "$SP"/pkg_resources \
+              "$SP"/_distutils_hack "$SP"/distutils-precedence.pth
 
 COPY app/ ./app/
 COPY entrypoint.sh .
