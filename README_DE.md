@@ -328,7 +328,7 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 
 ## Tech-Stack
 
-- **Backend** -- Python 3.12, Flask, Paramiko (SSH), Gunicorn, fpdf2
+- **Backend** -- Python 3.14, Flask, Paramiko (SSH), Gunicorn, fpdf2
 - **Frontend** -- Vanilla-JavaScript-SPA, CSS-Dark-Theme
 - **Deployment** -- Docker, Docker Compose, GitHub Container Registry
 
