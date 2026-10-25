@@ -325,7 +325,7 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 
 ## Tech Stack
 
-- **Backend** -- Python 3.12, Flask, Paramiko (SSH), Gunicorn, fpdf2
+- **Backend** -- Python 3.14, Flask, Paramiko (SSH), Gunicorn, fpdf2
 - **Frontend** -- Vanilla JavaScript SPA, CSS dark theme
 - **Deployment** -- Docker, Docker Compose, GitHub Container Registry
 

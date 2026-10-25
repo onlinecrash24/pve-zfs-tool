@@ -30,12 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install dev dependencies
         run: pip install --no-cache-dir -r requirements-dev.txt
@@ -65,7 +65,7 @@ jobs:
     steps:
       # 1. Repo auschecken
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # 2. Docker Buildx einrichten (Multi-Plattform-Support)
       #
@@ -74,9 +74,9 @@ jobs:
       # mit "Client.Timeout exceeded while awaiting headers" ab (Docker-Hub-
       # Rate-Limit pro IP, transiente Ausfaelle). mirror.gcr.io ist Googles
       # offizieller, hochverfuegbarer Mirror -- buildx zieht das Base-Image
-      # `python:3.12-slim` zuerst dort und nur als Fallback bei Docker Hub.
+      # `python:3.14-slim` zuerst dort und nur als Fallback bei Docker Hub.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           buildkitd-config-inline: |
             [registry."docker.io"]
@@ -85,7 +85,7 @@ jobs:
       # 3. Login bei ghcr.io (automatisch mit GITHUB_TOKEN)
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -94,7 +94,7 @@ jobs:
       # 4. Docker Metadaten & Tags generieren
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -119,7 +119,7 @@ jobs:
       # ohne Cache neu gebaut.
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         continue-on-error: true
         with:
           context: .
@@ -139,7 +139,7 @@ jobs:
       # übersprungen.
       - name: Build and push Docker image (no cache fallback)
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
