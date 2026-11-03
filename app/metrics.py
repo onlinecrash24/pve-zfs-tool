@@ -204,13 +204,18 @@ def _sample_and_monitor(host):
     """
     from app.ssh_manager import test_connection
     from app.zfs_commands import get_pools_result, get_pool_status
-    from app.monitor import run_checks
+    from app.monitor import run_checks, confirm_offline
 
     # Explicit reachability probe — a host with zero pools is still "up"
     try:
         reachable = test_connection(host)
     except Exception:
         reachable = False
+    # One failed probe of a host that was up is not an outage yet: an sshd
+    # restart during a package update looks the same. Ask once more after a
+    # pause; only a second failure reaches the offline detector.
+    if not reachable:
+        reachable = confirm_offline(host, lambda: test_connection(host))
 
     # Capture the WOL MAC once while the host is up (needed to wake it later)
     if reachable:

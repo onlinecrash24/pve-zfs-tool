@@ -136,7 +136,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Proaktives Monitoring** -- Der Sampler prüft alle 15 Min pro Host auf Zustandsänderungen und feuert Benachrichtigungen (keine manuelle Aktion nötig):
   - `pool_error` -- Pool-Health wechselt ONLINE → DEGRADED/FAULTED/UNAVAIL und zurück
   - `health_warning` -- Kapazität überschreitet 90 % bzw. Read/Write/Checksum-Errors treten auf
-  - `host_offline` -- SSH-Probe schlägt fehl, wo sie zuvor erfolgreich war (inkl. Recovery)
+  - `host_offline` -- SSH-Probe schlägt fehl, wo sie zuvor erfolgreich war, bestätigt durch eine zweite Probe nach `HOST_OFFLINE_CONFIRM_SEC` (45 s), so dass ein sshd-Neustart beim Paket-Update still bleibt; die Erholung wird nur gemeldet, wenn der Ausfall gemeldet wurde
   - `auto_snapshot` -- Neuester Auto-Snap pro Label (frequent/hourly/daily/weekly/monthly) älter als erwartet (pro Host/Label auf einmal täglich begrenzt)
   - `replication_lag` -- Der letzte Sync eines Replikations-Paars überschreitet sein erwartetes Intervall (WARN/CRIT), und bei Recovery
 - **Test-Benachrichtigungen** -- Testnachricht pro Kanal senden, um die Konfiguration zu prüfen

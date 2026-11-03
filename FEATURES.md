@@ -136,7 +136,7 @@ start at the [README](README.md).
 - **Proactive Monitoring** -- Every 15 min the sampler checks each host for state changes and fires notifications (no manual action required):
   - `pool_error` -- pool health transitions ONLINE → DEGRADED/FAULTED/UNAVAIL and back
   - `health_warning` -- capacity crosses 90 %, or read/write/checksum errors appear
-  - `host_offline` -- SSH probe fails where it previously succeeded (and recovery)
+  - `host_offline` -- SSH probe fails where it previously succeeded, confirmed by a second probe after `HOST_OFFLINE_CONFIRM_SEC` (45 s) so an sshd restart during a package update stays silent; the recovery is sent only if the outage was
   - `auto_snapshot` -- newest auto-snap per label (frequent/hourly/daily/weekly/monthly) older than expected (throttled to once per day per host/label)
   - `replication_lag` -- a replication pair's last sync exceeds its expected interval (WARN/CRIT), and on recovery
 - **Test Notifications** -- Send test messages per channel to verify configuration

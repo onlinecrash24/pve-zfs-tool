@@ -109,7 +109,11 @@ def test_disabling_standby_causes_no_spurious_alert(temp_db, monkeypatch):
     host_no_sb = {"address": "10.0.0.9"}
     monitor.check_host_reachability(host_no_sb, False)   # prev==new -> quiet
     assert sent == []
-    monitor.check_host_reachability(host_no_sb, True)    # recovery -> alert
+    # Coming back is not announced either: nobody was told about the outage,
+    # so a "back online" would be a recovery from nothing (field report).
+    monitor.check_host_reachability(host_no_sb, True)
+    assert sent == []
+    monitor.check_host_reachability(host_no_sb, False)   # a real, later outage -> alert
     assert sent == ["host_offline"]
 
 
