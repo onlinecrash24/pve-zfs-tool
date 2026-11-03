@@ -19,6 +19,7 @@ Events produced (must match keys in notifications.DEFAULT_CONFIG.events):
 """
 
 import json
+import os
 import logging
 import threading
 import time
@@ -109,6 +110,13 @@ ERROR_ALERT_COOLDOWN = 6 * 3600
 # ---------------------------------------------------------------------------
 # State store helpers
 # ---------------------------------------------------------------------------
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
 
 def _state_get(scope, key):
     conn = get_conn()
@@ -227,6 +235,39 @@ def clear_host_state(address):
         conn.close()
 
 
+# A host that was up and fails ONE probe is probed again after this many
+# seconds before it counts as down. Field report (15 hosts, 03.11.2026): the
+# nightly apt dist-upgrade restarts sshd and pve-cluster for a few seconds;
+# the sampler round happened to run in that minute, three hosts were
+# reported offline, and "back online" came one round -- 15 minutes -- later.
+# The hosts were never down. 0 switches the re-probe off.
+HOST_OFFLINE_CONFIRM_SEC = _env_int("HOST_OFFLINE_CONFIRM_SEC", 45)
+_sleep = time.sleep          # patched in tests
+
+
+def confirm_offline(host, reprobe):
+    """Re-probe a host whose probe just failed; True if it answers after all.
+
+    Only a host that is not already known to be down is worth the wait -- a
+    host down for days would otherwise cost every round the delay. Runs
+    OUTSIDE the alert lock, before run_checks, so the wait blocks nothing.
+    """
+    if HOST_OFFLINE_CONFIRM_SEC <= 0:
+        return False
+    prev, _ = _state_get("host", host["address"])
+    if prev == "down":
+        return False
+    _sleep(HOST_OFFLINE_CONFIRM_SEC)
+    try:
+        ok = bool(reprobe())
+    except Exception:
+        ok = False
+    if ok:
+        log.info("monitor: %s failed one probe and answered the re-probe %ss later -- "
+                 "a blip, not an outage", host.get("address"), HOST_OFFLINE_CONFIRM_SEC)
+    return ok
+
+
 def check_host_reachability(host, reachable):
     """Fire host_offline on transition up↔down.
 
@@ -234,6 +275,11 @@ def check_host_reachability(host, reachable):
     server that is powered off most of the time) never notify: their up/down
     flapping is normal operation. The state is still recorded so the dashboard
     shows the real current status.
+
+    "Host Back Online" is sent only if a "Host Offline" was actually sent for
+    this down phase: a host first seen down, or one that went down while
+    marked standby, comes up without announcing a recovery nobody was told
+    about. The offline alert's timestamp is the marker; the recovery clears it.
     """
     scope = "host"
     key = host["address"]
@@ -241,7 +287,7 @@ def check_host_reachability(host, reachable):
     if host.get("standby"):
         _state_set(scope, key, new)
         return
-    prev, _ = _state_get(scope, key)
+    prev, alerted_ts = _state_get(scope, key)
     if prev is None:
         _state_set(scope, key, new)
         return
@@ -257,14 +303,16 @@ def check_host_reachability(host, reachable):
             f"{name} ({host['address']}) is not reachable via SSH.",
             priority=8, state="new", key=pair_key, host=name,
         )
-    else:
+        _state_set(scope, key, new, last_alert_ts=int(time.time()))
+        return
+    if alerted_ts:
         send_notification(
             "host_offline",
             "Host Back Online",
             f"{name} ({host['address']}) is reachable again.",
             priority=3, state="resolved", key=pair_key, host=name,
         )
-    _state_set(scope, key, new, last_alert_ts=int(time.time()))
+    _state_set(scope, key, new, last_alert_ts=0)
 
 
 def clear_vanished_pool_state(host, pools):

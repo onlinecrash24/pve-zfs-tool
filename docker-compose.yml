@@ -21,6 +21,9 @@ services:
       # or any client can pick its own address and skip the login rate limit.
       # - TRUST_PROXY=true
       - TZ=Europe/Berlin  # Timezone (e.g. Europe/Berlin, UTC, America/New_York)
+      # A host that fails one SSH probe is re-probed after this many seconds
+      # before "Host Offline" fires (0 = report on the first failed probe).
+      # - HOST_OFFLINE_CONFIRM_SEC=45
       - DEFAULT_LANG=de   # Default UI language for new visitors: de or en (user can still switch)
       # Data retention (days) — auto-cleaned; lower these if the zfs-data
       # volume grows too large. <=0 keeps forever.

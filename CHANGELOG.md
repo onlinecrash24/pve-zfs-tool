@@ -7,6 +7,29 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.940 -- 2026-10-25
+
+v0.9.940 — Python 3.14, current dependencies, current actions
+
+Maintenance release, no change in features.
+
+The image is built on python:3.14-slim and the tests run on 3.14 as well.
+paramiko 5.0.0 -> 5.1.0 (an AttributeError with agent-hosted keys fixed,
+RSA signatures default to rsa-sha2-512 again, ML-KEM hybrid key exchange
+when the cryptography build offers it), Pillow 12.3.0 -> 13.0.0, pytest
+8.3.4 -> 9.1.1. pip-audit on the new set: no known vulnerabilities.
+flask, gunicorn and fpdf2 were already current.
+
+The GitHub Actions in the release workflow are at their current majors
+(checkout v7, setup-python v7, setup-buildx v4, login v4, metadata v6,
+build-push v7). A side finding in the Dockerfile: the removal of pip and
+setuptools relied on a brace expansion that dash never performed and on a
+hard-coded python3.13 path; it now asks the interpreter for its
+site-packages directory.
+
+After updating, run a connection test against your hosts: paramiko moved
+a minor version. Nothing in the tool's own SSH usage changed.
+
 ## v0.9.939 -- 2026-10-18
 
 v0.9.939 — weak admin password: a notice, not a refused start

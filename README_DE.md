@@ -314,6 +314,7 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 | `FORCE_HTTPS` | `true` | Sichere Session-Cookies -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
 | `TRUST_PROXY` | nicht gesetzt | Client-Adresse aus `X-Forwarded-For` übernehmen. **Nur** hinter einem Reverse-Proxy -- auf einem direkt erreichbaren Port könnte jeder Client seine Adresse selbst wählen und die Login-Sperre umgehen |
 | `TZ` | `UTC` | Zeitzone für Reports und Scheduler (z. B. `Europe/Berlin`, `America/New_York`) |
+| `HOST_OFFLINE_CONFIRM_SEC` | `45` | Ein Host, der erreichbar war und eine SSH-Probe verfehlt, wird nach so vielen Sekunden noch einmal geprüft, bevor „Host Offline" ausgelöst wird -- ein sshd-Neustart beim Paket-Update ist kein Ausfall. `0` meldet bei der ersten verfehlten Probe |
 | `DEFAULT_LANG` | `en` | Standard-UI-Sprache für neue Besucher (`de` oder `en`); Nutzer können weiterhin umschalten |
 | `METRICS_RETENTION_DAYS` | `90` | Wie lange Pool- + Disk-(SMART-)Messwerte aufbewahrt werden, bevor aufgeräumt wird; `<=0` behält für immer |
 | `AUDIT_RETENTION_DAYS` | `365` | Wie lange Audit-Log-Einträge aufbewahrt werden; `<=0` behält für immer |

@@ -311,6 +311,7 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 | `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
 | `TRUST_PROXY` | unset | Take the client address from `X-Forwarded-For`. **Only** behind a reverse proxy -- on a directly reachable port any client could pick its own address and bypass the login rate limit |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
+| `HOST_OFFLINE_CONFIRM_SEC` | `45` | A host that was up and fails one SSH probe is probed again after this many seconds before "Host Offline" fires -- an sshd restart during a package update is not an outage. `0` reports on the first failed probe |
 | `DEFAULT_LANG` | `en` | Default UI language for new visitors (`de` or `en`); users can still switch |
 | `METRICS_RETENTION_DAYS` | `90` | How long pool + disk (SMART) samples are kept before auto-cleanup; `<=0` keeps forever |
 | `AUDIT_RETENTION_DAYS` | `365` | How long audit-log entries are kept; `<=0` keeps forever |
