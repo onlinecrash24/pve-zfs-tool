@@ -212,3 +212,10 @@ def test_the_scan_route(client, monkeypatch):
     r = client.post("/api/dr/scan-host-key?host=10.0.0.9", headers={"X-CSRF-Token": "tok"},
                     json={"address": "192.168.1.251", "port": 22})
     assert r.status_code == 200 and r.get_json()["keys"][0]["fingerprint"] == FP
+
+
+def test_a_trailing_newline_does_not_sneak_past_the_fingerprint_check(monkeypatch):
+    # Python's "$" also matches before a final "\n"; the checks use fullmatch.
+    with pytest.raises(ValueError, match="fingerprint"):
+        _run_job(monkeypatch, _send_ok, refresh_host_key=True, accepted_fingerprint=FP + "\n")
+    assert dr.scan_host_key({"address": "x"}, "192.168.1.251\n", 22)["success"] is False

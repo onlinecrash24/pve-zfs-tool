@@ -249,7 +249,7 @@ def scan_host_key(host: Dict[str, Any], address: str, port: int = 22) -> Dict[st
 
     Read-only: nothing is written to known_hosts here.
     """
-    if not address or not _ADDR_RE.match(address):
+    if not address or not _ADDR_RE.fullmatch(address):
         return {"success": False, "error": "invalid address"}
     try:
         port = int(port or 22)
@@ -306,7 +306,7 @@ def reverse_sync_async(target_host: Dict[str, Any],
     if refresh_host_key and not accepted_fingerprint:
         raise ValueError("a new host key is only accepted with the fingerprint the "
                          "user confirmed (scan it first)")
-    if accepted_fingerprint and not _FP_RE.match(accepted_fingerprint):
+    if accepted_fingerprint and not _FP_RE.fullmatch(accepted_fingerprint):
         raise ValueError("invalid host key fingerprint")
     if not source_address or not re.match(r"^[A-Za-z0-9._:-]+$", source_address):
         raise ValueError("invalid source address")

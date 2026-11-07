@@ -3076,6 +3076,22 @@ def _task_limit(e):
 # Guest migration between two non-clustered hosts (near-live, ZFS send/recv)
 # ---------------------------------------------------------------------------
 
+def _migration_plan(data):
+    """(source, target, plan record, error response) for a step that acts on
+    a preflight plan. The request names the plan by id; nothing else about
+    what moves or gets destroyed is read from it."""
+    from app.migrate import get_plan
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return None, None, None, (jsonify({"success": False, "error": "source or target host not found"}), 404)
+    rec = get_plan(str(data.get("plan_id") or ""), src, tgt)
+    if not rec:
+        return src, tgt, None, (jsonify({
+            "success": False, "plan_expired": True,
+            "error": "migration plan unknown or expired -- run the preflight again"}), 409)
+    return src, tgt, rec, None
+
+
 def _migrate_hosts(data):
     """(source, target) as registered hosts. Migration never uses ad-hoc
     password targets -- both ends must be known, keyed hosts."""
@@ -3191,17 +3207,16 @@ def api_migrate_precopy():
     """Start a pre-copy (guest keeps running). Repeatable to shrink the delta."""
     from app.migrate import precopy_async
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    plan = data.get("plan") or []
-    if not plan:
-        return jsonify({"success": False, "error": "empty migration plan"}), 400
-    task_id = precopy_async(src, tgt, plan, bool(data.get("pull", True)))
-    audit_log("migrate.precopy", target=str(data.get("vmid")),
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    if not rec["can_run"]:
+        return jsonify({"success": False, "error": "the preflight reported errors"}), 409
+    task_id = precopy_async(src, tgt, rec["plan"], rec["pull"])
+    audit_log("migrate.precopy", target=rec["vmid"],
               host=src["address"], success=True,
               details={"task_id": task_id, "to": tgt["address"],
-                       "disks": len(plan)})
+                       "disks": len(rec["plan"])})
     return jsonify({"success": True, "task_id": task_id})
 
 
@@ -3209,27 +3224,29 @@ def api_migrate_precopy():
 @login_required
 def api_migrate_cutover():
     """Stop the guest, send the final delta, move the config, start on target."""
-    from app.migrate import cutover_async
+    from app.migrate import cutover_async, derive_storage_map, validate_bridge_map
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    plan = data.get("plan") or []
-    if not plan:
-        return jsonify({"success": False, "error": "empty migration plan"}), 400
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    if not rec["can_run"]:
+        return jsonify({"success": False, "error": "the preflight reported errors"}), 409
+    try:
+        smap = derive_storage_map(rec)
+        bmap = validate_bridge_map(data.get("bridge_map") or {}, rec)
+        shutdown_timeout = max(10, min(int(data.get("shutdown_timeout") or 120), 3600))
+    except (TypeError, ValueError) as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     task_id = cutover_async(
-        src, tgt, (data.get("vmid") or "").strip(),
-        (data.get("gtype") or "qemu").strip(), plan,
-        bool(data.get("pull", True)),
-        new_vmid=(data.get("new_vmid") or None),
-        storage_map=(data.get("storage_map") or {}),
-        bridge_map=(data.get("bridge_map") or {}),
+        src, tgt, rec["vmid"], rec["gtype"], rec["plan"], rec["pull"],
+        new_vmid=rec["new_vmid"], storage_map=smap, bridge_map=bmap,
         start_on_target=bool(data.get("start_on_target", True)),
-        shutdown_timeout=int(data.get("shutdown_timeout") or 120))
-    audit_log("migrate.cutover", target=str(data.get("vmid")),
+        shutdown_timeout=shutdown_timeout)
+    audit_log("migrate.cutover", target=rec["vmid"],
               host=src["address"], success=True,
               details={"task_id": task_id, "to": tgt["address"],
-                       "new_vmid": data.get("new_vmid"),
+                       "new_vmid": rec["new_vmid"], "storage_map": smap,
+                       "bridge_map": bmap,
                        "start_on_target": bool(data.get("start_on_target", True))})
     return jsonify({"success": True, "task_id": task_id})
 
@@ -3240,14 +3257,13 @@ def api_migrate_rollback():
     """Undo a cutover: remove the guest on the target, unlock + start the source."""
     from app.migrate import rollback
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    res = rollback(src, tgt, (data.get("vmid") or "").strip(),
-                   (data.get("gtype") or "qemu").strip(),
-                   target_vmid=(data.get("new_vmid") or None),
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    res = rollback(src, tgt, rec["vmid"], rec["gtype"],
+                   target_vmid=rec["target_vmid"],
                    start_source=bool(data.get("start_source", True)))
-    audit_log("migrate.rollback", target=str(data.get("vmid")),
+    audit_log("migrate.rollback", target=rec["vmid"],
               host=src["address"], success=res.get("success", False),
               details={"from": tgt["address"], "steps": res.get("steps")})
     return jsonify(res)
@@ -3259,10 +3275,10 @@ def api_migrate_snapshots():
     """Leftover migrate-* snapshots on both hosts, for review before deleting."""
     from app.migrate import migration_snapshot_overview
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    return jsonify(migration_snapshot_overview(src, tgt, data.get("plan") or []))
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    return jsonify(migration_snapshot_overview(src, tgt, rec["plan"]))
 
 
 @app.route("/api/migrate/cleanup-snapshots", methods=["POST"])
@@ -3271,13 +3287,13 @@ def api_migrate_cleanup_snapshots():
     """Destroy the leftover migration snapshots on both hosts."""
     from app.migrate import cleanup_migration_snapshots
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
     res = cleanup_migration_snapshots(
-        src, tgt, data.get("plan") or [],
+        src, tgt, rec["plan"],
         keep_latest_on_target=bool(data.get("keep_latest_on_target", True)))
-    audit_log("migrate.cleanup_snapshots", target=str(data.get("vmid")),
+    audit_log("migrate.cleanup_snapshots", target=rec["vmid"],
               host=src["address"], success=res.get("success", False),
               details={"deleted": res.get("deleted"),
                        "kept_on_target": res.get("kept_on_target"),
@@ -3291,15 +3307,14 @@ def api_migrate_cleanup_source():
     """Remove the migrated guest + its datasets from the source (explicit)."""
     from app.migrate import cleanup_source
     data = request.get_json(silent=True) or {}
-    src = _find_host((data.get("source") or "").strip())
-    if not src:
-        return jsonify({"success": False, "error": "source host not found"}), 404
-    res = cleanup_source(src, (data.get("vmid") or "").strip(),
-                         (data.get("gtype") or "qemu").strip(),
-                         data.get("datasets") or [])
-    audit_log("migrate.cleanup_source", target=str(data.get("vmid")),
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    datasets = [p["source_dataset"] for p in rec["plan"]]
+    res = cleanup_source(src, rec["vmid"], rec["gtype"], datasets)
+    audit_log("migrate.cleanup_source", target=rec["vmid"],
               host=src["address"], success=res.get("success", False),
-              details={"datasets": data.get("datasets")})
+              details={"datasets": datasets, "target_host": tgt["address"]})
     return jsonify(res)
 
 

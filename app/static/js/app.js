@@ -6544,6 +6544,16 @@ async function viewMigrate() {
             new_vmid: newVmidInp.value.trim() || null,
         };
     };
+    // Every step after the preflight names the plan the server keeps; the
+    // plan itself (what moves where, what gets destroyed) never travels back.
+    const _planRef = () => ({ source: srcSel.value, target: tgtSel.value,
+                              plan_id: pf ? pf.plan_id : "" });
+    const _planGone = (r) => {
+        if (!r || !r.plan_expired) return false;
+        pf = null;
+        toast(t("mig_plan_expired"), "error");
+        return true;
+    };
 
     async function loadGuests() {
         guestSel.innerHTML = "";
@@ -6743,8 +6753,9 @@ async function viewMigrate() {
         if (!pf || !pf.can_precopy) { toast(t("mig_run_check_first"), "error"); return; }
         preBtn.disabled = true; preStatus.textContent = t("mig_starting");
         try {
-            const r = await API.post("/api/migrate/precopy",
-                Object.assign(_base(), { plan: pf.plan, pull: pf.pull }));
+            const r = await API.post("/api/migrate/precopy", _planRef());
+            if (_planGone(r)) { preBtn.disabled = false; preStatus.textContent = ""; return; }
+            if (!r.task_id) throw new Error(r.error || t("failed"));
             pollReplicationTask(r.task_id, {
                 onTick: rec => { preStatus.textContent = rec.progress || t("mig_running"); },
                 onDone: rec => {
@@ -6778,7 +6789,7 @@ async function viewMigrate() {
         // the guest config, the destination is the storage picked in step 1.
         storeInfo.innerHTML = "";
         const from = (pf && pf.source_storages) || [];
-        const to = storSel.value;
+        const to = (pf && pf.target_storage) || "";
         if (from.length && to) {
             from.forEach(f => storeInfo.appendChild(h("div", { className: "muted" },
                 f === to ? `${t("mig_storage_keep")}: ${f}` : `${t("mig_storage_rewrite")}: ${f} → ${to}`)));
@@ -6805,20 +6816,19 @@ async function viewMigrate() {
         if (!pf || !pf.can_cutover) { toast(t("mig_run_check_first"), "error"); return; }
         const g = _guest();
         if (!confirm(t("mig_cutover_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", tgtSel.value))) return;
-        // Every storage the guest currently uses is rewritten to the one picked
-        // in step 1 (which the preflight verified writes into the target dataset).
-        const smap = {}, bmap = {};
-        const to = storSel.value;
-        ((pf && pf.source_storages) || []).forEach(f => { if (to && f !== to) smap[f] = to; });
+        // The storage rewrite is derived on the server from the storage the
+        // preflight checked; only the bridge choices are sent.
+        const bmap = {};
         Object.entries(bridgeInputs).forEach(([from, inp]) => {
             if (inp.value.trim() && inp.value.trim() !== from) bmap[from] = inp.value.trim();
         });
         cutBtn.disabled = true; cutStatus.textContent = t("mig_starting");
         try {
-            const r = await API.post("/api/migrate/cutover", Object.assign(_base(), {
-                plan: pf.plan, pull: pf.pull, storage_map: smap, bridge_map: bmap,
-                start_on_target: startCb.checked,
+            const r = await API.post("/api/migrate/cutover", Object.assign(_planRef(), {
+                bridge_map: bmap, start_on_target: startCb.checked,
             }));
+            if (_planGone(r)) { cutBtn.disabled = false; cutStatus.textContent = ""; return; }
+            if (!r.task_id) throw new Error(r.error || t("failed"));
             pollReplicationTask(r.task_id, {
                 onTick: rec => { cutStatus.textContent = rec.progress || t("mig_running"); },
                 onDone: rec => {
@@ -6854,7 +6864,8 @@ async function viewMigrate() {
         if (!confirm(t("mig_rollback_confirm").replace("{g}", g ? g.vmid : "?"))) return;
         rbBtn.disabled = true; finStatus.textContent = t("mig_running");
         try {
-            const r = await API.post("/api/migrate/rollback", _base());
+            const r = await API.post("/api/migrate/rollback", _planRef());
+            if (_planGone(r)) { rbBtn.disabled = false; finStatus.textContent = ""; return; }
             finStatus.textContent = (r.success ? "✓ " : "✗ ") +
                 (r.steps || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
             toast(r.success ? t("mig_rollback_ok") : t("mig_rollback_failed"), r.success ? "success" : "error");
@@ -6867,9 +6878,8 @@ async function viewMigrate() {
         if (!confirm(t("mig_cleanup_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", srcSel.value))) return;
         cleanBtn.disabled = true; finStatus.textContent = t("mig_running");
         try {
-            const r = await API.post("/api/migrate/cleanup-source", Object.assign(_base(), {
-                datasets: pf.plan.map(p => p.source_dataset),
-            }));
+            const r = await API.post("/api/migrate/cleanup-source", _planRef());
+            if (_planGone(r)) { cleanBtn.disabled = false; finStatus.textContent = ""; return; }
             finStatus.textContent = (r.success ? "✓ " : "✗ ") +
                 (r.results || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
             toast(r.success ? t("mig_cleanup_ok") : t("mig_cleanup_failed"), r.success ? "success" : "error");
@@ -6893,7 +6903,8 @@ async function viewMigrate() {
         if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
         snapBtn.disabled = true; snapList.textContent = t("mig_running");
         try {
-            const r = await API.post("/api/migrate/snapshots", Object.assign(_base(), { plan: pf.plan }));
+            const r = await API.post("/api/migrate/snapshots", _planRef());
+            if (_planGone(r)) { snapList.textContent = ""; return; }
             snapList.innerHTML = "";
             const all = [...(r.source || []).map(s => [t("mig_side_source"), s]),
                          ...(r.target || []).map(s => [t("mig_side_target"), s])];
@@ -6912,9 +6923,10 @@ async function viewMigrate() {
         if (!confirm(t("mig_snaps_confirm"))) return;
         snapDel.disabled = true;
         try {
-            const r = await API.post("/api/migrate/cleanup-snapshots", Object.assign(_base(), {
-                plan: pf.plan, keep_latest_on_target: keepCb.checked,
+            const r = await API.post("/api/migrate/cleanup-snapshots", Object.assign(_planRef(), {
+                keep_latest_on_target: keepCb.checked,
             }));
+            if (_planGone(r)) return;
             if (r.success) { toast(t("mig_snaps_ok").replace("{n}", String(r.deleted || 0)), "success"); snapBtn.onclick(); }
             else { openModal(t("mig_snaps_failed"), `<pre class="output" style="font-size:11px">${escapeHtml(r.error || JSON.stringify(r.results || [], null, 2))}</pre>`); }
         } catch (e) { toast(e.message || t("failed"), "error"); }
