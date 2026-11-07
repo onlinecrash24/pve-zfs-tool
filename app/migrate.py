@@ -28,7 +28,9 @@ any SSH.
 from __future__ import annotations
 
 import re
+import secrets
 import shlex
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,6 +45,7 @@ _QEMU_DISK_KEY_RE = re.compile(r"^(?:scsi|virtio|sata|ide)\d+$|^(?:efidisk|tpmst
 _LXC_DISK_KEY_RE = re.compile(r"^(?:rootfs|mp\d+)$")
 
 _SNAP_NAME_RE = re.compile(r"^migrate-\d{8}-\d{6}$")
+_NAME_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _DS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:/-]*$")
 
 SSH_OPTS = "-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
@@ -311,6 +314,11 @@ def rewrite_guest_config(text: str, storage_map: Optional[Dict[str, str]] = None
     """
     storage_map = storage_map or {}
     bridge_map = bridge_map or {}
+    # The mapped names become config text: a newline in one would add a line
+    # of its own. Storage IDs and bridge names are single plain tokens.
+    for old, new in list(storage_map.items()) + list(bridge_map.items()):
+        if not _NAME_TOKEN_RE.fullmatch(str(old)) or not _NAME_TOKEN_RE.fullmatch(str(new)):
+            raise ValueError(f"invalid storage/bridge name in mapping: {old!r} -> {new!r}")
     out = []
     for line in (text or "").splitlines():
         if re.match(r"^lock:\s*", line):
@@ -501,6 +509,86 @@ def check_storage_match(storages: List[Dict[str, Any]], target_storage: str,
     return True, f"{target_storage} → {target_root}", matching
 
 
+# ---------------------------------------------------------------------------
+# Plan registry
+#
+# The preflight decides which datasets move where. That plan used to travel
+# to the browser and back, and every later step -- pre-copy, cutover, the
+# snapshot clean-up, removing the guest from the source, rollback -- acted on
+# whatever came back: a `zfs recv -F` into any dataset, a `zfs destroy -r` on
+# any list of names. Now the plan stays here, the browser holds only its id,
+# and each step looks it up for exactly the host pair it was made for.
+# In memory (single worker); after a restart the preflight is simply run again.
+# ---------------------------------------------------------------------------
+_PLANS: Dict[str, Dict[str, Any]] = {}
+_PLANS_LOCK = threading.Lock()
+PLAN_TTL_SECONDS = 24 * 3600
+MAX_PLANS = 100
+
+
+def register_plan(source: Dict[str, Any], target: Dict[str, Any],
+                  record: Dict[str, Any]) -> str:
+    now = time.time()
+    plan_id = secrets.token_hex(8)
+    rec = dict(record, source=source.get("address", ""),
+               target=target.get("address", ""), created=now)
+    with _PLANS_LOCK:
+        for k in [k for k, v in _PLANS.items() if now - v["created"] >= PLAN_TTL_SECONDS]:
+            del _PLANS[k]
+        while len(_PLANS) >= MAX_PLANS:
+            del _PLANS[min(_PLANS, key=lambda k: _PLANS[k]["created"])]
+        _PLANS[plan_id] = rec
+    return plan_id
+
+
+def get_plan(plan_id: str, source: Dict[str, Any],
+             target: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The registered plan for exactly this host pair, or None (unknown,
+    expired, or made for other hosts)."""
+    with _PLANS_LOCK:
+        rec = _PLANS.get(str(plan_id or ""))
+        if not rec:
+            return None
+        if time.time() - rec["created"] >= PLAN_TTL_SECONDS:
+            _PLANS.pop(plan_id, None)
+            return None
+        if rec["source"] != source.get("address") or rec["target"] != target.get("address"):
+            return None
+        return dict(rec)
+
+
+def derive_storage_map(rec: Dict[str, Any]) -> Dict[str, str]:
+    """Every storage the guest uses now -> the target storage the preflight
+    checked. Derived, never taken from the request."""
+    to = rec.get("target_storage") or ""
+    if not to:
+        return {}
+    if to not in (rec.get("target_storage_ids") or []):
+        raise ValueError(f"storage {to} is not a guest storage on the target")
+    return {f: to for f in rec.get("source_storages") or [] if f and f != to}
+
+
+def validate_bridge_map(bmap: Any, rec: Dict[str, Any]) -> Dict[str, str]:
+    """The user's bridge choices, checked against what the preflight saw:
+    keys are bridges the guest uses, values bridges that exist on the target."""
+    if not bmap:
+        return {}
+    if not isinstance(bmap, dict):
+        raise ValueError("bridge_map must be an object")
+    bridges = set(rec.get("bridges") or [])
+    targets = set(rec.get("target_bridges") or [])
+    out = {}
+    for k, v in bmap.items():
+        k, v = str(k), str(v)
+        if k not in bridges:
+            raise ValueError(f"{k} is not a bridge of this guest")
+        if v not in targets or not _NAME_TOKEN_RE.fullmatch(v):
+            raise ValueError(f"{v!r} is not a bridge on the target")
+        if k != v:
+            out[k] = v
+    return out
+
+
 def preflight(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
               gtype: str, target_root: str,
               new_vmid: Optional[str] = None,
@@ -619,7 +707,17 @@ def preflight(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
         add("target_datasets", True, "target is empty, full transfer")
 
     errors = [c for c in checks if not c["ok"] and c["level"] == "error"]
-    return {"success": True, "checks": checks, "plan": plan,
+    storage_ids = [s.get("storage", "") for s in storages]
+    plan_id = register_plan(source, target, {
+        "vmid": vmid, "gtype": gtype, "new_vmid": new_vmid or None,
+        "target_vmid": tgt_vmid, "plan": plan, "pull": pull,
+        "source_storages": config_storage_ids(text, gtype),
+        "target_storage": target_storage, "target_storage_ids": storage_ids,
+        "bridges": src_bridges, "target_bridges": tgt_bridges,
+        "can_run": not errors,
+    }) if plan else None
+    return {"success": True, "checks": checks, "plan": plan, "plan_id": plan_id,
+            "vmid": vmid,
             "running": running, "target_vmid": tgt_vmid,
             "bridges": src_bridges, "target_bridges": tgt_bridges,
             "source_storages": config_storage_ids(text, gtype),
@@ -953,8 +1051,9 @@ def cleanup_source(source: Dict[str, Any], vmid: str, gtype: str,
                    datasets: List[str]) -> Dict[str, Any]:
     """Remove the migrated guest from the source -- explicit, never automatic.
 
-    Destroys the guest config and the listed datasets. Refuses while the guest
-    is still running there.
+    Destroys the guest config and the listed datasets -- the caller passes the
+    source datasets of a registered plan, never a list from the request.
+    Refuses while the guest is still running there.
     """
     try:
         vmid = str(validate_vmid(vmid))

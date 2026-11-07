@@ -253,10 +253,11 @@ async function viewHome() {
     // bug report -- "which version are you on?" -- is answered before it is
     // asked. Baked into the image by CI, so it cannot claim a release it is not.
     const title = h("h2", {}, t("home_title"));
-    if (window.ZFS_VERSION) {
+    const appVersion = document.documentElement.dataset.appVersion || "";
+    if (appVersion) {
         title.appendChild(h("span", {
             style: "margin-left:10px;font-size:13px;font-weight:400;color:var(--text-secondary)",
-        }, window.ZFS_VERSION));
+        }, appVersion));
     }
     container.appendChild(h("div", { className: "page-header" }, [
         title,
@@ -3040,7 +3041,7 @@ async function browseRestorePath(subpath) {
     const snapLabel = snapshot.includes("@") ? snapshot.split("@")[1] : snapshot;
 
     const pathParts = subpath ? subpath.split("/").filter(Boolean) : [];
-    let breadcrumb = `<span class="restore-crumb" onclick="browseRestorePath('')">/</span>`;
+    let breadcrumb = `<span class="restore-crumb" ${dataAction("browseRestorePath", "")}>/</span>`;
     let cumulative = "";
     for (const part of pathParts) {
         cumulative += (cumulative ? "/" : "") + part;
@@ -3060,7 +3061,7 @@ async function browseRestorePath(subpath) {
         </div>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
             <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("file_restore_hint"))}</span>
-            <button class="btn btn-sm btn-danger" onclick="closeFileRestore()">${escapeHtml(t("close_unmount"))}</button>
+            <button class="btn btn-sm btn-danger" ${dataAction("closeFileRestore")}>${escapeHtml(t("close_unmount"))}</button>
         </div>
     `;
 
@@ -3130,7 +3131,7 @@ window.previewRestoreFile = async function(filePath) {
     previewDiv.innerHTML = `
         <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
             <strong>${escapeHtml(fileName)}</strong>
-            <button class="btn btn-sm" onclick="this.parentElement.parentElement.innerHTML = window._prevRestoreContent">${escapeHtml(t("back"))}</button>
+            <button class="btn btn-sm" ${dataAction("restoreBackView", "file")}>${escapeHtml(t("back"))}</button>
         </div>
         <pre class="output" style="max-height:400px">${escapeHtml(r.success ? r.stdout : (r.stderr || t("cannot_preview")))}</pre>
     `;
@@ -3261,8 +3262,7 @@ function showPartitionSelect() {
                 `;
             } else if (isMountable) {
                 html += `
-                    <div class="card" style="cursor:pointer;transition:border-color 0.2s" ${dataAction("mountZvolPartition", p.device, p.fstype)}
-                         onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+                    <div class="card card-hover-accent" style="cursor:pointer;transition:border-color 0.2s" ${dataAction("mountZvolPartition", p.device, p.fstype)}>
                         <div class="card-body" style="padding:16px;text-align:center">
                             <div style="font-size:28px;margin-bottom:8px">${fsIcon}</div>
                             <div style="font-weight:700">${escapeHtml(p.name)}</div>
@@ -3280,7 +3280,7 @@ function showPartitionSelect() {
     html += `
         <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
             <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("select_partition_hint") || "Select a partition to browse files")}</span>
-            <button class="btn btn-sm btn-danger" onclick="closeVmRestore()">${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
+            <button class="btn btn-sm btn-danger" ${dataAction("closeVmRestore")}>${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
         </div>
     `;
 
@@ -3318,7 +3318,7 @@ async function browseZvolPath(subpath) {
 
     const snapLabel = sess.snapshot.includes("@") ? sess.snapshot.split("@")[1] : sess.snapshot;
     const pathParts = subpath ? subpath.split("/").filter(Boolean) : [];
-    let breadcrumb = `<span class="restore-crumb" onclick="browseZvolPath('')">/</span>`;
+    let breadcrumb = `<span class="restore-crumb" ${dataAction("browseZvolPath", "")}>/</span>`;
     let cumulative = "";
     for (const part of pathParts) {
         cumulative += (cumulative ? "/" : "") + part;
@@ -3338,10 +3338,10 @@ async function browseZvolPath(subpath) {
         </div>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
             <div>
-                <button class="btn btn-sm" onclick="showPartitionSelect()" style="margin-right:8px">${escapeHtml(t("back_to_partitions") || "← Partitions")}</button>
+                <button class="btn btn-sm" ${dataAction("showPartitionSelect")} style="margin-right:8px">${escapeHtml(t("back_to_partitions") || "← Partitions")}</button>
                 <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("vm_restore_hint") || "Browse and download files from the VM snapshot")}</span>
             </div>
-            <button class="btn btn-sm btn-danger" onclick="closeVmRestore()">${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
+            <button class="btn btn-sm btn-danger" ${dataAction("closeVmRestore")}>${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
         </div>
     `;
 
@@ -3412,7 +3412,7 @@ window.previewZvolFile = async function(filePath) {
     listEl.innerHTML = `
         <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
             <strong>${escapeHtml(fileName)}</strong>
-            <button class="btn btn-sm" onclick="this.parentElement.parentElement.innerHTML = window._prevZvolContent">${escapeHtml(t("back"))}</button>
+            <button class="btn btn-sm" ${dataAction("restoreBackView", "zvol")}>${escapeHtml(t("back"))}</button>
         </div>
         <pre class="output" style="max-height:400px">${escapeHtml(r.success ? r.stdout : (r.stderr || t("cannot_preview") || "Cannot preview"))}</pre>
     `;
@@ -5950,6 +5950,30 @@ async function viewDR() {
                     if (!confirm(t("dr_pf_confirm").replace("{n}", preflightState.snapshot_count))) return;
                 }
 
+                // New host key: show what the destination presents now and
+                // let the user compare it with the destination's console
+                // before anything is trusted. Only that fingerprint is sent.
+                let acceptedFp = null;
+                if (rkCb.checked) {
+                    let scan;
+                    try {
+                        scan = await API.post("/api/dr/scan-host-key?host=" + encodeURIComponent(pair.host_address),
+                                              { address: srcAddr, port: srcPort });
+                    } catch (e) { toast(t("dr_hostkey_scan_failed") + " " + (e.message || ""), "error"); return; }
+                    const keys = (scan && scan.keys) || [];
+                    if (!keys.length) { toast(t("dr_hostkey_scan_failed"), "error"); return; }
+                    const pick = keys.find(k => k.type === "ssh-ed25519") || keys[0];
+                    const file = pick.type === "ssh-ed25519" ? "ssh_host_ed25519_key.pub"
+                               : pick.type.startsWith("ecdsa") ? "ssh_host_ecdsa_key.pub" : "ssh_host_rsa_key.pub";
+                    const msg = t("dr_hostkey_confirm")
+                        .replace("{h}", srcAddr + ":" + srcPort)
+                        .replace("{type}", pick.type)
+                        .replace("{fp}", pick.fingerprint)
+                        .replace("{cmd}", "ssh-keygen -lf /etc/ssh/" + file);
+                    if (!confirm(msg)) return;
+                    acceptedFp = pick.fingerprint;
+                }
+
                 const force = forceCb.checked;
                 const phrase = t("dr_reverse_confirm")
                     .replace("{snap}", revSnapSel.value || t("dr_reverse_newest"))
@@ -5973,7 +5997,8 @@ async function viewDR() {
                         source_dataset: srcDs,
                         snapshot: revSnapSel.value || null,
                         force: force,
-                        refresh_host_key: rkCb.checked,
+                        refresh_host_key: !!acceptedFp,
+                        accepted_fingerprint: acceptedFp,
                     });
                 } catch (e) {
                     statusBlock.innerHTML = "";
@@ -6006,7 +6031,11 @@ async function viewDR() {
                             const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
                             const warnBox = (msg) => `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(msg)}</div>`;
                             let hint = "";
-                            if (res.host_key_error) {
+                            if (res.host_key_mismatch) {
+                                hint = warnBox(t("dr_hostkey_mismatch")
+                                    .replace("{fp}", res.accepted_fingerprint || "")
+                                    .replace("{seen}", (res.scanned || []).map(k => k.type + " " + k.fingerprint).join(", ") || "—"));
+                            } else if (res.host_key_error) {
                                 hint = warnBox(t("dr_reverse_failed_hostkey"));
                             } else if (/destination has snapshots|must destroy them/i.test(res.log_tail || "")) {
                                 hint = warnBox(t("dr_reverse_failed_snapshots"));
@@ -6143,7 +6172,7 @@ function _replicaBadge(copy) {
 // would only move the cliff, so the work runs off the request thread now and
 // reports progress while it does.
 async function _collectInventory(host, onProgress) {
-    const start = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(host));
+    const start = await API.post("/api/inventory/matrix", { host: host || "" });
     if (!start || !start.task_id) throw new Error((start && start.error) || t("failed"));
     return await new Promise((resolve, reject) => {
         pollReplicationTask(start.task_id, {
@@ -6515,6 +6544,16 @@ async function viewMigrate() {
             new_vmid: newVmidInp.value.trim() || null,
         };
     };
+    // Every step after the preflight names the plan the server keeps; the
+    // plan itself (what moves where, what gets destroyed) never travels back.
+    const _planRef = () => ({ source: srcSel.value, target: tgtSel.value,
+                              plan_id: pf ? pf.plan_id : "" });
+    const _planGone = (r) => {
+        if (!r || !r.plan_expired) return false;
+        pf = null;
+        toast(t("mig_plan_expired"), "error");
+        return true;
+    };
 
     async function loadGuests() {
         guestSel.innerHTML = "";
@@ -6581,6 +6620,19 @@ async function viewMigrate() {
     srcSel.onchange = loadGuests;
     tgtSel.onchange = async () => { await loadTargetDatasets(); await loadTargetStorages(); };
     rootSel.onchange = syncStorageSel;
+    // A plan belongs to the selection it was made for. Change any input and
+    // it is dropped -- otherwise a rollback confirmed for guest 101 would act
+    // on the guest 100 that was checked earlier (the server only knows the
+    // plan id).
+    const _dropPlan = () => {
+        if (!pf) return;
+        pf = null;
+        checksBox.innerHTML = "";
+        checksBox.appendChild(h("p", { className: "muted" }, t("mig_plan_stale")));
+        buildMaps();
+    };
+    [srcSel, tgtSel, guestSel, rootSel, storSel].forEach(el => el.addEventListener("change", _dropPlan));
+    newVmidInp.addEventListener("input", _dropPlan);
     await loadGuests();
     await loadTargetDatasets();
     await loadTargetStorages();
@@ -6714,8 +6766,9 @@ async function viewMigrate() {
         if (!pf || !pf.can_precopy) { toast(t("mig_run_check_first"), "error"); return; }
         preBtn.disabled = true; preStatus.textContent = t("mig_starting");
         try {
-            const r = await API.post("/api/migrate/precopy",
-                Object.assign(_base(), { plan: pf.plan, pull: pf.pull }));
+            const r = await API.post("/api/migrate/precopy", _planRef());
+            if (_planGone(r)) { preBtn.disabled = false; preStatus.textContent = ""; return; }
+            if (!r.task_id) throw new Error(r.error || t("failed"));
             pollReplicationTask(r.task_id, {
                 onTick: rec => { preStatus.textContent = rec.progress || t("mig_running"); },
                 onDone: rec => {
@@ -6749,7 +6802,7 @@ async function viewMigrate() {
         // the guest config, the destination is the storage picked in step 1.
         storeInfo.innerHTML = "";
         const from = (pf && pf.source_storages) || [];
-        const to = storSel.value;
+        const to = (pf && pf.target_storage) || "";
         if (from.length && to) {
             from.forEach(f => storeInfo.appendChild(h("div", { className: "muted" },
                 f === to ? `${t("mig_storage_keep")}: ${f}` : `${t("mig_storage_rewrite")}: ${f} → ${to}`)));
@@ -6774,22 +6827,20 @@ async function viewMigrate() {
     const cutStatus = h("div", { style: "font-size:12px;margin-top:8px" });
     cutBtn.onclick = async () => {
         if (!pf || !pf.can_cutover) { toast(t("mig_run_check_first"), "error"); return; }
-        const g = _guest();
-        if (!confirm(t("mig_cutover_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", tgtSel.value))) return;
-        // Every storage the guest currently uses is rewritten to the one picked
-        // in step 1 (which the preflight verified writes into the target dataset).
-        const smap = {}, bmap = {};
-        const to = storSel.value;
-        ((pf && pf.source_storages) || []).forEach(f => { if (to && f !== to) smap[f] = to; });
+        if (!confirm(t("mig_cutover_confirm").replace("{g}", pf.vmid || "?").replace("{h}", tgtSel.value))) return;
+        // The storage rewrite is derived on the server from the storage the
+        // preflight checked; only the bridge choices are sent.
+        const bmap = {};
         Object.entries(bridgeInputs).forEach(([from, inp]) => {
             if (inp.value.trim() && inp.value.trim() !== from) bmap[from] = inp.value.trim();
         });
         cutBtn.disabled = true; cutStatus.textContent = t("mig_starting");
         try {
-            const r = await API.post("/api/migrate/cutover", Object.assign(_base(), {
-                plan: pf.plan, pull: pf.pull, storage_map: smap, bridge_map: bmap,
-                start_on_target: startCb.checked,
+            const r = await API.post("/api/migrate/cutover", Object.assign(_planRef(), {
+                bridge_map: bmap, start_on_target: startCb.checked,
             }));
+            if (_planGone(r)) { cutBtn.disabled = false; cutStatus.textContent = ""; return; }
+            if (!r.task_id) throw new Error(r.error || t("failed"));
             pollReplicationTask(r.task_id, {
                 onTick: rec => { cutStatus.textContent = rec.progress || t("mig_running"); },
                 onDone: rec => {
@@ -6821,11 +6872,12 @@ async function viewMigrate() {
     const cleanBtn = h("button", { className: "btn btn-danger btn-sm", style: "margin-left:8px" }, t("mig_cleanup"));
     const finStatus = h("div", { style: "font-size:12px;margin-top:8px" });
     rbBtn.onclick = async () => {
-        const g = _guest();
-        if (!confirm(t("mig_rollback_confirm").replace("{g}", g ? g.vmid : "?"))) return;
+        if (!pf || !pf.plan_id) { toast(t("mig_run_check_first"), "error"); return; }
+        if (!confirm(t("mig_rollback_confirm").replace("{g}", pf.vmid || "?"))) return;
         rbBtn.disabled = true; finStatus.textContent = t("mig_running");
         try {
-            const r = await API.post("/api/migrate/rollback", _base());
+            const r = await API.post("/api/migrate/rollback", _planRef());
+            if (_planGone(r)) { rbBtn.disabled = false; finStatus.textContent = ""; return; }
             finStatus.textContent = (r.success ? "✓ " : "✗ ") +
                 (r.steps || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
             toast(r.success ? t("mig_rollback_ok") : t("mig_rollback_failed"), r.success ? "success" : "error");
@@ -6833,14 +6885,12 @@ async function viewMigrate() {
         finally { rbBtn.disabled = false; }
     };
     cleanBtn.onclick = async () => {
-        const g = _guest();
         if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
-        if (!confirm(t("mig_cleanup_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", srcSel.value))) return;
+        if (!confirm(t("mig_cleanup_confirm").replace("{g}", pf.vmid || "?").replace("{h}", srcSel.value))) return;
         cleanBtn.disabled = true; finStatus.textContent = t("mig_running");
         try {
-            const r = await API.post("/api/migrate/cleanup-source", Object.assign(_base(), {
-                datasets: pf.plan.map(p => p.source_dataset),
-            }));
+            const r = await API.post("/api/migrate/cleanup-source", _planRef());
+            if (_planGone(r)) { cleanBtn.disabled = false; finStatus.textContent = ""; return; }
             finStatus.textContent = (r.success ? "✓ " : "✗ ") +
                 (r.results || []).map(s => s.step + (s.success ? " ok" : " FAIL")).join(", ");
             toast(r.success ? t("mig_cleanup_ok") : t("mig_cleanup_failed"), r.success ? "success" : "error");
@@ -6864,7 +6914,8 @@ async function viewMigrate() {
         if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
         snapBtn.disabled = true; snapList.textContent = t("mig_running");
         try {
-            const r = await API.post("/api/migrate/snapshots", Object.assign(_base(), { plan: pf.plan }));
+            const r = await API.post("/api/migrate/snapshots", _planRef());
+            if (_planGone(r)) { snapList.textContent = ""; return; }
             snapList.innerHTML = "";
             const all = [...(r.source || []).map(s => [t("mig_side_source"), s]),
                          ...(r.target || []).map(s => [t("mig_side_target"), s])];
@@ -6883,9 +6934,10 @@ async function viewMigrate() {
         if (!confirm(t("mig_snaps_confirm"))) return;
         snapDel.disabled = true;
         try {
-            const r = await API.post("/api/migrate/cleanup-snapshots", Object.assign(_base(), {
-                plan: pf.plan, keep_latest_on_target: keepCb.checked,
+            const r = await API.post("/api/migrate/cleanup-snapshots", Object.assign(_planRef(), {
+                keep_latest_on_target: keepCb.checked,
             }));
+            if (_planGone(r)) return;
             if (r.success) { toast(t("mig_snaps_ok").replace("{n}", String(r.deleted || 0)), "success"); snapBtn.onclick(); }
             else { openModal(t("mig_snaps_failed"), `<pre class="output" style="font-size:11px">${escapeHtml(r.error || JSON.stringify(r.results || [], null, 2))}</pre>`); }
         } catch (e) { toast(e.message || t("failed"), "error"); }
@@ -8741,7 +8793,19 @@ const DATA_ACTIONS = new Set([
     "rollbackGuestSnap", "openFileRestore", "openVmFileRestore",
     "browseRestorePath", "previewRestoreFile", "restoreFile", "restoreDir",
     "mountZvolPartition", "browseZvolPath", "previewZvolFile", "downloadZvolFile",
+    // The fixed handlers that used to be inline onclick attributes; with them
+    // gone the CSP can say script-src 'self'.
+    "navigate", "closeModal", "closeFileRestore", "closeVmRestore",
+    "showPartitionSelect", "restoreBackView",
 ]);
+
+// "Back" from a file preview to the listing it was opened from. Called with
+// the clicked button as `this`.
+function restoreBackView(which) {
+    const prev = which === "zvol" ? window._prevZvolContent : window._prevRestoreContent;
+    const box = this && this.parentElement && this.parentElement.parentElement;
+    if (box && typeof prev === "string") box.innerHTML = prev;
+}
 
 function dataAction(name, ...args) {
     if (!DATA_ACTIONS.has(name)) throw new Error("unknown data action " + name);
@@ -8757,7 +8821,7 @@ document.addEventListener("click", (e) => {
     try { args = JSON.parse(el.dataset.args || "[]"); } catch (_) { return; }
     if (!Array.isArray(args)) return;
     e.preventDefault();
-    window[name](...args);
+    window[name].apply(el, args);
 });
 
 // ---------------------------------------------------------------------------

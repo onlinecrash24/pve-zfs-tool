@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-default-lang="{{ default_lang }}" data-app-version="{{ app_version }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -15,7 +15,7 @@
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="sidebar-header">
-                <a href="#" onclick="navigate('home'); return false;" style="text-decoration:none">
+                <a href="#" data-action="navigate" data-args="[&quot;home&quot;]" style="text-decoration:none">
                     <img src="/static/img/logo.svg?v=3" alt="PVE ZFS Tool" class="sidebar-logo">
                 </a>
             </div>
@@ -128,11 +128,11 @@
         <div class="modal">
             <div class="modal-header">
                 <span id="modal-title">Modal</span>
-                <button class="close-btn" onclick="closeModal()">&times;</button>
+                <button class="close-btn" data-action="closeModal">&times;</button>
             </div>
             <div class="modal-body" id="modal-body"></div>
             <div class="modal-footer" id="modal-footer">
-                <button class="btn" onclick="closeModal()">Close</button>
+                <button class="btn" data-action="closeModal">Close</button>
             </div>
         </div>
     </div>
@@ -140,10 +140,6 @@
     <!-- Toast -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script>
-        window.ZFS_DEFAULT_LANG = "{{ default_lang }}";
-        window.ZFS_VERSION = "{{ app_version }}";
-    </script>
     <script src="/static/js/i18n.js?v={{ asset_v }}"></script>
     <script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>

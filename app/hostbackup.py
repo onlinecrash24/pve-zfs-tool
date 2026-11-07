@@ -83,6 +83,9 @@ def select_prunable(filenames, keep: int):
 # Backup script
 # ---------------------------------------------------------------------------
 
+REMOTE_BACKUP_DIR = "/root/.pve-zfs-tool"
+
+
 def _build_backup_script(include_priv: bool, dest: str) -> str:
     """Shell script run on the host: stage curated config + command captures,
     tar them up to ``dest``. ``--exclude=priv`` drops /etc/pve/priv unless
@@ -225,6 +228,7 @@ for n in /sys/class/net/*; do
 done > "$STAGE/cmd/nic-identity.txt" 2>&1 || true
 {{ echo "host=$(hostname -f 2>/dev/null || hostname)"; echo "date=$(date -Is)"; echo "include_priv=$INCLUDE_PRIV"; }} > "$STAGE/cmd/_meta.txt" 2>&1 || true
 
+mkdir -m 700 -p "$(dirname {qdest})"
 tar -C "$STAGE" -czf {qdest} . 2>/dev/null
 rm -rf "$STAGE"
 echo "__SIZE__=$(stat -c %s {qdest} 2>/dev/null || echo 0)"
@@ -245,7 +249,9 @@ def create_backup(host, include_priv: bool = False):
     ts = tz_now().strftime("%Y%m%d-%H%M%S")
     suffix = "-withpriv" if include_priv else ""
     filename = f"pve-backup-{ts}{suffix}.tar.gz"
-    remote_tmp = f"/tmp/{filename}"
+    # Under /root, not /tmp: the archive is written by root, and a name
+    # under a world-writable directory can be planted beforehand.
+    remote_tmp = f"{REMOTE_BACKUP_DIR}/{filename}"
 
     out_dir = host_backup_dir(address)
     os.makedirs(out_dir, exist_ok=True)

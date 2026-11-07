@@ -198,7 +198,7 @@ apt install ntfs-3g         # Optional — nur für Windows-VM-NTFS-Partitionen
 
 Für Produktiv-Deployments den Container hinter einen HTTPS-Reverse-Proxy stellen. Die Anwendung enthält `ProxyFix`-Middleware und vertraut automatisch den `X-Forwarded-*`-Headern des Proxys.
 
-In `docker-compose.yml` `FORCE_HTTPS=true` setzen, um sichere Session-Cookies zu aktivieren,
+In `docker-compose.yml` `FORCE_HTTPS=true` setzen, um sichere Session-Cookies und HSTS zu aktivieren,
 und `TRUST_PROXY=true`, damit die Anwendung die Client-Adresse aus `X-Forwarded-For`
 übernimmt, statt in jedem Nutzer den Proxy zu sehen. Ohne diese Variable zählt die
 Login-Sperre alle Nutzer als einen, und im Audit-Log steht die Adresse des Proxys.
@@ -311,7 +311,7 @@ Exportierte Metriken u. a.: `pvezfs_host_reachable`, `pvezfs_pool_capacity_perce
 | `SECRET_KEY` | `dev-key-change-me` | Flask-Session-Secret -- **muss geändert werden!** |
 | `ADMIN_USER` | `admin` | Login-Benutzername -- **sollte geändert werden** |
 | `ADMIN_PASSWORD` | *(keins)* | Login-Passwort, **Pflicht** (leer startet nicht). Platzhalter oder unter 12 Zeichen werden mit Warnung im Log und Banner in der Oberfläche akzeptiert |
-| `FORCE_HTTPS` | `true` | Sichere Session-Cookies -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
+| `FORCE_HTTPS` | `true` | Sichere Session-Cookies und HSTS -- auf `false` setzen, wenn nicht hinter HTTPS-Proxy |
 | `TRUST_PROXY` | nicht gesetzt | Client-Adresse aus `X-Forwarded-For` übernehmen. **Nur** hinter einem Reverse-Proxy -- auf einem direkt erreichbaren Port könnte jeder Client seine Adresse selbst wählen und die Login-Sperre umgehen |
 | `TZ` | `UTC` | Zeitzone für Reports und Scheduler (z. B. `Europe/Berlin`, `America/New_York`) |
 | `HOST_OFFLINE_CONFIRM_SEC` | `45` | Ein Host, der erreichbar war und eine SSH-Probe verfehlt, wird nach so vielen Sekunden noch einmal geprüft, bevor „Host Offline" ausgelöst wird -- ein sshd-Neustart beim Paket-Update ist kein Ausfall. `0` meldet bei der ersten verfehlten Probe |

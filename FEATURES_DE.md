@@ -72,7 +72,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
 - **Sicheres Löschen** -- Entfernt Cron-Eintrag + Config (mit Zeitstempel-Backup); optionale Checkbox löscht zusätzlich alle `zfs-auto-snap_*`-Snapshots unterhalb des Replikat-Ziels -- Datasets und zsync-Basis-Snapshots bleiben erhalten, Top-Level-Pools werden abgelehnt
 
 ## Disaster Recovery
-- **Reverse-Sync** -- Sendet ein Replikat zurück an einen wiederhergestellten Quell-Host via `zfs send -R | ssh <quelle> zfs recv` und nutzt das beim Replikations-Setup eingerichtete SSH-Vertrauen weiter
+- **Reverse-Sync** -- Sendet ein Replikat zurück an einen wiederhergestellten Quell-Host via `zfs send -R | ssh <quelle> zfs recv` und nutzt das beim Replikations-Setup eingerichtete SSH-Vertrauen weiter; gesendet werden nur Datasets unter den eigenen Replikationszielen des Hosts, und der neue SSH-Host-Key eines neu installierten Ziels wird zuerst angezeigt und erst übernommen, wenn du seinen Fingerprint an der Konsole des Ziels bestätigt hast
 - **Host-Key bei neu installiertem Ziel** -- Ein neu aufgesetzter Ziel-Host hat einen neuen SSH-Host-Key, der die Übertragung bei strikter Prüfung abbrechen würde ("REMOTE HOST IDENTIFICATION HAS CHANGED"); eine standardmäßig aktive Option entfernt den veralteten `known_hosts`-Eintrag und liest den aktuellen Key neu ein (Fingerprint wird protokolliert). Bei einem Host-Key-Fehler weist eine gezielte Meldung auf genau diese Option hin
 - **Guest-Konfiguration wiederherstellen** -- Der Reverse-Sync stellt nur die Disk wieder her; dieser Schritt spielt die VM/CT-Konfiguration (`/etc/pve/{qemu-server,lxc}/<vmid>.conf`) aus einem Host-Config-Backup zurück, damit Proxmox den Gast wieder anzeigt -- leitet VMID/Typ aus dem Replikat-Dataset ab, zeigt die Config zur Vorschau und überschreibt eine vorhandene nur nach Bestätigung
 - **Replikat-Erkennung** -- Scannt jeden registrierten Host nach Replikat-Wurzeln und listet die replizierten Datasets samt ihren Snapshots
@@ -177,9 +177,9 @@ worauf es zugreift, steht in der [README](README_DE.md).
 ## Sicherheit
 - **CSRF-Schutz** -- Token-basierter Schutz für alle zustandsändernden Requests
 - **Input-Validation** -- Whitelist-basierte Prüfung aller Parameter vor Shell-Ausführung
-- **Rate-Limiting** -- Brute-Force-Schutz am Login (5 Versuche, 5 Min Sperre)
-- **Sichere Sessions** -- HttpOnly-Cookies, SameSite=Lax, konfigurierbares Secure-Flag, 8 h Timeout
-- **Security-Header** -- CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- **Rate-Limiting** -- Brute-Force-Schutz am Login je Client-Adresse (5 Versuche, 5 Min Sperre) und je Kontoname (20 Versuche, 15 Min), damit auch über viele Adressen verteiltes Raten gestoppt wird
+- **Sichere Sessions** -- HttpOnly-Cookies, SameSite=Lax, konfigurierbares Secure-Flag, 8 h Timeout; Sitzungen sind serverseitig registriert, ein Logout macht damit auch ein kopiertes Cookie ungültig
+- **Security-Header** -- CSP ohne Inline-Skript (`script-src 'self'`), X-Frame-Options, X-Content-Type-Options, Referrer-Policy, HSTS mit `FORCE_HTTPS`
 - **Path-Traversal-Schutz** -- Realpath-Validation inkl. Symlink-Attack-Absicherung
 - **SSH-Host-Key-Verification** -- Trust On First Use (TOFU), Known-Hosts gespeichert und bei Folgeverbindungen verifiziert
 - **SSH-Key-Rotation** -- Ein-Klick-Rotation von der Startseite; erzeugt neues Ed25519-Keypair, rollt es auf alle Hosts aus und entfernt den alten erst nach Verifikation (Aussperren ausgeschlossen); per-Host-Status für Deploy/Verify/Cleanup

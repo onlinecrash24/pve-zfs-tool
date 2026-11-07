@@ -80,6 +80,7 @@ def test_the_notice_route_carries_the_warning(monkeypatch):
     c = m.app.test_client()
     with c.session_transaction() as s:
         s["authenticated"] = True
+        s["sid"] = m.session_open("admin")
     r = c.get("/api/system/notice")
     assert r.status_code == 200
     assert r.get_json() == {"password_warning": "ADMIN_PASSWORD is shorter than 12 characters",

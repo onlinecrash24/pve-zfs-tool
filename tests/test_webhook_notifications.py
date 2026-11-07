@@ -253,6 +253,7 @@ def client(monkeypatch):
     c = m.app.test_client()
     with c.session_transaction() as s:
         s["authenticated"] = True
+        s["sid"] = m.session_open("admin")
         s["csrf_token"] = "t"
     c.saved = saved
     return c

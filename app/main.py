@@ -10,6 +10,7 @@ import hmac
 import logging
 import traceback
 from datetime import timedelta
+from app.tasks import TaskLimitError
 
 # App logging to stdout so background threads (backup/report schedulers,
 # monitor) are actually observable in `docker compose logs`. Without this the
@@ -198,46 +199,132 @@ else:
     log.info("Ignoring X-Forwarded-* headers. If this runs behind a reverse proxy, set TRUST_PROXY=true -- "
              "otherwise every user shares one login rate-limit bucket and the audit log records the proxy's address.")
 
-# Rate limiting for login attempts
-_login_attempts = {}  # IP -> {"count": int, "last": float}
-_login_lock = threading.Lock()   # guards the check-then-increment on _login_attempts
+# Rate limiting for login attempts. Two counters: one per client address
+# (5 tries, 5 minutes) and one per account name (20 tries, 15 minutes). The
+# second catches guessing spread over many addresses, which the first never
+# sees. Its price: whoever reaches the port can lock the admin out for 15
+# minutes -- stated in SECURITY.md.
+_login_attempts = {}       # IP -> {"count": int, "last": float}
+_login_user_attempts = {}  # account name -> {"count": int, "last": float}
+_login_lock = threading.Lock()   # guards the check-then-increment on both maps
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+MAX_USER_LOGIN_ATTEMPTS = 20
+USER_LOGIN_WINDOW_SECONDS = 900  # 15 minutes
 
 
-def _login_gate(ip, now):
-    """(allowed, remaining_seconds) for this IP, decided under the lock so a
-    concurrent burst can't read a stale counter and slip past the lockout."""
+def _login_user_key(username):
+    return str(username or "").strip().lower()[:64]
+
+
+def _gate(store, key, now, limit, window):
+    info = store.get(key)
+    if info and info["count"] >= limit and (now - info["last"]) < window:
+        return False, int(window - (now - info["last"]))
+    return True, 0
+
+
+def _record(store, key, now, window):
+    # Drop entries whose window has passed. The map used to grow without
+    # bound -- every address that ever failed stayed forever -- which, with a
+    # spoofable address, is an allocation per request.
+    for stale in [k for k, v in store.items() if (now - v["last"]) >= window]:
+        del store[stale]
+    info = store.get(key, {"count": 0, "last": 0})
+    if (now - info["last"]) >= window:
+        info = {"count": 0, "last": now}
+    info["count"] += 1
+    info["last"] = now
+    store[key] = info
+    return info["count"]
+
+
+def _login_gate(ip, now, username=None):
+    """(allowed, remaining_seconds) for this IP and, if given, this account
+    name -- decided under the lock so a concurrent burst can't read a stale
+    counter and slip past the lockout."""
     with _login_lock:
-        info = _login_attempts.get(ip)
-        if (info and info["count"] >= MAX_LOGIN_ATTEMPTS
-                and (now - info["last"]) < LOGIN_LOCKOUT_SECONDS):
-            return False, int(LOGIN_LOCKOUT_SECONDS - (now - info["last"]))
+        ok, remaining = _gate(_login_attempts, ip, now,
+                              MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_SECONDS)
+        if not ok:
+            return ok, remaining
+        if username is not None:
+            return _gate(_login_user_attempts, _login_user_key(username), now,
+                         MAX_USER_LOGIN_ATTEMPTS, USER_LOGIN_WINDOW_SECONDS)
         return True, 0
 
 
-def _login_record_failure(ip, now):
-    """Atomically increment the failed-attempt counter (resetting it if the
-    lockout window elapsed). Returns the new count."""
+def _login_record_failure(ip, now, username=None):
+    """Atomically increment the failed-attempt counters. Returns
+    ``(per_address_count, per_account_count)``, both taken under the same lock
+    as the increment -- each concurrent failure sees its own number, so
+    exactly one of them sees the account reach the limit."""
     with _login_lock:
-        # Drop entries whose lockout window has passed. The map used to grow
-        # without bound -- every address that ever failed stayed forever --
-        # which, with a spoofable address, is an allocation per request.
-        for stale in [k for k, v in _login_attempts.items()
-                      if (now - v["last"]) >= LOGIN_LOCKOUT_SECONDS]:
-            del _login_attempts[stale]
-        info = _login_attempts.get(ip, {"count": 0, "last": 0})
-        if (now - info["last"]) >= LOGIN_LOCKOUT_SECONDS:
-            info = {"count": 0, "last": now}
-        info["count"] += 1
-        info["last"] = now
-        _login_attempts[ip] = info
-        return info["count"]
+        user_count = 0
+        if username is not None:
+            user_count = _record(_login_user_attempts, _login_user_key(username), now,
+                                 USER_LOGIN_WINDOW_SECONDS)
+        return _record(_login_attempts, ip, now, LOGIN_LOCKOUT_SECONDS), user_count
 
 
-def _login_reset(ip):
+def _login_reset(ip, username=None):
     with _login_lock:
         _login_attempts.pop(ip, None)
+        if username is not None:
+            _login_user_attempts.pop(_login_user_key(username), None)
+
+
+# ---------------------------------------------------------------------------
+# Server-side sessions
+#
+# The session cookie is signed, not stored: before, logout cleared the
+# browser's copy and a captured cookie kept working until it expired. Every
+# login now registers a random id here, the cookie carries it, and a request
+# whose id is unknown is not authenticated. Logout drops the id. In memory on
+# purpose -- gunicorn runs one worker (see entrypoint.sh) -- so a restart
+# signs everyone out, which for an admin tool is a feature.
+# ---------------------------------------------------------------------------
+_sessions = {}             # sid -> {"user": str, "created": float, "seen": float}
+_sessions_lock = threading.Lock()
+MAX_SESSIONS = 200
+
+
+def session_open(user):
+    sid = secrets.token_urlsafe(24)
+    now = time.time()
+    with _sessions_lock:
+        _session_prune(now)
+        if len(_sessions) >= MAX_SESSIONS:
+            oldest = min(_sessions, key=lambda k: _sessions[k]["seen"])
+            _sessions.pop(oldest, None)
+        _sessions[sid] = {"user": user, "created": now, "seen": now}
+    return sid
+
+
+def _session_prune(now):
+    idle = app.permanent_session_lifetime.total_seconds()
+    for k in [k for k, v in _sessions.items() if (now - v["seen"]) >= idle]:
+        del _sessions[k]
+
+
+def session_alive(sid):
+    if not sid:
+        return False
+    now = time.time()
+    with _sessions_lock:
+        rec = _sessions.get(sid)
+        if not rec:
+            return False
+        if (now - rec["seen"]) >= app.permanent_session_lifetime.total_seconds():
+            _sessions.pop(sid, None)
+            return False
+        rec["seen"] = now
+        return True
+
+
+def session_close(sid):
+    with _sessions_lock:
+        _sessions.pop(sid or "", None)
 
 
 # ---------------------------------------------------------------------------
@@ -256,13 +343,24 @@ def login_required(f):
     return wrapper
 
 
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data:")
+
+
 @app.after_request
 def set_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    # No inline script anywhere (templates pass values as data-* attributes,
+    # handlers go through the data-action dispatcher), so script-src needs
+    # no 'unsafe-inline'. Styles still do: the UI sets style attributes
+    # throughout.
+    response.headers["Content-Security-Policy"] = CSP
+    if _env_flag("FORCE_HTTPS"):
+        # No includeSubDomains: the tool often shares a domain with others.
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
     return response
 
 
@@ -275,7 +373,8 @@ def check_auth():
     allowed = ("/login", "/api/login", "/static/", "/metrics")
     if any(request.path.startswith(p) for p in allowed):
         return
-    if not session.get("authenticated"):
+    if not session.get("authenticated") or not session_alive(session.get("sid")):
+        session.clear()
         if request.path.startswith("/api/"):
             return jsonify({"error": "Not authenticated"}), 401
         return redirect(url_for("login_page"))
@@ -300,13 +399,14 @@ def api_login():
     # each taken under _login_lock, so concurrent attempts from one IP can't
     # interleave their read-modify-write and undercount past the 5-try limit.
     now = time.time()
-    allowed, remaining = _login_gate(client_ip, now)
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "") or "")
+    password = str(data.get("password", "") or "")
+    allowed, remaining = _login_gate(client_ip, now, username)
     if not allowed:
-        return jsonify({"success": False, "error": f"Too many attempts. Try again in {remaining}s"}), 429
-
-    data = request.json or {}
-    username = data.get("username", "")
-    password = data.get("password", "")
+        resp = jsonify({"success": False, "error": f"Too many attempts. Try again in {remaining}s"})
+        resp.headers["Retry-After"] = str(max(1, remaining))
+        return resp, 429
 
     # Timing-safe comparison to prevent timing attacks
     user_ok = hmac.compare_digest(username.encode(), ADMIN_USER.encode())
@@ -314,10 +414,12 @@ def api_login():
 
     if user_ok and pass_ok:
         # Reset attempts on successful login
-        _login_reset(client_ip)
+        _login_reset(client_ip, username)
         # Rotate session ID to prevent session fixation attacks
+        session_close(session.get("sid"))
         session.clear()
         session["authenticated"] = True
+        session["sid"] = session_open(username)
         session["username"] = username
         session["csrf_token"] = secrets.token_hex(32)
         session.permanent = True
@@ -326,10 +428,14 @@ def api_login():
         return jsonify({"success": True, "csrf_token": session["csrf_token"]})
 
     # Track failed attempt (atomic increment under the lock)
-    attempts = _login_record_failure(client_ip, now)
+    attempts, user_attempts = _login_record_failure(client_ip, now, username)
     audit_log("login.failure", target=username or "?", success=False,
               user="?", ip=client_ip,
-              details={"attempts": attempts})
+              details={"attempts": attempts, "account_attempts": user_attempts})
+    if user_attempts == MAX_USER_LOGIN_ATTEMPTS:
+        audit_log("login.lockout", target=username or "?", success=False,
+                  user="?", ip=client_ip,
+                  details={"scope": "user", "seconds": USER_LOGIN_WINDOW_SECONDS})
     return jsonify({"success": False, "error": "Invalid credentials"}), 401
 
 
@@ -344,6 +450,7 @@ def api_csrf_token():
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
     user = session.get("username", "")
+    session_close(session.get("sid"))
     session.clear()
     audit_log("logout", target=user, user=user or "anonymous")
     return jsonify({"success": True})
@@ -2638,6 +2745,7 @@ def api_dr_reverse_sync():
             snapshot=(data.get("snapshot") or None),
             force=bool(data.get("force")),
             refresh_host_key=bool(data.get("refresh_host_key")),
+            accepted_fingerprint=(str(data.get("accepted_fingerprint") or "").strip() or None),
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -2646,8 +2754,28 @@ def api_dr_reverse_sync():
               details={"task_id": task_id,
                        "source_address": data.get("source_address"),
                        "force": bool(data.get("force")),
-                       "refresh_host_key": bool(data.get("refresh_host_key"))})
+                       "refresh_host_key": bool(data.get("refresh_host_key")),
+                       "accepted_fingerprint": data.get("accepted_fingerprint")})
     return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/dr/scan-host-key", methods=["POST"])
+@login_required
+def api_dr_scan_host_key():
+    """Show the host key a (rebuilt) destination presents, as seen from the
+    replica host -- for the user to compare before it is accepted. Writes
+    nothing."""
+    from app.dr import scan_host_key
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    try:
+        port = int(data.get("port") or 22)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "invalid port"}), 400
+    res = scan_host_key(host, str(data.get("address") or "").strip(), port)
+    return jsonify(res), (200 if res.get("success") else 400)
 
 
 @app.route("/api/dr/reverse-precheck")
@@ -2912,7 +3040,7 @@ def collect_matrix_task(progress_cb, host):
     return out
 
 
-@app.route("/api/inventory/matrix")
+@app.route("/api/inventory/matrix", methods=["POST"])
 @login_required
 def api_inventory_matrix():
     """Start the collection and hand back a task id.
@@ -2922,16 +3050,45 @@ def api_inventory_matrix():
     start_task can be read there. The AI report button on this very page
     already uses it.
     """
-    from app.tasks import start_task
-    host = (request.args.get("host") or "").strip()
-    task_id = start_task("inventory-matrix", collect_matrix_task, host,
-                         prefix="inv")
+    from app.tasks import start_or_join
+    data = request.get_json(silent=True) or {}
+    host = str(data.get("host") or "").strip()
+    # POST, so it carries the CSRF token like every other request that does
+    # work; and one collection per host at a time -- a second click returns
+    # the task that is already running instead of starting another. Lookup
+    # and start happen under one lock, so two concurrent clicks cannot both
+    # start one.
+    task_id, joined = start_or_join("inventory-matrix", collect_matrix_task, host,
+                                    prefix="inv", dedupe_key=f"inventory-matrix:{host}")
+    if joined:
+        return jsonify({"success": True, "task_id": task_id, "already_running": True})
     return jsonify({"success": True, "task_id": task_id})
+
+
+@app.errorhandler(TaskLimitError)
+def _task_limit(e):
+    return jsonify({"success": False, "error": str(e)}), 429
 
 
 # ---------------------------------------------------------------------------
 # Guest migration between two non-clustered hosts (near-live, ZFS send/recv)
 # ---------------------------------------------------------------------------
+
+def _migration_plan(data):
+    """(source, target, plan record, error response) for a step that acts on
+    a preflight plan. The request names the plan by id; nothing else about
+    what moves or gets destroyed is read from it."""
+    from app.migrate import get_plan
+    src, tgt = _migrate_hosts(data)
+    if not src or not tgt:
+        return None, None, None, (jsonify({"success": False, "error": "source or target host not found"}), 404)
+    rec = get_plan(str(data.get("plan_id") or ""), src, tgt)
+    if not rec:
+        return src, tgt, None, (jsonify({
+            "success": False, "plan_expired": True,
+            "error": "migration plan unknown or expired -- run the preflight again"}), 409)
+    return src, tgt, rec, None
+
 
 def _migrate_hosts(data):
     """(source, target) as registered hosts. Migration never uses ad-hoc
@@ -3048,17 +3205,16 @@ def api_migrate_precopy():
     """Start a pre-copy (guest keeps running). Repeatable to shrink the delta."""
     from app.migrate import precopy_async
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    plan = data.get("plan") or []
-    if not plan:
-        return jsonify({"success": False, "error": "empty migration plan"}), 400
-    task_id = precopy_async(src, tgt, plan, bool(data.get("pull", True)))
-    audit_log("migrate.precopy", target=str(data.get("vmid")),
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    if not rec["can_run"]:
+        return jsonify({"success": False, "error": "the preflight reported errors"}), 409
+    task_id = precopy_async(src, tgt, rec["plan"], rec["pull"])
+    audit_log("migrate.precopy", target=rec["vmid"],
               host=src["address"], success=True,
               details={"task_id": task_id, "to": tgt["address"],
-                       "disks": len(plan)})
+                       "disks": len(rec["plan"])})
     return jsonify({"success": True, "task_id": task_id})
 
 
@@ -3066,27 +3222,29 @@ def api_migrate_precopy():
 @login_required
 def api_migrate_cutover():
     """Stop the guest, send the final delta, move the config, start on target."""
-    from app.migrate import cutover_async
+    from app.migrate import cutover_async, derive_storage_map, validate_bridge_map
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    plan = data.get("plan") or []
-    if not plan:
-        return jsonify({"success": False, "error": "empty migration plan"}), 400
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    if not rec["can_run"]:
+        return jsonify({"success": False, "error": "the preflight reported errors"}), 409
+    try:
+        smap = derive_storage_map(rec)
+        bmap = validate_bridge_map(data.get("bridge_map") or {}, rec)
+        shutdown_timeout = max(10, min(int(data.get("shutdown_timeout") or 120), 3600))
+    except (TypeError, ValueError) as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     task_id = cutover_async(
-        src, tgt, (data.get("vmid") or "").strip(),
-        (data.get("gtype") or "qemu").strip(), plan,
-        bool(data.get("pull", True)),
-        new_vmid=(data.get("new_vmid") or None),
-        storage_map=(data.get("storage_map") or {}),
-        bridge_map=(data.get("bridge_map") or {}),
+        src, tgt, rec["vmid"], rec["gtype"], rec["plan"], rec["pull"],
+        new_vmid=rec["new_vmid"], storage_map=smap, bridge_map=bmap,
         start_on_target=bool(data.get("start_on_target", True)),
-        shutdown_timeout=int(data.get("shutdown_timeout") or 120))
-    audit_log("migrate.cutover", target=str(data.get("vmid")),
+        shutdown_timeout=shutdown_timeout)
+    audit_log("migrate.cutover", target=rec["vmid"],
               host=src["address"], success=True,
               details={"task_id": task_id, "to": tgt["address"],
-                       "new_vmid": data.get("new_vmid"),
+                       "new_vmid": rec["new_vmid"], "storage_map": smap,
+                       "bridge_map": bmap,
                        "start_on_target": bool(data.get("start_on_target", True))})
     return jsonify({"success": True, "task_id": task_id})
 
@@ -3097,14 +3255,13 @@ def api_migrate_rollback():
     """Undo a cutover: remove the guest on the target, unlock + start the source."""
     from app.migrate import rollback
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    res = rollback(src, tgt, (data.get("vmid") or "").strip(),
-                   (data.get("gtype") or "qemu").strip(),
-                   target_vmid=(data.get("new_vmid") or None),
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    res = rollback(src, tgt, rec["vmid"], rec["gtype"],
+                   target_vmid=rec["target_vmid"],
                    start_source=bool(data.get("start_source", True)))
-    audit_log("migrate.rollback", target=str(data.get("vmid")),
+    audit_log("migrate.rollback", target=rec["vmid"],
               host=src["address"], success=res.get("success", False),
               details={"from": tgt["address"], "steps": res.get("steps")})
     return jsonify(res)
@@ -3116,10 +3273,10 @@ def api_migrate_snapshots():
     """Leftover migrate-* snapshots on both hosts, for review before deleting."""
     from app.migrate import migration_snapshot_overview
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
-    return jsonify(migration_snapshot_overview(src, tgt, data.get("plan") or []))
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    return jsonify(migration_snapshot_overview(src, tgt, rec["plan"]))
 
 
 @app.route("/api/migrate/cleanup-snapshots", methods=["POST"])
@@ -3128,13 +3285,13 @@ def api_migrate_cleanup_snapshots():
     """Destroy the leftover migration snapshots on both hosts."""
     from app.migrate import cleanup_migration_snapshots
     data = request.get_json(silent=True) or {}
-    src, tgt = _migrate_hosts(data)
-    if not src or not tgt:
-        return jsonify({"success": False, "error": "source or target host not found"}), 404
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
     res = cleanup_migration_snapshots(
-        src, tgt, data.get("plan") or [],
+        src, tgt, rec["plan"],
         keep_latest_on_target=bool(data.get("keep_latest_on_target", True)))
-    audit_log("migrate.cleanup_snapshots", target=str(data.get("vmid")),
+    audit_log("migrate.cleanup_snapshots", target=rec["vmid"],
               host=src["address"], success=res.get("success", False),
               details={"deleted": res.get("deleted"),
                        "kept_on_target": res.get("kept_on_target"),
@@ -3148,15 +3305,14 @@ def api_migrate_cleanup_source():
     """Remove the migrated guest + its datasets from the source (explicit)."""
     from app.migrate import cleanup_source
     data = request.get_json(silent=True) or {}
-    src = _find_host((data.get("source") or "").strip())
-    if not src:
-        return jsonify({"success": False, "error": "source host not found"}), 404
-    res = cleanup_source(src, (data.get("vmid") or "").strip(),
-                         (data.get("gtype") or "qemu").strip(),
-                         data.get("datasets") or [])
-    audit_log("migrate.cleanup_source", target=str(data.get("vmid")),
+    src, tgt, rec, err = _migration_plan(data)
+    if err:
+        return err
+    datasets = [p["source_dataset"] for p in rec["plan"]]
+    res = cleanup_source(src, rec["vmid"], rec["gtype"], datasets)
+    audit_log("migrate.cleanup_source", target=rec["vmid"],
               host=src["address"], success=res.get("success", False),
-              details={"datasets": data.get("datasets")})
+              details={"datasets": datasets, "target_host": tgt["address"]})
     return jsonify(res)
 
 

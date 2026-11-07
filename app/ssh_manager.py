@@ -7,6 +7,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import logging
@@ -691,6 +692,16 @@ def _remove_authorized_key(host, pubkey):
 
 
 def rotate_ssh_keys():
+    """See _rotate_ssh_keys. The temporary key directory is removed on every
+    way out, including the early error returns."""
+    tmp_dir = tempfile.mkdtemp(prefix="pvezfs-rotate-")
+    try:
+        return _rotate_ssh_keys(tmp_dir)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _rotate_ssh_keys(tmp_dir):
     """Rotate the tool's SSH key across all configured hosts.
 
     Flow (safe — never locks us out):
@@ -706,15 +717,9 @@ def rotate_ssh_keys():
     from app.cache import invalidate_all
 
     old_pub = get_public_key() or ""
-    tmp_key = "/tmp/pvezfs_rotate_key"
-
-    # Clean temp files from a previous abort
-    for p in (tmp_key, tmp_key + ".pub"):
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except OSError:
-            pass
+    # A fresh private directory per rotation (container-local, created and
+    # removed by rotate_ssh_keys); no fixed name anyone could plant.
+    tmp_key = os.path.join(tmp_dir, "key")
 
     # 1. Generate new keypair
     try:
@@ -768,11 +773,6 @@ def rotate_ssh_keys():
         for h, res in zip(hosts, results):
             if res["deploy"]:
                 _remove_authorized_key(h, new_pub)
-        for p in (tmp_key, tmp_key + ".pub"):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
         return {
             "success": False,
             "error": "Deployment failed on one or more hosts; rolled back",

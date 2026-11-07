@@ -7,6 +7,38 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.942 -- 2026-11-07
+
+v0.9.942 — no stale-snapshot alerts for a host that just booted
+
+Field report. A host marked Expected Offline was off for two days and
+booted at 17:42; at 17:51, on the first sample, "Stale hourly snapshots"
+and "Stale daily snapshots" arrived, eight datasets each. Nothing was
+wrong: a host takes no snapshots while it is off. A backup box that wakes
+at night for a pull and shuts down again did the same on every wake-up.
+
+The stale-snapshot check now reads the host's uptime and judges a label
+only once the host has been up longer than that label's threshold --
+hourly after 4 hours, daily after 30, weekly after 9 days, monthly after
+33. Cron and zsync get the time they need to catch up; a host that has
+been up for a day and still has no daily snapshot is reported as before.
+Pool health, capacity and error alerts are untouched, so a backup box
+still reports a DEGRADED pool. If you muted such hosts to get rid of
+the mails, the mute can go again.
+
+Second finding from the same report: deselecting every tag in the
+Snapshot Check used to fall back to the default set, so the stale check
+could not be switched off per host. An empty selection now means off; a
+new Defaults button is the way back, and the dialog says which state is
+active.
+
+Also in this release: SECURITY.md names the October 2026 review by
+Ronald Wiesinger - IT-Services (rowie.at) with its scope and the releases
+that closed its findings; fpdf2 2.9.0 and pytest 9.2.0; pip-audit on the
+pinned set clean. The tool is not affected by the musl/OpenSSH password
+bypass published this week (sshhole): the image is Debian/glibc and runs
+no sshd, and Proxmox VE hosts use glibc with PAM.
+
 ## v0.9.941 -- 2026-11-03
 
 v0.9.941 — a failed probe is not an outage until a second one fails
