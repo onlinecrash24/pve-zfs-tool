@@ -16,11 +16,13 @@ session keeps its sticky id.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-import traceback
 import uuid
 from typing import Any, Callable, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 _TASKS: Dict[str, Dict[str, Any]] = {}
 _TASKS_LOCK = threading.Lock()
@@ -80,11 +82,15 @@ def start_task(name: str, fn: Callable, *args, prefix: str = "task", **kwargs) -
                     r["result"] = result
                     r["finished_at"] = time.time()
         except Exception as e:
+            # The traceback goes to the server log; the client gets the
+            # message. Frames, paths and local names are for the operator
+            # reading the log, not for the polling response.
+            log.exception("task %s (%s) failed", name, tid)
             with _TASKS_LOCK:
                 r = _TASKS.get(tid)
                 if r:
                     r["status"] = "error"
-                    r["error"] = f"{e}\n{traceback.format_exc()[-1500:]}"
+                    r["error"] = str(e)[:500] or e.__class__.__name__
                     r["finished_at"] = time.time()
 
     threading.Thread(target=_runner, daemon=True, name=f"{prefix}-{name}-{tid}").start()

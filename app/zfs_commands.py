@@ -193,7 +193,7 @@ def set_pool_prop(host, pool_name, prop, value):
         return {"success": False, "error": "unsupported property"}
     if value not in ("on", "off"):
         return {"success": False, "error": "value must be 'on' or 'off'"}
-    result = run_command(host, f"zpool set {prop}={value} {pool_name}")
+    result = run_command(host, f"zpool set {prop}={value} {shlex.quote(pool_name)}")
     if result.get("success"):
         _invalidate_cache(host["address"])
     return {"success": result.get("success", False), "stderr": result.get("stderr", "")}
@@ -404,7 +404,7 @@ def set_dataset_property(host, dataset, prop, value):
         value = validate_zfs_value(value)
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
-    result = run_command(host, f"zfs set {prop}={value} {dataset}")
+    result = run_command(host, f"zfs set {shlex.quote(prop)}={shlex.quote(value)} {shlex.quote(dataset)}")
     if result.get("success"):
         _invalidate(host)
     return result
@@ -686,7 +686,7 @@ def clone_snapshot(host, full_name, clone_name):
     result = run_command(host, f"zfs send {full_name} | zfs recv {clone_name}")
     if not result["success"]:
         return result
-    run_command(host, f"zfs set com.sun:auto-snapshot=false {clone_name}")
+    run_command(host, f"zfs set com.sun:auto-snapshot=false {shlex.quote(clone_name)}")
     _invalidate(host)
     return result
 
@@ -1097,7 +1097,7 @@ def set_auto_snapshot(host, dataset, enabled=True, label=None):
     if label:
         prop += f":{label}"
     value = "true" if enabled else "false"
-    result = run_command(host, f"zfs set {prop}={value} {dataset}")
+    result = run_command(host, f"zfs set {shlex.quote(prop)}={shlex.quote(value)} {shlex.quote(dataset)}")
     if result.get("success"):
         _invalidate(host)
     return result
@@ -1113,7 +1113,7 @@ def inherit_auto_snapshot(host, dataset, label=None):
     except ValueError as e:
         return {"success": False, "stderr": str(e)}
     prop = "com.sun:auto-snapshot" + (f":{label}" if label else "")
-    result = run_command(host, f"zfs inherit {prop} {dataset}")
+    result = run_command(host, f"zfs inherit {shlex.quote(prop)} {shlex.quote(dataset)}")
     if result.get("success"):
         _invalidate(host)
     return result
@@ -1335,7 +1335,7 @@ def zvol_snapshot_mount(host, snapshot):
         return {"success": False, "error": "kpartx is not installed on the Proxmox host. Install it with: apt install kpartx"}
 
     # Enable snapshot device visibility (default is hidden on ZFS Linux)
-    run_command(host, f"zfs set snapdev=visible {ds_name}")
+    run_command(host, f"zfs set snapdev=visible {shlex.quote(ds_name)}")
     # Give udev a moment to create the device node
     run_command(host, "udevadm settle --timeout=5 2>/dev/null; sleep 1")
 

@@ -7,6 +7,7 @@ Gotify has no native file support, so the report is sent as text only.
 
 import base64
 import hashlib
+import html
 import json
 import logging
 import mimetypes
@@ -127,6 +128,15 @@ def save_config(config):
             json.dump(config, f, indent=2)
 
 
+def _html_text(text):
+    """Message text for the channels that render HTML (Telegram parse_mode,
+    Matrix formatted_body, the e-mail HTML part). The text comes from pool
+    names, dataset names, zsync log lines and AI output -- none of it is
+    markup, so ``<``, ``>`` and ``&`` are shown as written instead of being
+    interpreted. Our own <b>/<br> wrappers are added around the result."""
+    return html.escape(str(text if text is not None else ""), quote=False)
+
+
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
@@ -204,10 +214,12 @@ def _send_gotify(server_url, token, title, message, priority=5):
         "message": message,
         "priority": priority,
     }).encode("utf-8")
+    # Token in a header, not the query string: URLs end up in proxy and
+    # server access logs, headers do not.
     req = urllib.request.Request(
-        f"{url}?token={token}",
+        url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Gotify-Key": token},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -793,13 +805,13 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
     # Telegram
     tg = config.get("telegram", {})
     if tg.get("enabled") and tg.get("bot_token") and tg.get("chat_id"):
-        tg_text = f"<b>ZFS Tool \u2013 {title}</b>\n\n{full_message}"
+        tg_text = f"<b>ZFS Tool \u2013 {_html_text(title)}</b>\n\n{_html_text(full_message)}"
         if pdf_bytes and pdf_filename:
             # Send short intro then document
             _send_telegram(tg["bot_token"], tg["chat_id"], tg_text[:4000])
             results["telegram"] = _send_telegram_document(
                 tg["bot_token"], tg["chat_id"], pdf_bytes, pdf_filename,
-                caption=f"<b>ZFS Tool \u2013 {title}</b>",
+                caption=f"<b>ZFS Tool \u2013 {_html_text(title)}</b>",
             )
         else:
             results["telegram"] = _send_telegram(tg["bot_token"], tg["chat_id"], tg_text)
@@ -815,10 +827,11 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
     mx = config.get("matrix", {})
     if mx.get("enabled") and mx.get("homeserver") and mx.get("access_token") and mx.get("room_id"):
         plain = f"ZFS Tool \u2013 {title}\n\n{full_message}"
-        html = f"<b>ZFS Tool \u2013 {title}</b><br><br>{full_message.replace(chr(10), '<br>')}"
+        formatted = (f"<b>ZFS Tool \u2013 {_html_text(title)}</b><br><br>"
+                     f"{_html_text(full_message).replace(chr(10), '<br>')}")
         # Always send the text message first
         results["matrix"] = _send_matrix(
-            mx["homeserver"], mx["access_token"], mx["room_id"], plain, html
+            mx["homeserver"], mx["access_token"], mx["room_id"], plain, formatted
         )
         # Then the PDF if present
         if pdf_bytes and pdf_filename:
@@ -855,9 +868,9 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
                              "ok": "#1f8a4c"}.get(verdict, "#1a73a7")
             body_html = (
                 f"<html><body style='font-family:sans-serif;color:#222'>"
-                f"<h3 style='color:#1a73a7;margin-bottom:8px'>ZFS Tool &ndash; {title}</h3>"
+                f"<h3 style='color:#1a73a7;margin-bottom:8px'>ZFS Tool &ndash; {_html_text(title)}</h3>"
                 f"<p style='font-size:15px;color:{verdict_color};"
-                f"font-weight:600;margin:6px 0 12px 0'>{short}</p>"
+                f"font-weight:600;margin:6px 0 12px 0'>{_html_text(short)}</p>"
                 f"<p style='font-size:13px;color:#444'>{attach_line}</p>"
                 f"<p style='color:#888;font-size:12px;margin-top:18px'>{timestamp}</p>"
                 f"</body></html>"
@@ -866,9 +879,9 @@ def send_notification(event_type, title, message, priority=5, pdf_attachment=Non
             body_text = f"{full_message}\n\n— ZFS Tool"
             body_html = (
                 f"<html><body style='font-family:sans-serif'>"
-                f"<h3 style='color:#1a73a7'>ZFS Tool &ndash; {title}</h3>"
+                f"<h3 style='color:#1a73a7'>ZFS Tool &ndash; {_html_text(title)}</h3>"
                 f"<pre style='background:#f5f5f5;padding:12px;border-radius:6px;"
-                f"white-space:pre-wrap'>{message}</pre>"
+                f"white-space:pre-wrap'>{_html_text(message)}</pre>"
                 f"<p style='color:#888;font-size:12px'>{timestamp}</p>"
                 f"</body></html>"
             )

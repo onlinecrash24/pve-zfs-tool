@@ -31,6 +31,7 @@ Safety rails:
 from __future__ import annotations
 
 import base64
+import posixpath
 import re
 import shlex
 import tarfile
@@ -469,8 +470,23 @@ def restore_guest_config(source_host: Dict[str, Any], gtype: str, vmid: str,
 # ---------------------------------------------------------------------------
 
 def _rel(member: str) -> str:
-    """tar member name -> repo-relative path (strip the './' the archive uses)."""
-    return (member or "").lstrip("./")
+    """tar member name -> normalised relative path, or "" if it is not one.
+
+    The archive comes from a host, so its member names are input: an entry
+    ``etc/../root/.ssh/authorized_keys`` would otherwise pass every prefix
+    check below as ``etc/...`` and be written as root to wherever the ``..``
+    points. The name is normalised first and anything that still climbs out
+    (``..``), or is empty, is refused; every caller skips an empty result.
+    """
+    name = (member or "").replace("\\", "/")
+    while name.startswith("./") or name.startswith("/"):
+        name = name[2:] if name.startswith("./") else name[1:]
+    if not name:
+        return ""
+    norm = posixpath.normpath(name)
+    if norm in (".", "..") or norm.startswith("../") or norm.startswith("/"):
+        return ""
+    return norm
 
 
 def _categorize(rel: str) -> str:
@@ -518,6 +534,9 @@ def _backup_target_path(rel: str, local_node: str = "") -> Optional[str]:
     None if it isn't safely restorable. ``/etc/pve/nodes/<oldnode>/...`` is
     remapped to the *local* node so a rename doesn't misfile it."""
     if not rel or rel.startswith("cmd/"):
+        return None
+    # Second fence behind _rel(): no segment may climb, whatever the caller.
+    if ".." in rel.split("/") or rel.startswith("/"):
         return None
     m = re.match(r"etc/pve/nodes/[^/]+/(.+)", rel)
     if m and local_node:
@@ -597,6 +616,10 @@ def restore_backup_file(host: Dict[str, Any], backup_file: str, member: str,
     ``local_node`` lets bulk callers pass the target's node name once instead
     of re-resolving it per file."""
     rel = _rel(member)
+    if not rel or _backup_target_path(rel, "x") is None:
+        # Decided from the name alone, before the archive is read or the
+        # host is asked anything.
+        return {"success": False, "error": "file is not restorable"}
     exec_bit = False
     try:
         with tarfile.open(backup_file, "r:*") as tf:
@@ -1027,23 +1050,27 @@ def reinstall_packages_async(target_host: Dict[str, Any], backup_file: str) -> s
         # install aborts entirely on one unknown name), install via xargs, then
         # grep -Fxv the installed set against the wanted set for the honest
         # still-missing list.
+        # Work files in a private mktemp directory, removed on exit: a fixed
+        # name under /tmp could be pre-created (or symlinked) by any local
+        # user on the host before root writes to it.
         script = (
-            f"echo {shlex.quote(req_b64)} | base64 -d | sort -u > /tmp/.pvezfs_req\n"
+            "T=$(mktemp -d) || exit 1\n"
+            "trap 'rm -rf \"$T\"' EXIT\n"
+            f"echo {shlex.quote(req_b64)} | base64 -d | sort -u > \"$T\"/req\n"
             "DEBIAN_FRONTEND=noninteractive apt-get update -qq || true\n"
-            "apt-cache pkgnames 2>/dev/null | sort -u > /tmp/.pvezfs_avail\n"
-            "grep -Fxf /tmp/.pvezfs_avail /tmp/.pvezfs_req > /tmp/.pvezfs_inst 2>/dev/null || true\n"
-            "if [ -s /tmp/.pvezfs_inst ]; then\n"
+            "apt-cache pkgnames 2>/dev/null | sort -u > \"$T\"/avail\n"
+            "grep -Fxf \"$T\"/avail \"$T\"/req > \"$T\"/inst 2>/dev/null || true\n"
+            "if [ -s \"$T\"/inst ]; then\n"
             "  DEBIAN_FRONTEND=noninteractive xargs apt-get install -y "
-            "-o Dpkg::Options::=--force-confold < /tmp/.pvezfs_inst 2>&1\n"
+            "-o Dpkg::Options::=--force-confold < \"$T\"/inst 2>&1\n"
             "  EC=$?\n"
             "else EC=0; echo 'no requested package is available from the repos'; fi\n"
-            "dpkg-query -W -f='${Package}\\n' 2>/dev/null | sort -u > /tmp/.pvezfs_have\n"
-            "grep -Fxv -f /tmp/.pvezfs_have /tmp/.pvezfs_req > /tmp/.pvezfs_miss 2>/dev/null || true\n"
-            "echo \"__missing_count=$(grep -c . /tmp/.pvezfs_miss 2>/dev/null || echo 0)\"\n"
+            "dpkg-query -W -f='${Package}\\n' 2>/dev/null | sort -u > \"$T\"/have\n"
+            "grep -Fxv -f \"$T\"/have \"$T\"/req > \"$T\"/miss 2>/dev/null || true\n"
+            "echo \"__missing_count=$(grep -c . \"$T\"/miss 2>/dev/null || echo 0)\"\n"
             "echo __missing_begin\n"
-            "head -60 /tmp/.pvezfs_miss 2>/dev/null || true\n"
+            "head -60 \"$T\"/miss 2>/dev/null || true\n"
             "echo __missing_end\n"
-            "rm -f /tmp/.pvezfs_req /tmp/.pvezfs_avail /tmp/.pvezfs_inst /tmp/.pvezfs_have /tmp/.pvezfs_miss\n"
             "echo __exit=$EC\n"
         )
         progress("Running apt-get install (this can take a while) …")
