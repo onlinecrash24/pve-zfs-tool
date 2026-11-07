@@ -137,7 +137,7 @@ worauf es zugreift, steht in der [README](README_DE.md).
   - `pool_error` -- Pool-Health wechselt ONLINE → DEGRADED/FAULTED/UNAVAIL und zurück
   - `health_warning` -- Kapazität überschreitet 90 % bzw. Read/Write/Checksum-Errors treten auf
   - `host_offline` -- SSH-Probe schlägt fehl, wo sie zuvor erfolgreich war, bestätigt durch eine zweite Probe nach `HOST_OFFLINE_CONFIRM_SEC` (45 s), so dass ein sshd-Neustart beim Paket-Update still bleibt; die Erholung wird nur gemeldet, wenn der Ausfall gemeldet wurde
-  - `auto_snapshot` -- Neuester Auto-Snap pro Label (frequent/hourly/daily/weekly/monthly) älter als erwartet (pro Host/Label auf einmal täglich begrenzt)
+  - `auto_snapshot` -- Neuester Auto-Snap pro Label (frequent/hourly/daily/weekly/monthly) älter als erwartet (pro Host/Label auf einmal täglich begrenzt); ein Label wird erst beurteilt, wenn der Host länger läuft als dessen Schwelle, so dass ein frisch gestarteter oder per WoL geweckter Host keine Snapshots meldet, die er noch gar nicht machen konnte
   - `replication_lag` -- Der letzte Sync eines Replikations-Paars überschreitet sein erwartetes Intervall (WARN/CRIT), und bei Recovery
 - **Test-Benachrichtigungen** -- Testnachricht pro Kanal senden, um die Konfiguration zu prüfen
 - **Konfigurierbare Events** -- Benachrichtigungen pro Event-Typ aktivieren/deaktivieren:

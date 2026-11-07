@@ -497,12 +497,33 @@ def check_pool_errors(host, pools_status):
             _state_set(scope, key, str(total))
 
 
+def host_uptime_seconds(host):
+    """Seconds since the host booted, or None if it cannot be read."""
+    try:
+        from app.ssh_manager import run_command
+        r = run_command(host, "cat /proc/uptime", timeout=10)
+        if r.get("success"):
+            return float((r.get("stdout") or "").split()[0])
+    except Exception:
+        pass
+    return None
+
+
 def check_auto_snapshots(host):
     """Fire auto_snapshot when the newest snap per label is stale.
 
     Pipeline: get_snapshot_ages(host) + retention_policy (from cron)
               → analyze_snapshots() → per_label[label].stale_datasets
     Throttled per (host, label) via STALE_ALERT_COOLDOWN.
+
+    A label is judged only once the host has been up longer than that
+    label's threshold. A host that was off takes no snapshots while it is
+    off, so on the first sample after boot "hourly" and "daily" are always
+    stale although nothing is wrong -- field report: two mails on every
+    boot of an Expected-Offline test host, and of a backup box that wakes
+    at night for a pull. Measured from uptime, cron and zsync get the time
+    they need to catch up; a host that has been up for a day and still has
+    no daily snapshot is reported as before.
     """
     try:
         from app.zfs_commands import (get_snapshot_ages, get_auto_snapshot_status,
@@ -541,10 +562,15 @@ def check_auto_snapshots(host):
     now = int(time.time())
     scope = "stale_snap"
     addr = host["address"]
+    uptime = host_uptime_seconds(host)
     # Iterate the labels we actually monitor (not just whatever appears in
     # per_label) so a label that has fully recovered -- or dropped out of the
     # analysis -- gets its lingering state cleared.
     for label in STALE_THRESHOLDS:
+        if uptime is not None and uptime < STALE_THRESHOLDS[label]:
+            log.debug("stale check: %s up for %.0fs, below the %s threshold -- not judged yet",
+                      addr, uptime, label)
+            continue
         info = per_label.get(label)
         stale = info.get("stale_datasets") if isinstance(info, dict) else None
         norm = []

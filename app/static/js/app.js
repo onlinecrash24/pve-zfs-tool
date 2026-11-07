@@ -2467,9 +2467,18 @@ async function renderSnapshotTagSelector(mount) {
     });
     mount.appendChild(saveBtn);
     if (data.custom_selection) {
+        // The way back: an empty selection no longer means "defaults", it
+        // means "off", so the defaults need their own button.
+        const resetBtn = h("button", { className: "btn btn-sm", style: "margin-left:8px" }, t("snap_tags_reset"));
+        resetBtn.addEventListener("click", async () => {
+            const r = await API.post("/api/snapshot-tags", { host: currentHost, reset: true });
+            if (r && r.success) { toast(t("snap_tags_saved"), "success"); viewSnapshotCheck(); }
+            else toast((r && r.error) || t("snap_tags_save_failed"), "error");
+        });
+        mount.appendChild(resetBtn);
         mount.appendChild(h("span", {
-            style: "margin-left:10px;font-size:12px;color:var(--text-secondary)"
-        }, t("snap_tags_custom_active")));
+            style: "margin-left:10px;font-size:12px;color:" + (data.disabled ? "var(--warning,#d29922)" : "var(--text-secondary)")
+        }, data.disabled ? t("snap_tags_off") : t("snap_tags_custom_active")));
     }
 }
 

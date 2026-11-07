@@ -54,9 +54,11 @@ def test_regex_longest_tag_wins_and_escaping():
     assert st.build_label_regex(["a.b"]).search("xa.by")
 
 
-def test_regex_empty_selection_falls_back_to_defaults():
+def test_regex_none_means_defaults_and_empty_means_nothing():
+    assert st.build_label_regex(None).search("zfs-auto-snap_daily-2026-07-05-1200")
     rx = st.build_label_regex([])
-    assert rx.search("zfs-auto-snap_daily-2026-07-05-1200")
+    assert not rx.search("zfs-auto-snap_daily-2026-07-05-1200")      # off: no label matches
+    assert not rx.search("")
 
 
 # --- persistence -----------------------------------------------------------
@@ -77,9 +79,14 @@ def test_selection_roundtrip(tags_store):
     assert st.effective_tags("10.0.0.2") == list(st.DEFAULT_TAGS)
 
 
-def test_empty_selection_resets_to_defaults(tags_store):
+def test_empty_selection_switches_the_check_off_and_reset_brings_defaults_back(tags_store):
+    # Field report: deselecting every tag fell back to the defaults, so the
+    # stale check could not be switched off per host.
     st.save_tag_selection("10.0.0.1", ["daily"])
     st.save_tag_selection("10.0.0.1", [])
+    assert st.load_tag_selection("10.0.0.1") == []
+    assert st.effective_tags("10.0.0.1") == []
+    assert st.save_tag_selection("10.0.0.1", [], reset=True) is None
     assert st.load_tag_selection("10.0.0.1") is None
     assert st.effective_tags("10.0.0.1") == list(st.DEFAULT_TAGS)
 

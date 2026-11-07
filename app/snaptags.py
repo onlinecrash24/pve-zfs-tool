@@ -76,9 +76,13 @@ def discover_tags(snapshot_names) -> Dict[str, int]:
 def build_label_regex(tags) -> "re.Pattern[str]":
     """Alternation regex over the selected tags (longest first so overlapping
     tags like 'backup-zfs' win over a plain 'backup')."""
+    if tags is None:
+        tags = DEFAULT_TAGS
     ordered = sorted({t for t in tags if is_valid_tag(t)}, key=len, reverse=True)
     if not ordered:
-        ordered = list(DEFAULT_TAGS)
+        # An explicitly empty selection: no snapshot counts as an auto
+        # label, so the stale check has nothing to judge on this host.
+        return re.compile(r"(?!)")
     return re.compile("|".join(re.escape(t) for t in ordered))
 
 
@@ -98,31 +102,38 @@ def _load_all() -> Dict[str, List[str]]:
 
 
 def load_tag_selection(address: str) -> Optional[List[str]]:
-    """The saved selection for a host, or None (= use DEFAULT_TAGS)."""
+    """The saved selection for a host: a list (possibly empty = the stale
+    check is off for this host), or None (= use DEFAULT_TAGS)."""
     sel = _load_all().get(address)
     if not isinstance(sel, list):
         return None
-    valid = [t for t in sel if is_valid_tag(t)]
-    return valid or None
+    return [t for t in sel if is_valid_tag(t)]
 
 
-def save_tag_selection(address: str, tags) -> List[str]:
-    """Persist a host's tag selection (validated); returns what was saved."""
-    valid = sorted({t for t in tags if is_valid_tag(t)})
+def save_tag_selection(address: str, tags, reset: bool = False) -> Optional[List[str]]:
+    """Persist a host's tag selection (validated); returns what was saved.
+
+    An empty list is stored as such and switches the stale-snapshot check
+    off for the host -- it used to mean "back to defaults", which made the
+    check impossible to switch off per host (field report). ``reset`` is
+    the way back to the defaults; it returns None.
+    """
+    valid = sorted({t for t in (tags or []) if is_valid_tag(t)})
     with _lock:
         data = _load_all()
-        if valid:
-            data[address] = valid
+        if reset:
+            data.pop(address, None)
         else:
-            data.pop(address, None)   # empty selection = back to defaults
+            data[address] = valid
         os.makedirs(DATA_DIR, exist_ok=True)
         with open(TAGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
-    return valid
+    return None if reset else valid
 
 
 def effective_tags(address: str) -> List[str]:
-    return load_tag_selection(address) or list(DEFAULT_TAGS)
+    sel = load_tag_selection(address)
+    return list(DEFAULT_TAGS) if sel is None else sel
 
 
 def visible_tags(counts: Dict[str, int], selection: Optional[List[str]]):

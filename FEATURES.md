@@ -137,7 +137,7 @@ start at the [README](README.md).
   - `pool_error` -- pool health transitions ONLINE → DEGRADED/FAULTED/UNAVAIL and back
   - `health_warning` -- capacity crosses 90 %, or read/write/checksum errors appear
   - `host_offline` -- SSH probe fails where it previously succeeded, confirmed by a second probe after `HOST_OFFLINE_CONFIRM_SEC` (45 s) so an sshd restart during a package update stays silent; the recovery is sent only if the outage was
-  - `auto_snapshot` -- newest auto-snap per label (frequent/hourly/daily/weekly/monthly) older than expected (throttled to once per day per host/label)
+  - `auto_snapshot` -- newest auto-snap per label (frequent/hourly/daily/weekly/monthly) older than expected (throttled to once per day per host/label); a label is judged only once the host has been up longer than its threshold, so a freshly booted or wake-on-demand host does not report snapshots it could not have taken yet
   - `replication_lag` -- a replication pair's last sync exceeds its expected interval (WARN/CRIT), and on recovery
 - **Test Notifications** -- Send test messages per channel to verify configuration
 - **Configurable Events** -- Enable/disable notifications per event type:

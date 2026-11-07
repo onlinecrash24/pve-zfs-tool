@@ -1652,6 +1652,7 @@ def api_snapshot_tags_get():
     return jsonify({
         "tags": visible_tags(counts, selection),
         "custom_selection": selection is not None,
+        "disabled": selection == [],
     })
 
 
@@ -1664,6 +1665,11 @@ def api_snapshot_tags_set():
     if err:
         return err, code
     data = request.get_json(silent=True) or {}
+    if data.get("reset"):
+        save_tag_selection(host["address"], [], reset=True)
+        audit_log("snapcheck.tags.save", target=host["address"], host=host["address"],
+                  success=True, details={"tags": "defaults"})
+        return jsonify({"success": True, "tags": None})
     tags = data.get("tags")
     if not isinstance(tags, list):
         return jsonify({"success": False, "error": "tags must be a list"}), 400
@@ -1672,7 +1678,7 @@ def api_snapshot_tags_set():
         return jsonify({"success": False, "error": f"invalid tag(s): {', '.join(map(str, bad[:5]))}"}), 400
     saved = save_tag_selection(host["address"], [str(t) for t in tags])
     audit_log("snapcheck.tags.save", target=host["address"], host=host["address"],
-              success=True, details={"tags": saved or "defaults"})
+              success=True, details={"tags": saved if saved else "off"})
     return jsonify({"success": True, "tags": saved})
 
 
