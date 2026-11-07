@@ -72,7 +72,7 @@ start at the [README](README.md).
 - **Safe Delete** -- Removes cron entry + config (with timestamped backup); optional checkbox additionally destroys all `zfs-auto-snap_*` snapshots under the replica target -- datasets and zsync baseline snapshots are kept, top-level pools refused
 
 ## Disaster Recovery
-- **Reverse Sync** -- Send a replica back to a rebuilt source host with `zfs send -R | ssh <source> zfs recv`, reusing the SSH trust established during replication setup
+- **Reverse Sync** -- Send a replica back to a rebuilt source host with `zfs send -R | ssh <source> zfs recv`, reusing the SSH trust established during replication setup; only datasets under the host's own replication targets can be sent, and a reinstalled destination's new SSH host key is shown first and accepted only after you confirmed its fingerprint on the destination's console
 - **Reinstalled-Host Host Key** -- A rebuilt destination has a new SSH host key, which would abort the transfer under strict checking ("REMOTE HOST IDENTIFICATION HAS CHANGED"); an on-by-default option drops the stale `known_hosts` entry and re-scans the current key (fingerprint logged). A host-key failure gets a targeted hint pointing at that option
 - **Guest Config Restore** -- Reverse sync restores only the disk; this step puts the VM/CT config (`/etc/pve/{qemu-server,lxc}/<vmid>.conf`) back from a host-config backup so Proxmox shows the guest again -- derives the VMID/type from the replica dataset, previews the config, and won't overwrite an existing one unless confirmed
 - **Replica Discovery** -- Scans every registered host for replica roots and lists the replicated datasets and their snapshots
@@ -177,9 +177,9 @@ start at the [README](README.md).
 ## Security
 - **CSRF Protection** -- Token-based protection for all state-changing requests
 - **Input Validation** -- Whitelist-based validation on all parameters before shell execution
-- **Rate Limiting** -- Login brute-force protection (5 attempts, 5-minute lockout)
-- **Secure Sessions** -- HttpOnly cookies, SameSite=Lax, configurable Secure flag, 8-hour timeout
-- **Security Headers** -- CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- **Rate Limiting** -- Login brute-force protection per client address (5 attempts, 5-minute lockout) and per account name (20 attempts, 15 minutes), so guessing spread over many addresses is stopped too
+- **Secure Sessions** -- HttpOnly cookies, SameSite=Lax, configurable Secure flag, 8-hour timeout; sessions are registered on the server, so logging out also invalidates a copied cookie
+- **Security Headers** -- CSP without inline script (`script-src 'self'`), X-Frame-Options, X-Content-Type-Options, Referrer-Policy, HSTS with `FORCE_HTTPS`
 - **Path Traversal Prevention** -- Realpath validation with symlink attack protection
 - **SSH Host Key Verification** -- Trust On First Use (TOFU), known hosts saved and verified on subsequent connections
 - **SSH Key Rotation** -- One-click rotation from the Home page; generates a new Ed25519 keypair, deploys it to all hosts before removing the old key (never locks you out), with per-host deploy/verify/cleanup status

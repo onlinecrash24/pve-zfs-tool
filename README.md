@@ -196,7 +196,7 @@ apt install ntfs-3g         # Optional — only needed for Windows VM NTFS parti
 
 For production deployments, place the container behind an HTTPS reverse proxy. The application includes `ProxyFix` middleware and automatically trusts `X-Forwarded-*` headers from your proxy.
 
-Set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies, and
+Set `FORCE_HTTPS=true` in your `docker-compose.yml` to enable secure session cookies and HSTS, and
 `TRUST_PROXY=true` so the application takes the client address from `X-Forwarded-For`
 rather than seeing every user as the proxy. Without it the login rate limit treats all
 users as one and the audit log records the proxy's address. Do **not** set it on a port
@@ -308,7 +308,7 @@ Exposed metrics include: `pvezfs_host_reachable`, `pvezfs_pool_capacity_percent`
 | `SECRET_KEY` | `dev-key-change-me` | Flask session secret key -- **must be changed!** |
 | `ADMIN_USER` | `admin` | Login username -- **should be changed** |
 | `ADMIN_PASSWORD` | *(none)* | Login password, **required** (empty refuses to start). A placeholder or fewer than 12 characters is accepted with a warning in the log and a banner in the UI |
-| `FORCE_HTTPS` | `true` | Secure session cookies -- set to `false` if not behind HTTPS proxy |
+| `FORCE_HTTPS` | `true` | Secure session cookies and HSTS -- set to `false` if not behind HTTPS proxy |
 | `TRUST_PROXY` | unset | Take the client address from `X-Forwarded-For`. **Only** behind a reverse proxy -- on a directly reachable port any client could pick its own address and bypass the login rate limit |
 | `TZ` | `UTC` | Timezone for reports and scheduler (e.g. `Europe/Berlin`, `America/New_York`) |
 | `HOST_OFFLINE_CONFIRM_SEC` | `45` | A host that was up and fails one SSH probe is probed again after this many seconds before "Host Offline" fires -- an sshd restart during a package update is not an outage. `0` reports on the first failed probe |

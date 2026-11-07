@@ -91,8 +91,15 @@ it looks alarming and is the design.
   ([rowie.at](https://rowie.at)), covering authentication, the SSH key
   handling, the audit trail, the destructive-operation guards and the
   file-restore path. Findings were fixed in v0.9.935 and v0.9.936.
+- **November 2026** -- the same reviewer re-checked v0.9.942 against that
+  list: the fixes held. The findings deferred in October -- reverse sync
+  bound to known replica roots, the migration plan kept server-side, a
+  per-account login brake, restore path traversal, config-rewrite and
+  `zfs set` quoting, notification escaping, the inventory request as POST,
+  server-side sessions, HSTS and a CSP without inline script -- were fixed
+  in v0.9.943.
 
-## Known and accepted, as of v0.9.921
+## Known and accepted, as of v0.9.943
 
 Stated here rather than discovered later:
 
@@ -119,3 +126,22 @@ Stated here rather than discovered later:
   on the target; that part is inherent to ZFS replication.
 - **The HTTP API is internal.** It follows the UI and is neither documented nor
   stable; treat it as an implementation detail rather than an interface.
+- **The account brake can be used to lock you out.** Twenty failed logins
+  for the account name within 15 minutes block that account for everyone,
+  from every address. That is the price of stopping guessing spread over
+  many addresses; it is why the port belongs behind a proxy or VPN. There is
+  no second factor -- the tool has one admin account from the environment.
+- **Sessions and migration plans live in memory.** gunicorn runs one worker;
+  a restart signs everyone out and a migration in preparation needs its
+  preflight run again. Nothing else is lost.
+- **`style-src` still allows inline styles.** The UI sets style attributes
+  throughout; scripts are `'self'` only, which is the part that matters for
+  injection.
+- **Dependencies are pinned by version, not by hash**, and GitHub Actions by
+  release tag, not by commit. pip-audit runs on every build and blocks a
+  release tag with a known advisory.
+- **The tool's SSH key has no passphrase.** It is used unattended; protect
+  the `ssh-keys` volume like the root password it is.
+- **Restore mount points are under `/tmp` on the host** (`/tmp/zfs-tool-restore`,
+  `/tmp/zfs-tool-zvol-restore`). Every path the tool unmounts or removes
+  there is checked against a strict pattern first.
