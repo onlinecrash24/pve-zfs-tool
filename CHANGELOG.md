@@ -7,6 +7,32 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.941 -- 2026-11-03
+
+v0.9.941 — a failed probe is not an outage until a second one fails
+
+Field report from a 15-host estate: the nightly dist-upgrade restarted
+sshd and pve-cluster for a few seconds, the sampler round happened to run
+in that minute, three hosts were reported offline, and "Host Back Online"
+came one round -- 15 minutes -- later. The hosts were never down, and
+moving the update window does not help because the round start drifts.
+
+A host that was up and fails one SSH probe is now probed again after
+HOST_OFFLINE_CONFIRM_SEC (default 45 seconds; 0 restores the old
+behaviour) before it counts as down. The wait happens in the sampler,
+outside the alert lock, and only for hosts not already known to be down.
+A real outage is still reported within the same round, about a minute
+later than before; a blip during a package update or an sshd restart
+stays silent.
+
+"Host Back Online" is sent only if a "Host Offline" was sent for this down
+phase. A host first seen down, or one that went down while marked
+Expected Offline, comes up without announcing a recovery nobody was told
+about.
+
+README, the compose file and FEATURES describe the setting. The report's
+sequence is a test.
+
 ## v0.9.940 -- 2026-10-25
 
 v0.9.940 — Python 3.14, current dependencies, current actions
