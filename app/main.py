@@ -2747,6 +2747,7 @@ def api_dr_reverse_sync():
             snapshot=(data.get("snapshot") or None),
             force=bool(data.get("force")),
             refresh_host_key=bool(data.get("refresh_host_key")),
+            accepted_fingerprint=(str(data.get("accepted_fingerprint") or "").strip() or None),
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -2755,8 +2756,28 @@ def api_dr_reverse_sync():
               details={"task_id": task_id,
                        "source_address": data.get("source_address"),
                        "force": bool(data.get("force")),
-                       "refresh_host_key": bool(data.get("refresh_host_key"))})
+                       "refresh_host_key": bool(data.get("refresh_host_key")),
+                       "accepted_fingerprint": data.get("accepted_fingerprint")})
     return jsonify({"success": True, "task_id": task_id})
+
+
+@app.route("/api/dr/scan-host-key", methods=["POST"])
+@login_required
+def api_dr_scan_host_key():
+    """Show the host key a (rebuilt) destination presents, as seen from the
+    replica host -- for the user to compare before it is accepted. Writes
+    nothing."""
+    from app.dr import scan_host_key
+    host, err, code = _require_host()
+    if err:
+        return err, code
+    data = request.get_json(silent=True) or {}
+    try:
+        port = int(data.get("port") or 22)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "invalid port"}), 400
+    res = scan_host_key(host, str(data.get("address") or "").strip(), port)
+    return jsonify(res), (200 if res.get("success") else 400)
 
 
 @app.route("/api/dr/reverse-precheck")

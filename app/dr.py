@@ -31,6 +31,7 @@ Safety rails:
 from __future__ import annotations
 
 import base64
+import hashlib
 import posixpath
 import re
 import shlex
@@ -178,6 +179,92 @@ def _strip_replica_root(replica_dataset: str, replica_root: str) -> str:
     return replica_dataset[len(replica_root) + 1:]
 
 
+def check_replica_binding(replica_dataset: str, replica_root: str,
+                          known_roots: List[str]) -> None:
+    """Refuse a reverse sync that is not about a replica this host keeps.
+
+    The replica root must be one of the ``target=`` values of the host's own
+    zsync configs, and the dataset must be that root or lie under it. Before,
+    both came from the request and only their spelling was checked -- any
+    dataset on the host could be sent anywhere. An empty list (no config
+    readable) refuses: "could not ask" is not "allowed".
+    """
+    roots = [r for r in (known_roots or []) if r]
+    if not roots:
+        raise ValueError("no replication target is configured on this host -- "
+                         "reverse sync only sends replicas")
+    if replica_root not in roots:
+        raise ValueError(f"{replica_root} is not a replication target on this host")
+    if replica_dataset != replica_root and not replica_dataset.startswith(replica_root + "/"):
+        raise ValueError(f"{replica_dataset} is not under the replica root {replica_root}")
+
+
+# --- SSH host keys of a rebuilt destination ------------------------------------
+#
+# A reinstalled host has a new host key, so the replica host's known_hosts no
+# longer matches and strict checking aborts the transfer. The old fix scanned
+# the new key and appended it -- trusting whatever answered on that address at
+# that moment. Now the scan is shown first, the user compares the fingerprint
+# with the one on the destination's console, and only a key with exactly the
+# confirmed fingerprint is written.
+
+_FP_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
+_KEYSCAN_RE = re.compile(
+    r"^(?P<host>\S+)\s+(?P<type>ssh-[A-Za-z0-9-]+|ecdsa-sha2-[A-Za-z0-9-]+|"
+    r"sk-[A-Za-z0-9@.-]+)\s+(?P<key>[A-Za-z0-9+/]+={0,2})\s*$")
+_ADDR_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+
+def host_key_fingerprint(key_b64: str) -> str:
+    """OpenSSH SHA256 fingerprint of a base64 key blob (as ssh-keygen -l)."""
+    blob = base64.b64decode(key_b64)
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+
+
+def parse_keyscan(text: str) -> List[Dict[str, str]]:
+    """ssh-keyscan output -> [{host, type, fingerprint, line}]; comments skipped."""
+    out: List[Dict[str, str]] = []
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        m = _KEYSCAN_RE.match(ln)
+        if not m:
+            continue
+        try:
+            fp = host_key_fingerprint(m.group("key"))
+        except (ValueError, TypeError):
+            continue
+        out.append({"host": m.group("host"), "type": m.group("type"),
+                    "fingerprint": fp, "line": ln})
+    return out
+
+
+def _keyscan_cmd(address: str, port: int) -> str:
+    return f"ssh-keyscan -T 10 -p {int(port)} {shlex.quote(address)} 2>/dev/null"
+
+
+def scan_host_key(host: Dict[str, Any], address: str, port: int = 22) -> Dict[str, Any]:
+    """What does ``address:port`` present as host key, seen from ``host``?
+
+    Read-only: nothing is written to known_hosts here.
+    """
+    if not address or not _ADDR_RE.match(address):
+        return {"success": False, "error": "invalid address"}
+    try:
+        port = int(port or 22)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "invalid port"}
+    if not (1 <= port <= 65535):
+        return {"success": False, "error": "invalid port"}
+    r = run_command(host, _keyscan_cmd(address, port), timeout=40)
+    keys = parse_keyscan(r.get("stdout") or "")
+    if not keys:
+        return {"success": False, "error": f"no SSH host key answered on {address}:{port}"}
+    return {"success": True, "address": address, "port": port,
+            "keys": [{"type": k["type"], "fingerprint": k["fingerprint"]} for k in keys]}
+
+
 def reverse_sync_async(target_host: Dict[str, Any],
                        replica_dataset: str,
                        replica_root: str,
@@ -187,7 +274,9 @@ def reverse_sync_async(target_host: Dict[str, Any],
                        source_dataset: Optional[str] = None,
                        snapshot: Optional[str] = None,
                        force: bool = False,
-                       refresh_host_key: bool = False) -> str:
+                       refresh_host_key: bool = False,
+                       accepted_fingerprint: Optional[str] = None,
+                       known_roots: Optional[List[str]] = None) -> str:
     """Send the replica back to a (rebuilt) source host via SSH.
 
     ``replica_dataset`` lives on ``target_host`` (the box that holds the
@@ -198,16 +287,27 @@ def reverse_sync_async(target_host: Dict[str, Any],
     defaults to the newest snapshot under ``replica_dataset``. ``force``
     enables ``zfs recv -F`` which rolls back the destination to match
     the stream -- otherwise we use the safer no-rollback recv.
-    ``refresh_host_key``: a rebuilt destination has a NEW SSH host key, so the
-    replica host's stale known_hosts entry makes StrictHostKeyChecking abort
-    ("REMOTE HOST IDENTIFICATION HAS CHANGED"). When set, the stale entry is
-    dropped and the current key re-scanned (and its fingerprint logged) on the
-    sending host before the transfer.
+    ``refresh_host_key`` + ``accepted_fingerprint``: a rebuilt destination
+    has a NEW SSH host key, so the replica host's stale known_hosts entry makes
+    StrictHostKeyChecking abort ("REMOTE HOST IDENTIFICATION HAS CHANGED").
+    The destination is scanned again on the sending host and only a key whose
+    fingerprint equals the one the user confirmed (see scan_host_key) replaces
+    the stale entry; any other answer aborts before the transfer.
+    ``known_roots``: the replica roots this host is allowed to send from --
+    the ``target=`` values of its zsync configs, looked up when not given.
     """
     if not _DS_RE.match(replica_dataset or "") or "/" not in replica_dataset:
         raise ValueError("invalid replica dataset")
     if not _DS_RE.match(replica_root or "") or "/" not in replica_root:
         raise ValueError("invalid replica root")
+    if known_roots is None:
+        known_roots = [r["target"] for r in _replica_roots_for_host(target_host)]
+    check_replica_binding(replica_dataset, replica_root, known_roots)
+    if refresh_host_key and not accepted_fingerprint:
+        raise ValueError("a new host key is only accepted with the fingerprint the "
+                         "user confirmed (scan it first)")
+    if accepted_fingerprint and not _FP_RE.match(accepted_fingerprint):
+        raise ValueError("invalid host key fingerprint")
     if not source_address or not re.match(r"^[A-Za-z0-9._:-]+$", source_address):
         raise ValueError("invalid source address")
     if source_user and not re.match(r"^[A-Za-z0-9_.-]+$", source_user):
@@ -228,27 +328,39 @@ def reverse_sync_async(target_host: Dict[str, Any],
     user = (source_user or "root")
 
     def _job(progress, _host, _replica, _root, _addr, _port, _user, _src_ds, _snap,
-             _force, _refresh):
-        # A rebuilt destination has a new SSH host key -> refresh the sending
-        # host's known_hosts (drop the stale entry, re-scan the current key)
-        # before the transfer, logging the fingerprint so the accepted key is
-        # visible (not silently trusted).
-        if _refresh:
-            progress(f"Refreshing SSH host key for {_addr}:{_port} …")
+             _force, _fp):
+        # A rebuilt destination has a new SSH host key. Scan it again here
+        # and write only the key whose fingerprint the user confirmed; a
+        # different answer means something else is on that address now.
+        if _fp:
+            progress(f"Checking the SSH host key of {_addr}:{_port} …")
+            sc = run_command(_host, _keyscan_cmd(_addr, _port), timeout=40)
+            seen = parse_keyscan(sc.get("stdout") or "")
+            match = [k for k in seen if k["fingerprint"] == _fp]
+            if not match:
+                progress("Aborted: the destination's host key does not match", ok=False)
+                return {"success": False, "host_key_mismatch": True,
+                        "error": (f"The host key of {_addr}:{_port} is not the one you "
+                                  f"confirmed ({_fp}). Nothing was sent."),
+                        "accepted_fingerprint": _fp,
+                        "scanned": [{"type": k["type"], "fingerprint": k["fingerprint"]}
+                                    for k in seen]}
             hostport = f"[{_addr}]:{_port}"
+            lines_b64 = base64.b64encode(
+                ("\n".join(k["line"] for k in match) + "\n").encode()).decode()
             prep = (
                 "mkdir -p ~/.ssh && chmod 700 ~/.ssh; touch ~/.ssh/known_hosts; "
                 f"ssh-keygen -f ~/.ssh/known_hosts -R {shlex.quote(_addr)} >/dev/null 2>&1; "
                 f"ssh-keygen -f ~/.ssh/known_hosts -R {shlex.quote(hostport)} >/dev/null 2>&1; "
-                f"ssh-keyscan -T 10 -p {_port} {shlex.quote(_addr)} 2>/dev/null "
-                "| tee -a ~/.ssh/known_hosts | ssh-keygen -lf - 2>/dev/null | head -n 3"
+                f"echo {shlex.quote(lines_b64)} | base64 -d >> ~/.ssh/known_hosts "
+                "&& echo __KEY_OK__"
             )
             pr = run_command(_host, prep, timeout=40)
-            fps = [ln.strip() for ln in (pr.get("stdout") or "").splitlines() if ln.strip()]
-            if fps:
-                progress("Accepted host key " + fps[0][:120])
-            else:
-                progress("Warning: could not scan destination host key (continuing) …")
+            if "__KEY_OK__" not in (pr.get("stdout") or ""):
+                return {"success": False,
+                        "error": "could not update known_hosts on the replica host: " +
+                                 (pr.get("stderr") or "").strip()[:200]}
+            progress(f"Accepted host key {match[0]['type']} {_fp}")
 
         # Determine snapshot if not given: newest under replica
         if not _snap:
@@ -347,7 +459,8 @@ def reverse_sync_async(target_host: Dict[str, Any],
         "reverse_sync", _job,
         target_host, replica_dataset, replica_root,
         source_address, source_port, user,
-        source_dataset, snapshot, bool(force), bool(refresh_host_key),
+        source_dataset, snapshot, bool(force),
+        (accepted_fingerprint if refresh_host_key else None),
         prefix="dr",
     )
 

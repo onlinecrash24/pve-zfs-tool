@@ -5950,6 +5950,30 @@ async function viewDR() {
                     if (!confirm(t("dr_pf_confirm").replace("{n}", preflightState.snapshot_count))) return;
                 }
 
+                // New host key: show what the destination presents now and
+                // let the user compare it with the destination's console
+                // before anything is trusted. Only that fingerprint is sent.
+                let acceptedFp = null;
+                if (rkCb.checked) {
+                    let scan;
+                    try {
+                        scan = await API.post("/api/dr/scan-host-key?host=" + encodeURIComponent(pair.host_address),
+                                              { address: srcAddr, port: srcPort });
+                    } catch (e) { toast(t("dr_hostkey_scan_failed") + " " + (e.message || ""), "error"); return; }
+                    const keys = (scan && scan.keys) || [];
+                    if (!keys.length) { toast(t("dr_hostkey_scan_failed"), "error"); return; }
+                    const pick = keys.find(k => k.type === "ssh-ed25519") || keys[0];
+                    const file = pick.type === "ssh-ed25519" ? "ssh_host_ed25519_key.pub"
+                               : pick.type.startsWith("ecdsa") ? "ssh_host_ecdsa_key.pub" : "ssh_host_rsa_key.pub";
+                    const msg = t("dr_hostkey_confirm")
+                        .replace("{h}", srcAddr + ":" + srcPort)
+                        .replace("{type}", pick.type)
+                        .replace("{fp}", pick.fingerprint)
+                        .replace("{cmd}", "ssh-keygen -lf /etc/ssh/" + file);
+                    if (!confirm(msg)) return;
+                    acceptedFp = pick.fingerprint;
+                }
+
                 const force = forceCb.checked;
                 const phrase = t("dr_reverse_confirm")
                     .replace("{snap}", revSnapSel.value || t("dr_reverse_newest"))
@@ -5973,7 +5997,8 @@ async function viewDR() {
                         source_dataset: srcDs,
                         snapshot: revSnapSel.value || null,
                         force: force,
-                        refresh_host_key: rkCb.checked,
+                        refresh_host_key: !!acceptedFp,
+                        accepted_fingerprint: acceptedFp,
                     });
                 } catch (e) {
                     statusBlock.innerHTML = "";
@@ -6006,7 +6031,11 @@ async function viewDR() {
                             const tail = res.log_tail ? `<pre class="output" style="max-height:240px;font-size:11px">${escapeHtml(res.log_tail)}</pre>` : "";
                             const warnBox = (msg) => `<div style="color:var(--warning);background:rgba(210,153,34,0.08);border:1px solid var(--warning);border-radius:6px;padding:8px;margin-bottom:8px">${escapeHtml(msg)}</div>`;
                             let hint = "";
-                            if (res.host_key_error) {
+                            if (res.host_key_mismatch) {
+                                hint = warnBox(t("dr_hostkey_mismatch")
+                                    .replace("{fp}", res.accepted_fingerprint || "")
+                                    .replace("{seen}", (res.scanned || []).map(k => k.type + " " + k.fingerprint).join(", ") || "—"));
+                            } else if (res.host_key_error) {
                                 hint = warnBox(t("dr_reverse_failed_hostkey"));
                             } else if (/destination has snapshots|must destroy them/i.test(res.log_tail || "")) {
                                 hint = warnBox(t("dr_reverse_failed_snapshots"));
