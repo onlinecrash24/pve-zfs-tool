@@ -708,3 +708,6 @@ pre.output {
     background: rgba(210, 153, 34, 0.10);
     font-size: 13px;
 }
+
+/* Hover outline for clickable cards (was an inline onmouseover handler). */
+.card-hover-accent:hover { border-color: var(--accent); }

@@ -253,10 +253,11 @@ async function viewHome() {
     // bug report -- "which version are you on?" -- is answered before it is
     // asked. Baked into the image by CI, so it cannot claim a release it is not.
     const title = h("h2", {}, t("home_title"));
-    if (window.ZFS_VERSION) {
+    const appVersion = document.documentElement.dataset.appVersion || "";
+    if (appVersion) {
         title.appendChild(h("span", {
             style: "margin-left:10px;font-size:13px;font-weight:400;color:var(--text-secondary)",
-        }, window.ZFS_VERSION));
+        }, appVersion));
     }
     container.appendChild(h("div", { className: "page-header" }, [
         title,
@@ -3040,7 +3041,7 @@ async function browseRestorePath(subpath) {
     const snapLabel = snapshot.includes("@") ? snapshot.split("@")[1] : snapshot;
 
     const pathParts = subpath ? subpath.split("/").filter(Boolean) : [];
-    let breadcrumb = `<span class="restore-crumb" onclick="browseRestorePath('')">/</span>`;
+    let breadcrumb = `<span class="restore-crumb" ${dataAction("browseRestorePath", "")}>/</span>`;
     let cumulative = "";
     for (const part of pathParts) {
         cumulative += (cumulative ? "/" : "") + part;
@@ -3060,7 +3061,7 @@ async function browseRestorePath(subpath) {
         </div>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
             <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("file_restore_hint"))}</span>
-            <button class="btn btn-sm btn-danger" onclick="closeFileRestore()">${escapeHtml(t("close_unmount"))}</button>
+            <button class="btn btn-sm btn-danger" ${dataAction("closeFileRestore")}>${escapeHtml(t("close_unmount"))}</button>
         </div>
     `;
 
@@ -3130,7 +3131,7 @@ window.previewRestoreFile = async function(filePath) {
     previewDiv.innerHTML = `
         <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
             <strong>${escapeHtml(fileName)}</strong>
-            <button class="btn btn-sm" onclick="this.parentElement.parentElement.innerHTML = window._prevRestoreContent">${escapeHtml(t("back"))}</button>
+            <button class="btn btn-sm" ${dataAction("restoreBackView", "file")}>${escapeHtml(t("back"))}</button>
         </div>
         <pre class="output" style="max-height:400px">${escapeHtml(r.success ? r.stdout : (r.stderr || t("cannot_preview")))}</pre>
     `;
@@ -3261,8 +3262,7 @@ function showPartitionSelect() {
                 `;
             } else if (isMountable) {
                 html += `
-                    <div class="card" style="cursor:pointer;transition:border-color 0.2s" ${dataAction("mountZvolPartition", p.device, p.fstype)}
-                         onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+                    <div class="card card-hover-accent" style="cursor:pointer;transition:border-color 0.2s" ${dataAction("mountZvolPartition", p.device, p.fstype)}>
                         <div class="card-body" style="padding:16px;text-align:center">
                             <div style="font-size:28px;margin-bottom:8px">${fsIcon}</div>
                             <div style="font-weight:700">${escapeHtml(p.name)}</div>
@@ -3280,7 +3280,7 @@ function showPartitionSelect() {
     html += `
         <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
             <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("select_partition_hint") || "Select a partition to browse files")}</span>
-            <button class="btn btn-sm btn-danger" onclick="closeVmRestore()">${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
+            <button class="btn btn-sm btn-danger" ${dataAction("closeVmRestore")}>${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
         </div>
     `;
 
@@ -3318,7 +3318,7 @@ async function browseZvolPath(subpath) {
 
     const snapLabel = sess.snapshot.includes("@") ? sess.snapshot.split("@")[1] : sess.snapshot;
     const pathParts = subpath ? subpath.split("/").filter(Boolean) : [];
-    let breadcrumb = `<span class="restore-crumb" onclick="browseZvolPath('')">/</span>`;
+    let breadcrumb = `<span class="restore-crumb" ${dataAction("browseZvolPath", "")}>/</span>`;
     let cumulative = "";
     for (const part of pathParts) {
         cumulative += (cumulative ? "/" : "") + part;
@@ -3338,10 +3338,10 @@ async function browseZvolPath(subpath) {
         </div>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
             <div>
-                <button class="btn btn-sm" onclick="showPartitionSelect()" style="margin-right:8px">${escapeHtml(t("back_to_partitions") || "← Partitions")}</button>
+                <button class="btn btn-sm" ${dataAction("showPartitionSelect")} style="margin-right:8px">${escapeHtml(t("back_to_partitions") || "← Partitions")}</button>
                 <span style="font-size:11px;color:var(--text-secondary)">${escapeHtml(t("vm_restore_hint") || "Browse and download files from the VM snapshot")}</span>
             </div>
-            <button class="btn btn-sm btn-danger" onclick="closeVmRestore()">${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
+            <button class="btn btn-sm btn-danger" ${dataAction("closeVmRestore")}>${escapeHtml(t("close_unmount") || "Close & Unmount")}</button>
         </div>
     `;
 
@@ -3412,7 +3412,7 @@ window.previewZvolFile = async function(filePath) {
     listEl.innerHTML = `
         <div style="margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
             <strong>${escapeHtml(fileName)}</strong>
-            <button class="btn btn-sm" onclick="this.parentElement.parentElement.innerHTML = window._prevZvolContent">${escapeHtml(t("back"))}</button>
+            <button class="btn btn-sm" ${dataAction("restoreBackView", "zvol")}>${escapeHtml(t("back"))}</button>
         </div>
         <pre class="output" style="max-height:400px">${escapeHtml(r.success ? r.stdout : (r.stderr || t("cannot_preview") || "Cannot preview"))}</pre>
     `;
@@ -6143,7 +6143,7 @@ function _replicaBadge(copy) {
 // would only move the cliff, so the work runs off the request thread now and
 // reports progress while it does.
 async function _collectInventory(host, onProgress) {
-    const start = await API.get("/api/inventory/matrix?host=" + encodeURIComponent(host));
+    const start = await API.post("/api/inventory/matrix", { host: host || "" });
     if (!start || !start.task_id) throw new Error((start && start.error) || t("failed"));
     return await new Promise((resolve, reject) => {
         pollReplicationTask(start.task_id, {
@@ -8741,7 +8741,19 @@ const DATA_ACTIONS = new Set([
     "rollbackGuestSnap", "openFileRestore", "openVmFileRestore",
     "browseRestorePath", "previewRestoreFile", "restoreFile", "restoreDir",
     "mountZvolPartition", "browseZvolPath", "previewZvolFile", "downloadZvolFile",
+    // The fixed handlers that used to be inline onclick attributes; with them
+    // gone the CSP can say script-src 'self'.
+    "navigate", "closeModal", "closeFileRestore", "closeVmRestore",
+    "showPartitionSelect", "restoreBackView",
 ]);
+
+// "Back" from a file preview to the listing it was opened from. Called with
+// the clicked button as `this`.
+function restoreBackView(which) {
+    const prev = which === "zvol" ? window._prevZvolContent : window._prevRestoreContent;
+    const box = this && this.parentElement && this.parentElement.parentElement;
+    if (box && typeof prev === "string") box.innerHTML = prev;
+}
 
 function dataAction(name, ...args) {
     if (!DATA_ACTIONS.has(name)) throw new Error("unknown data action " + name);
@@ -8757,7 +8769,7 @@ document.addEventListener("click", (e) => {
     try { args = JSON.parse(el.dataset.args || "[]"); } catch (_) { return; }
     if (!Array.isArray(args)) return;
     e.preventDefault();
-    window[name](...args);
+    window[name].apply(el, args);
 });
 
 // ---------------------------------------------------------------------------

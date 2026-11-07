@@ -10,6 +10,7 @@ import hmac
 import logging
 import traceback
 from datetime import timedelta
+from app.tasks import TaskLimitError
 
 # App logging to stdout so background threads (backup/report schedulers,
 # monitor) are actually observable in `docker compose logs`. Without this the
@@ -198,46 +199,134 @@ else:
     log.info("Ignoring X-Forwarded-* headers. If this runs behind a reverse proxy, set TRUST_PROXY=true -- "
              "otherwise every user shares one login rate-limit bucket and the audit log records the proxy's address.")
 
-# Rate limiting for login attempts
-_login_attempts = {}  # IP -> {"count": int, "last": float}
-_login_lock = threading.Lock()   # guards the check-then-increment on _login_attempts
+# Rate limiting for login attempts. Two counters: one per client address
+# (5 tries, 5 minutes) and one per account name (20 tries, 15 minutes). The
+# second catches guessing spread over many addresses, which the first never
+# sees. Its price: whoever reaches the port can lock the admin out for 15
+# minutes -- stated in SECURITY.md.
+_login_attempts = {}       # IP -> {"count": int, "last": float}
+_login_user_attempts = {}  # account name -> {"count": int, "last": float}
+_login_lock = threading.Lock()   # guards the check-then-increment on both maps
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+MAX_USER_LOGIN_ATTEMPTS = 20
+USER_LOGIN_WINDOW_SECONDS = 900  # 15 minutes
 
 
-def _login_gate(ip, now):
-    """(allowed, remaining_seconds) for this IP, decided under the lock so a
-    concurrent burst can't read a stale counter and slip past the lockout."""
+def _login_user_key(username):
+    return str(username or "").strip().lower()[:64]
+
+
+def _gate(store, key, now, limit, window):
+    info = store.get(key)
+    if info and info["count"] >= limit and (now - info["last"]) < window:
+        return False, int(window - (now - info["last"]))
+    return True, 0
+
+
+def _record(store, key, now, window):
+    # Drop entries whose window has passed. The map used to grow without
+    # bound -- every address that ever failed stayed forever -- which, with a
+    # spoofable address, is an allocation per request.
+    for stale in [k for k, v in store.items() if (now - v["last"]) >= window]:
+        del store[stale]
+    info = store.get(key, {"count": 0, "last": 0})
+    if (now - info["last"]) >= window:
+        info = {"count": 0, "last": now}
+    info["count"] += 1
+    info["last"] = now
+    store[key] = info
+    return info["count"]
+
+
+def _login_gate(ip, now, username=None):
+    """(allowed, remaining_seconds) for this IP and, if given, this account
+    name -- decided under the lock so a concurrent burst can't read a stale
+    counter and slip past the lockout."""
     with _login_lock:
-        info = _login_attempts.get(ip)
-        if (info and info["count"] >= MAX_LOGIN_ATTEMPTS
-                and (now - info["last"]) < LOGIN_LOCKOUT_SECONDS):
-            return False, int(LOGIN_LOCKOUT_SECONDS - (now - info["last"]))
+        ok, remaining = _gate(_login_attempts, ip, now,
+                              MAX_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_SECONDS)
+        if not ok:
+            return ok, remaining
+        if username is not None:
+            return _gate(_login_user_attempts, _login_user_key(username), now,
+                         MAX_USER_LOGIN_ATTEMPTS, USER_LOGIN_WINDOW_SECONDS)
         return True, 0
 
 
-def _login_record_failure(ip, now):
-    """Atomically increment the failed-attempt counter (resetting it if the
-    lockout window elapsed). Returns the new count."""
+def _login_record_failure(ip, now, username=None):
+    """Atomically increment the failed-attempt counters. Returns the new
+    per-address count (and bumps the per-account one alongside)."""
     with _login_lock:
-        # Drop entries whose lockout window has passed. The map used to grow
-        # without bound -- every address that ever failed stayed forever --
-        # which, with a spoofable address, is an allocation per request.
-        for stale in [k for k, v in _login_attempts.items()
-                      if (now - v["last"]) >= LOGIN_LOCKOUT_SECONDS]:
-            del _login_attempts[stale]
-        info = _login_attempts.get(ip, {"count": 0, "last": 0})
-        if (now - info["last"]) >= LOGIN_LOCKOUT_SECONDS:
-            info = {"count": 0, "last": now}
-        info["count"] += 1
-        info["last"] = now
-        _login_attempts[ip] = info
-        return info["count"]
+        if username is not None:
+            _record(_login_user_attempts, _login_user_key(username), now,
+                    USER_LOGIN_WINDOW_SECONDS)
+        return _record(_login_attempts, ip, now, LOGIN_LOCKOUT_SECONDS)
 
 
-def _login_reset(ip):
+def _login_user_count(username):
+    with _login_lock:
+        return (_login_user_attempts.get(_login_user_key(username)) or {}).get("count", 0)
+
+
+def _login_reset(ip, username=None):
     with _login_lock:
         _login_attempts.pop(ip, None)
+        if username is not None:
+            _login_user_attempts.pop(_login_user_key(username), None)
+
+
+# ---------------------------------------------------------------------------
+# Server-side sessions
+#
+# The session cookie is signed, not stored: before, logout cleared the
+# browser's copy and a captured cookie kept working until it expired. Every
+# login now registers a random id here, the cookie carries it, and a request
+# whose id is unknown is not authenticated. Logout drops the id. In memory on
+# purpose -- gunicorn runs one worker (see entrypoint.sh) -- so a restart
+# signs everyone out, which for an admin tool is a feature.
+# ---------------------------------------------------------------------------
+_sessions = {}             # sid -> {"user": str, "created": float, "seen": float}
+_sessions_lock = threading.Lock()
+MAX_SESSIONS = 200
+
+
+def session_open(user):
+    sid = secrets.token_urlsafe(24)
+    now = time.time()
+    with _sessions_lock:
+        _session_prune(now)
+        if len(_sessions) >= MAX_SESSIONS:
+            oldest = min(_sessions, key=lambda k: _sessions[k]["seen"])
+            _sessions.pop(oldest, None)
+        _sessions[sid] = {"user": user, "created": now, "seen": now}
+    return sid
+
+
+def _session_prune(now):
+    idle = app.permanent_session_lifetime.total_seconds()
+    for k in [k for k, v in _sessions.items() if (now - v["seen"]) >= idle]:
+        del _sessions[k]
+
+
+def session_alive(sid):
+    if not sid:
+        return False
+    now = time.time()
+    with _sessions_lock:
+        rec = _sessions.get(sid)
+        if not rec:
+            return False
+        if (now - rec["seen"]) >= app.permanent_session_lifetime.total_seconds():
+            _sessions.pop(sid, None)
+            return False
+        rec["seen"] = now
+        return True
+
+
+def session_close(sid):
+    with _sessions_lock:
+        _sessions.pop(sid or "", None)
 
 
 # ---------------------------------------------------------------------------
@@ -256,13 +345,24 @@ def login_required(f):
     return wrapper
 
 
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data:")
+
+
 @app.after_request
 def set_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    # No inline script anywhere (templates pass values as data-* attributes,
+    # handlers go through the data-action dispatcher), so script-src needs
+    # no 'unsafe-inline'. Styles still do: the UI sets style attributes
+    # throughout.
+    response.headers["Content-Security-Policy"] = CSP
+    if _env_flag("FORCE_HTTPS"):
+        # No includeSubDomains: the tool often shares a domain with others.
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
     return response
 
 
@@ -275,7 +375,8 @@ def check_auth():
     allowed = ("/login", "/api/login", "/static/", "/metrics")
     if any(request.path.startswith(p) for p in allowed):
         return
-    if not session.get("authenticated"):
+    if not session.get("authenticated") or not session_alive(session.get("sid")):
+        session.clear()
         if request.path.startswith("/api/"):
             return jsonify({"error": "Not authenticated"}), 401
         return redirect(url_for("login_page"))
@@ -300,13 +401,14 @@ def api_login():
     # each taken under _login_lock, so concurrent attempts from one IP can't
     # interleave their read-modify-write and undercount past the 5-try limit.
     now = time.time()
-    allowed, remaining = _login_gate(client_ip, now)
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "") or "")
+    password = str(data.get("password", "") or "")
+    allowed, remaining = _login_gate(client_ip, now, username)
     if not allowed:
-        return jsonify({"success": False, "error": f"Too many attempts. Try again in {remaining}s"}), 429
-
-    data = request.json or {}
-    username = data.get("username", "")
-    password = data.get("password", "")
+        resp = jsonify({"success": False, "error": f"Too many attempts. Try again in {remaining}s"})
+        resp.headers["Retry-After"] = str(max(1, remaining))
+        return resp, 429
 
     # Timing-safe comparison to prevent timing attacks
     user_ok = hmac.compare_digest(username.encode(), ADMIN_USER.encode())
@@ -314,10 +416,12 @@ def api_login():
 
     if user_ok and pass_ok:
         # Reset attempts on successful login
-        _login_reset(client_ip)
+        _login_reset(client_ip, username)
         # Rotate session ID to prevent session fixation attacks
+        session_close(session.get("sid"))
         session.clear()
         session["authenticated"] = True
+        session["sid"] = session_open(username)
         session["username"] = username
         session["csrf_token"] = secrets.token_hex(32)
         session.permanent = True
@@ -326,10 +430,14 @@ def api_login():
         return jsonify({"success": True, "csrf_token": session["csrf_token"]})
 
     # Track failed attempt (atomic increment under the lock)
-    attempts = _login_record_failure(client_ip, now)
+    attempts = _login_record_failure(client_ip, now, username)
     audit_log("login.failure", target=username or "?", success=False,
               user="?", ip=client_ip,
               details={"attempts": attempts})
+    if _login_user_count(username) == MAX_USER_LOGIN_ATTEMPTS:
+        audit_log("login.lockout", target=username or "?", success=False,
+                  user="?", ip=client_ip,
+                  details={"scope": "user", "seconds": USER_LOGIN_WINDOW_SECONDS})
     return jsonify({"success": False, "error": "Invalid credentials"}), 401
 
 
@@ -344,6 +452,7 @@ def api_csrf_token():
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
     user = session.get("username", "")
+    session_close(session.get("sid"))
     session.clear()
     audit_log("logout", target=user, user=user or "anonymous")
     return jsonify({"success": True})
@@ -2912,7 +3021,7 @@ def collect_matrix_task(progress_cb, host):
     return out
 
 
-@app.route("/api/inventory/matrix")
+@app.route("/api/inventory/matrix", methods=["POST"])
 @login_required
 def api_inventory_matrix():
     """Start the collection and hand back a task id.
@@ -2922,11 +3031,24 @@ def api_inventory_matrix():
     start_task can be read there. The AI report button on this very page
     already uses it.
     """
-    from app.tasks import start_task
-    host = (request.args.get("host") or "").strip()
+    from app.tasks import start_task, find_running
+    data = request.get_json(silent=True) or {}
+    host = str(data.get("host") or "").strip()
+    # POST, so it carries the CSRF token like every other request that does
+    # work; and one collection per host at a time -- a second click returns
+    # the task that is already running instead of starting another.
+    key = f"inventory-matrix:{host}"
+    running = find_running(key)
+    if running:
+        return jsonify({"success": True, "task_id": running, "already_running": True})
     task_id = start_task("inventory-matrix", collect_matrix_task, host,
-                         prefix="inv")
+                         prefix="inv", dedupe_key=key)
     return jsonify({"success": True, "task_id": task_id})
+
+
+@app.errorhandler(TaskLimitError)
+def _task_limit(e):
+    return jsonify({"success": False, "error": str(e)}), 429
 
 
 # ---------------------------------------------------------------------------

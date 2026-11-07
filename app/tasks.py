@@ -28,6 +28,15 @@ _TASKS: Dict[str, Dict[str, Any]] = {}
 _TASKS_LOCK = threading.Lock()
 _TASK_TTL_SECONDS = 6 * 3600  # finished tasks linger for six hours
 
+# Every task is a thread, and some routes start one per click. A ceiling
+# keeps a burst of requests (a stuck button, a script, a forged request)
+# from stacking up threads and SSH sessions without bound.
+MAX_RUNNING_TASKS = 32
+
+
+class TaskLimitError(RuntimeError):
+    """Raised by start_task when MAX_RUNNING_TASKS are already in flight."""
+
 
 def _gc_tasks() -> None:
     cutoff = time.time() - _TASK_TTL_SECONDS
@@ -37,15 +46,35 @@ def _gc_tasks() -> None:
             _TASKS.pop(tid, None)
 
 
-def start_task(name: str, fn: Callable, *args, prefix: str = "task", **kwargs) -> str:
+def find_running(dedupe_key: str) -> Optional[str]:
+    """Id of a running task started with this ``dedupe_key``, or None."""
+    if not dedupe_key:
+        return None
+    with _TASKS_LOCK:
+        for r in _TASKS.values():
+            if r.get("status") == "running" and r.get("dedupe_key") == dedupe_key:
+                return r["id"]
+    return None
+
+
+def start_task(name: str, fn: Callable, *args, prefix: str = "task",
+               dedupe_key: Optional[str] = None, **kwargs) -> str:
     """Run ``fn(progress_cb, *args, **kwargs)`` in a background thread.
 
     ``progress_cb(message, **fields)`` lets the worker push status updates to
     the registry. Returns the task id the caller hands to the client.
 
     ``prefix`` is used in the thread name only (debugging aid).
+    ``dedupe_key`` is stored on the record so a route can look for a task
+    that is already doing the same work (``find_running``).
+    Raises TaskLimitError when MAX_RUNNING_TASKS are already running.
     """
     _gc_tasks()
+    with _TASKS_LOCK:
+        running = sum(1 for r in _TASKS.values() if r.get("status") == "running")
+    if running >= MAX_RUNNING_TASKS:
+        raise TaskLimitError(f"{running} tasks are already running -- try again "
+                             "once some have finished")
     tid = uuid.uuid4().hex[:12]
     record: Dict[str, Any] = {
         "id": tid,
@@ -57,6 +86,7 @@ def start_task(name: str, fn: Callable, *args, prefix: str = "task", **kwargs) -
         "result": None,
         "error": "",
         "log": [],
+        "dedupe_key": dedupe_key,
     }
     with _TASKS_LOCK:
         _TASKS[tid] = record

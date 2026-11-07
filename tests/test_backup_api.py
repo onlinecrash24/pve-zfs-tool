@@ -27,10 +27,15 @@ def client(monkeypatch):
     monkeypatch.setattr("app.guest_intent.collect_exceptions",
                         lambda host, cache_ttl=300: {"exceptions": {},
                                                      "readable": True, "error": ""})
+    # One matrix collection per host at a time: a task an earlier test left
+    # running would otherwise be handed back instead of a fresh one.
+    from app import tasks
+    tasks._TASKS.clear()
     m.app.config["TESTING"] = True
     c = m.app.test_client()
     with c.session_transaction() as s:
         s["authenticated"] = True
+        s["sid"] = m.session_open("admin")
         s["csrf_token"] = "tok"
     return c
 
@@ -131,7 +136,7 @@ def _matrix_via_task(client, host):
     """
     import time
     from app.tasks import get_task
-    started = client.get("/api/inventory/matrix?host=" + host).get_json()
+    started = client.post("/api/inventory/matrix", json={"host": host}, headers={"X-CSRF-Token": "tok"}).get_json()
     assert started["task_id"], started
     for _ in range(200):                       # 10s ceiling; stubs finish instantly
         rec = get_task(started["task_id"])
@@ -210,7 +215,7 @@ def test_the_endpoint_answers_immediately_with_a_task_id(client, monkeypatch):
     monkeypatch.setattr(m, "load_hosts", lambda: [{"address": "10.0.0.1"}])
 
     t0 = time.time()
-    body = client.get("/api/inventory/matrix?host=10.0.0.1").get_json()
+    body = client.post("/api/inventory/matrix", json={"host": "10.0.0.1"}, headers={"X-CSRF-Token": "tok"}).get_json()
     elapsed = time.time() - t0
     assert body["task_id"]
     assert elapsed < 2, f"endpoint blocked for {elapsed:.1f}s"
@@ -236,7 +241,7 @@ def test_progress_is_reported_per_host(client, monkeypatch):
     monkeypatch.setattr("app.replication_inventory.source_hosts", lambda mx: [])
     monkeypatch.setattr(m, "load_hosts", lambda: [])
 
-    started = client.get("/api/inventory/matrix").get_json()
+    started = client.post("/api/inventory/matrix", json={}, headers={"X-CSRF-Token": "tok"}).get_json()
     for _ in range(200):
         rec = get_task(started["task_id"])
         if rec and rec["status"] != "running":

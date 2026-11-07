@@ -20,6 +20,7 @@ def client(monkeypatch):
     c = m.app.test_client()
     with c.session_transaction() as s:
         s["authenticated"] = True
+        s["sid"] = m.session_open("admin")
         s["csrf_token"] = "tok"
     return c
 
@@ -70,12 +71,14 @@ def test_the_outbound_link_cannot_reach_back(client):
     assert "noopener" in anchor
 
 
-def test_the_home_page_gets_it_as_a_global(client, monkeypatch):
-    # The home header is built in JavaScript, so the value travels as a global
-    # rather than as markup.
+def test_the_home_page_gets_it_as_a_data_attribute(client, monkeypatch):
+    # The home header is built in JavaScript, so the value travels as a
+    # data-* attribute on <html> -- not an inline script, which the CSP
+    # (script-src 'self') would block.
     monkeypatch.setenv("APP_VERSION", "v1.2.3")
     body = client.get("/").get_data(as_text=True)
-    assert 'window.ZFS_VERSION = "v1.2.3"' in body
+    assert 'data-app-version="v1.2.3"' in body
+    assert "window.ZFS_VERSION" not in body
 
 
 def test_both_pages_still_render_without_a_version(client, monkeypatch):

@@ -2819,8 +2819,9 @@ const TRANSLATIONS = {
 };
 
 // Default language: user's saved choice, else the server default from
-// DEFAULT_LANG (injected as window.ZFS_DEFAULT_LANG), else English.
-const _serverLang = (typeof window !== "undefined" && window.ZFS_DEFAULT_LANG) || "";
+// DEFAULT_LANG (passed as data-default-lang on <html>), else English.
+const _serverLang = (typeof document !== "undefined" && document.documentElement
+    && document.documentElement.dataset.defaultLang) || "";
 let _currentLang = localStorage.getItem("zfs-tool-lang")
     || (_serverLang === "de" || _serverLang === "en" ? _serverLang : "en");
 
