@@ -85,6 +85,13 @@ it looks alarming and is the design.
 - Denial of service by asking the tool to do expensive work you are already
   authorised to ask for.
 
+## Security audits
+
+- **October 2026** -- independent review by Ronald Wiesinger - IT-Services
+  ([rowie.at](https://rowie.at)), covering authentication, the SSH key
+  handling, the audit trail, the destructive-operation guards and the
+  file-restore path. Findings were fixed in v0.9.935 and v0.9.936.
+
 ## Known and accepted, as of v0.9.921
 
 Stated here rather than discovered later:
