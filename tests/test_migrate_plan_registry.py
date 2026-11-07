@@ -217,3 +217,21 @@ def test_a_plan_with_errors_cannot_start(client, monkeypatch):
     monkeypatch.setattr(mg, "start_task", lambda *a, **k: pytest.fail("must not start"))
     r = client("/api/migrate/cutover", {"source": "10.0.0.1", "target": "10.0.0.2", "plan_id": pid})
     assert r.status_code == 409
+
+
+def test_the_preflight_names_its_guest_for_the_confirm_texts(world):
+    assert _preflight()["vmid"] == "100"
+
+
+def test_the_ui_drops_the_plan_when_the_selection_changes():
+    # Review finding: rollback/cleanup/cutover confirmed the guest in the
+    # select box but acted on the guest of the earlier preflight.
+    import os
+    import re
+    js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "app", "static", "js", "app.js"), encoding="utf-8").read()
+    assert re.search(r"\[srcSel, tgtSel, guestSel, rootSel, storSel\]\.forEach\(el => el\.addEventListener\(\"change\", _dropPlan\)\)", js)
+    assert 'newVmidInp.addEventListener("input", _dropPlan)' in js
+    for key in ("mig_rollback_confirm", "mig_cleanup_confirm", "mig_cutover_confirm"):
+        line = next(ln for ln in js.splitlines() if key in ln)
+        assert "pf.vmid" in line and "_guest()" not in line, line

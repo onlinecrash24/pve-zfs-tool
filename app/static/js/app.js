@@ -6620,6 +6620,19 @@ async function viewMigrate() {
     srcSel.onchange = loadGuests;
     tgtSel.onchange = async () => { await loadTargetDatasets(); await loadTargetStorages(); };
     rootSel.onchange = syncStorageSel;
+    // A plan belongs to the selection it was made for. Change any input and
+    // it is dropped -- otherwise a rollback confirmed for guest 101 would act
+    // on the guest 100 that was checked earlier (the server only knows the
+    // plan id).
+    const _dropPlan = () => {
+        if (!pf) return;
+        pf = null;
+        checksBox.innerHTML = "";
+        checksBox.appendChild(h("p", { className: "muted" }, t("mig_plan_stale")));
+        buildMaps();
+    };
+    [srcSel, tgtSel, guestSel, rootSel, storSel].forEach(el => el.addEventListener("change", _dropPlan));
+    newVmidInp.addEventListener("input", _dropPlan);
     await loadGuests();
     await loadTargetDatasets();
     await loadTargetStorages();
@@ -6814,8 +6827,7 @@ async function viewMigrate() {
     const cutStatus = h("div", { style: "font-size:12px;margin-top:8px" });
     cutBtn.onclick = async () => {
         if (!pf || !pf.can_cutover) { toast(t("mig_run_check_first"), "error"); return; }
-        const g = _guest();
-        if (!confirm(t("mig_cutover_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", tgtSel.value))) return;
+        if (!confirm(t("mig_cutover_confirm").replace("{g}", pf.vmid || "?").replace("{h}", tgtSel.value))) return;
         // The storage rewrite is derived on the server from the storage the
         // preflight checked; only the bridge choices are sent.
         const bmap = {};
@@ -6860,8 +6872,8 @@ async function viewMigrate() {
     const cleanBtn = h("button", { className: "btn btn-danger btn-sm", style: "margin-left:8px" }, t("mig_cleanup"));
     const finStatus = h("div", { style: "font-size:12px;margin-top:8px" });
     rbBtn.onclick = async () => {
-        const g = _guest();
-        if (!confirm(t("mig_rollback_confirm").replace("{g}", g ? g.vmid : "?"))) return;
+        if (!pf || !pf.plan_id) { toast(t("mig_run_check_first"), "error"); return; }
+        if (!confirm(t("mig_rollback_confirm").replace("{g}", pf.vmid || "?"))) return;
         rbBtn.disabled = true; finStatus.textContent = t("mig_running");
         try {
             const r = await API.post("/api/migrate/rollback", _planRef());
@@ -6873,9 +6885,8 @@ async function viewMigrate() {
         finally { rbBtn.disabled = false; }
     };
     cleanBtn.onclick = async () => {
-        const g = _guest();
         if (!pf || !(pf.plan || []).length) { toast(t("mig_run_check_first"), "error"); return; }
-        if (!confirm(t("mig_cleanup_confirm").replace("{g}", g ? g.vmid : "?").replace("{h}", srcSel.value))) return;
+        if (!confirm(t("mig_cleanup_confirm").replace("{g}", pf.vmid || "?").replace("{h}", srcSel.value))) return;
         cleanBtn.disabled = true; finStatus.textContent = t("mig_running");
         try {
             const r = await API.post("/api/migrate/cleanup-source", _planRef());

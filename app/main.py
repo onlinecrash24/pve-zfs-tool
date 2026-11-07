@@ -255,18 +255,16 @@ def _login_gate(ip, now, username=None):
 
 
 def _login_record_failure(ip, now, username=None):
-    """Atomically increment the failed-attempt counters. Returns the new
-    per-address count (and bumps the per-account one alongside)."""
+    """Atomically increment the failed-attempt counters. Returns
+    ``(per_address_count, per_account_count)``, both taken under the same lock
+    as the increment -- each concurrent failure sees its own number, so
+    exactly one of them sees the account reach the limit."""
     with _login_lock:
+        user_count = 0
         if username is not None:
-            _record(_login_user_attempts, _login_user_key(username), now,
-                    USER_LOGIN_WINDOW_SECONDS)
-        return _record(_login_attempts, ip, now, LOGIN_LOCKOUT_SECONDS)
-
-
-def _login_user_count(username):
-    with _login_lock:
-        return (_login_user_attempts.get(_login_user_key(username)) or {}).get("count", 0)
+            user_count = _record(_login_user_attempts, _login_user_key(username), now,
+                                 USER_LOGIN_WINDOW_SECONDS)
+        return _record(_login_attempts, ip, now, LOGIN_LOCKOUT_SECONDS), user_count
 
 
 def _login_reset(ip, username=None):
@@ -430,11 +428,11 @@ def api_login():
         return jsonify({"success": True, "csrf_token": session["csrf_token"]})
 
     # Track failed attempt (atomic increment under the lock)
-    attempts = _login_record_failure(client_ip, now, username)
+    attempts, user_attempts = _login_record_failure(client_ip, now, username)
     audit_log("login.failure", target=username or "?", success=False,
               user="?", ip=client_ip,
-              details={"attempts": attempts})
-    if _login_user_count(username) == MAX_USER_LOGIN_ATTEMPTS:
+              details={"attempts": attempts, "account_attempts": user_attempts})
+    if user_attempts == MAX_USER_LOGIN_ATTEMPTS:
         audit_log("login.lockout", target=username or "?", success=False,
                   user="?", ip=client_ip,
                   details={"scope": "user", "seconds": USER_LOGIN_WINDOW_SECONDS})
@@ -3052,18 +3050,18 @@ def api_inventory_matrix():
     start_task can be read there. The AI report button on this very page
     already uses it.
     """
-    from app.tasks import start_task, find_running
+    from app.tasks import start_or_join
     data = request.get_json(silent=True) or {}
     host = str(data.get("host") or "").strip()
     # POST, so it carries the CSRF token like every other request that does
     # work; and one collection per host at a time -- a second click returns
-    # the task that is already running instead of starting another.
-    key = f"inventory-matrix:{host}"
-    running = find_running(key)
-    if running:
-        return jsonify({"success": True, "task_id": running, "already_running": True})
-    task_id = start_task("inventory-matrix", collect_matrix_task, host,
-                         prefix="inv", dedupe_key=key)
+    # the task that is already running instead of starting another. Lookup
+    # and start happen under one lock, so two concurrent clicks cannot both
+    # start one.
+    task_id, joined = start_or_join("inventory-matrix", collect_matrix_task, host,
+                                    prefix="inv", dedupe_key=f"inventory-matrix:{host}")
+    if joined:
+        return jsonify({"success": True, "task_id": task_id, "already_running": True})
     return jsonify({"success": True, "task_id": task_id})
 
 

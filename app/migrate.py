@@ -717,6 +717,7 @@ def preflight(source: Dict[str, Any], target: Dict[str, Any], vmid: str,
         "can_run": not errors,
     }) if plan else None
     return {"success": True, "checks": checks, "plan": plan, "plan_id": plan_id,
+            "vmid": vmid,
             "running": running, "target_vmid": tgt_vmid,
             "bridges": src_bridges, "target_bridges": tgt_bridges,
             "source_storages": config_storage_ids(text, gtype),

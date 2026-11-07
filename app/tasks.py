@@ -46,17 +46,6 @@ def _gc_tasks() -> None:
             _TASKS.pop(tid, None)
 
 
-def find_running(dedupe_key: str) -> Optional[str]:
-    """Id of a running task started with this ``dedupe_key``, or None."""
-    if not dedupe_key:
-        return None
-    with _TASKS_LOCK:
-        for r in _TASKS.values():
-            if r.get("status") == "running" and r.get("dedupe_key") == dedupe_key:
-                return r["id"]
-    return None
-
-
 def start_task(name: str, fn: Callable, *args, prefix: str = "task",
                dedupe_key: Optional[str] = None, **kwargs) -> str:
     """Run ``fn(progress_cb, *args, **kwargs)`` in a background thread.
@@ -65,16 +54,23 @@ def start_task(name: str, fn: Callable, *args, prefix: str = "task",
     the registry. Returns the task id the caller hands to the client.
 
     ``prefix`` is used in the thread name only (debugging aid).
-    ``dedupe_key`` is stored on the record so a route can look for a task
-    that is already doing the same work (``find_running``).
+    ``dedupe_key`` is stored on the record (see ``start_or_join``).
     Raises TaskLimitError when MAX_RUNNING_TASKS are already running.
     """
+    return _start(name, fn, args, kwargs, prefix, dedupe_key, join=False)[0]
+
+
+def start_or_join(name: str, fn: Callable, *args, prefix: str = "task",
+                  dedupe_key: str, **kwargs):
+    """Like start_task, but if a task with the same ``dedupe_key`` is still
+    running, return ``(its_id, True)`` instead of starting another one.
+    Lookup, ceiling check and insert happen under one lock acquisition.
+    Returns ``(task_id, joined)``."""
+    return _start(name, fn, args, kwargs, prefix, dedupe_key, join=True)
+
+
+def _start(name, fn, args, kwargs, prefix, dedupe_key, join):
     _gc_tasks()
-    with _TASKS_LOCK:
-        running = sum(1 for r in _TASKS.values() if r.get("status") == "running")
-    if running >= MAX_RUNNING_TASKS:
-        raise TaskLimitError(f"{running} tasks are already running -- try again "
-                             "once some have finished")
     tid = uuid.uuid4().hex[:12]
     record: Dict[str, Any] = {
         "id": tid,
@@ -89,6 +85,14 @@ def start_task(name: str, fn: Callable, *args, prefix: str = "task",
         "dedupe_key": dedupe_key,
     }
     with _TASKS_LOCK:
+        running = [r for r in _TASKS.values() if r.get("status") == "running"]
+        if join and dedupe_key:
+            for r in running:
+                if r.get("dedupe_key") == dedupe_key:
+                    return r["id"], True
+        if len(running) >= MAX_RUNNING_TASKS:
+            raise TaskLimitError(f"{len(running)} tasks are already running -- try "
+                                 "again once some have finished")
         _TASKS[tid] = record
 
     def _progress(msg: str, **fields):
@@ -124,7 +128,7 @@ def start_task(name: str, fn: Callable, *args, prefix: str = "task",
                     r["finished_at"] = time.time()
 
     threading.Thread(target=_runner, daemon=True, name=f"{prefix}-{name}-{tid}").start()
-    return tid
+    return tid, False
 
 
 def running_tasks(name_prefix: str = "") -> List[Dict[str, Any]]:

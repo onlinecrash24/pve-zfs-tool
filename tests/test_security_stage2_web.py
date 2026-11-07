@@ -221,3 +221,80 @@ def test_login_page_loads_its_script_from_a_file():
     body = m.app.test_client().get("/login").get_data(as_text=True)
     assert re.search(r'<script src="/static/js/login\.js\?v=[^"]+"></script>', body)
     assert os.path.exists(os.path.join(ROOT, "app", "static", "js", "login.js"))
+
+
+# --- found in the pre-release review ---------------------------------------------------
+
+def test_concurrent_failures_write_the_lockout_audit_exactly_once(monkeypatch):
+    # Each failure gets its own count from under the lock, so exactly one of
+    # a parallel burst sees the account reach the limit.
+    audits = []
+    monkeypatch.setattr(m, "audit_log", lambda action, **k: audits.append(action))
+    m._login_attempts.clear()
+    m._login_user_attempts.clear()
+    gate = threading.Barrier(12)
+
+    def fail(i):
+        c = m.app.test_client()
+        gate.wait()
+        c.post("/api/login", json={"username": "admin", "password": "nope"},
+               environ_base={"REMOTE_ADDR": f"198.51.100.{i}"})
+    for round_ in range(2):
+        ts = [threading.Thread(target=fail, args=(round_ * 12 + i,)) for i in range(12)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+    assert audits.count("login.lockout") == 1
+    m._login_attempts.clear()
+    m._login_user_attempts.clear()
+
+
+def test_concurrent_matrix_clicks_start_one_task(blocked_matrix):
+    c = _client()
+    gate = threading.Barrier(8)
+    ids = []
+
+    def click():
+        gate.wait()
+        r = c.post("/api/inventory/matrix", json={"host": "10.0.0.9"},
+                   headers={"X-CSRF-Token": "tok"})
+        ids.append(r.get_json()["task_id"])
+    ts = [threading.Thread(target=click) for _ in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(set(ids)) == 1
+    assert sum(1 for r in tasks._TASKS.values() if r.get("dedupe_key") == "inventory-matrix:10.0.0.9") == 1
+
+
+def test_start_or_join_and_the_ceiling_share_one_lock(monkeypatch):
+    tasks._TASKS.clear()
+    monkeypatch.setattr(tasks, "MAX_RUNNING_TASKS", 1)
+    gate = threading.Event()
+    try:
+        a, joined_a = tasks.start_or_join("x", lambda p: gate.wait(5), dedupe_key="k")
+        b, joined_b = tasks.start_or_join("x", lambda p: None, dedupe_key="k")
+        assert (joined_a, joined_b) == (False, True) and a == b   # joining is not blocked by the ceiling
+        with pytest.raises(tasks.TaskLimitError):
+            tasks.start_or_join("y", lambda p: None, dedupe_key="other")
+    finally:
+        gate.set()
+        tasks._TASKS.clear()
+
+
+def test_key_rotation_removes_its_temp_dir_even_on_an_early_error(monkeypatch, tmp_path):
+    import subprocess
+    import tempfile
+    from app import ssh_manager as sm
+    made = []
+    real = tempfile.mkdtemp
+
+    def mk(**k):
+        d = real(dir=str(tmp_path), **k)
+        made.append(d)
+        return d
+    monkeypatch.setattr(sm.tempfile, "mkdtemp", mk)
+
+    def boom(*a, **k):
+        raise FileNotFoundError("ssh-keygen")
+    monkeypatch.setattr(subprocess, "run", boom)
+    res = sm.rotate_ssh_keys()
+    assert res["success"] is False and made and not os.path.exists(made[0])

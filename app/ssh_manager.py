@@ -692,6 +692,16 @@ def _remove_authorized_key(host, pubkey):
 
 
 def rotate_ssh_keys():
+    """See _rotate_ssh_keys. The temporary key directory is removed on every
+    way out, including the early error returns."""
+    tmp_dir = tempfile.mkdtemp(prefix="pvezfs-rotate-")
+    try:
+        return _rotate_ssh_keys(tmp_dir)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _rotate_ssh_keys(tmp_dir):
     """Rotate the tool's SSH key across all configured hosts.
 
     Flow (safe — never locks us out):
@@ -707,9 +717,8 @@ def rotate_ssh_keys():
     from app.cache import invalidate_all
 
     old_pub = get_public_key() or ""
-    # A fresh private directory per rotation (container-local); nothing to
-    # clean up from a previous abort and no fixed name anyone could plant.
-    tmp_dir = tempfile.mkdtemp(prefix="pvezfs-rotate-")
+    # A fresh private directory per rotation (container-local, created and
+    # removed by rotate_ssh_keys); no fixed name anyone could plant.
     tmp_key = os.path.join(tmp_dir, "key")
 
     # 1. Generate new keypair
@@ -764,7 +773,6 @@ def rotate_ssh_keys():
         for h, res in zip(hosts, results):
             if res["deploy"]:
                 _remove_authorized_key(h, new_pub)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
         return {
             "success": False,
             "error": "Deployment failed on one or more hosts; rolled back",
@@ -781,7 +789,6 @@ def rotate_ssh_keys():
                 shutil.move(SSH_KEY + suf, SSH_KEY + suf + ".old")
             shutil.move(tmp_key + suf, SSH_KEY + suf)
         os.chmod(SSH_KEY, 0o600)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
     except Exception as e:
         return {
             "success": False,
