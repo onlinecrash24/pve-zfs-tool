@@ -7,6 +7,24 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.944 -- 2026-11-19
+
+v0.9.944 — gunicorn 27.0.1
+
+Maintenance release. gunicorn goes from 26.2.0 to 27.0.1. The 27 line
+carries no security fix, but parses HTTP more strictly: a request whose
+Transfer-Encoding does not end in "chunked" is now answered with 400.
+The UI only sends JSON through fetch, so nothing the tool does is
+affected; a reverse proxy in front that rewrites Transfer-Encoding in an
+unusual way would be.
+
+Checked for this release: pip-audit on the pinned set is clean, and all
+direct and indirect Python dependencies are at their latest versions. The
+image is rebuilt on the current Debian package state. The tool is not
+affected by this week's Apache (CVE-2026-119618), PHP and nginx 1.30.7
+advisories -- the image contains none of them. If you run it behind nginx
+or Apache, update the proxy.
+
 ## v0.9.943 -- 2026-11-07
 
 v0.9.943 — security stage 2: reverse sync bound to replicas, migration plan kept on the server, server-side sessions, strict CSP
