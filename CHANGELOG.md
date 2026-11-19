@@ -7,6 +7,54 @@ the release notes (or the annotated tag they come from) instead.
 Full history and container images: <https://github.com/onlinecrash24/pve-zfs-tool/releases>
 
 
+## v0.9.943 -- 2026-11-07
+
+v0.9.943 — security stage 2: reverse sync bound to replicas, migration plan kept on the server, server-side sessions, strict CSP
+
+In November the reviewer of the October audit (Ronald Wiesinger -
+IT-Services, rowie.at) re-checked v0.9.942: every fix from v0.9.935 and
+v0.9.936 held. This release closes the findings that were deferred then.
+
+Reverse sync (disaster recovery) only sends replicas this host keeps: the
+replica root must be one of the host's own zsync targets and the dataset
+must lie under it. A reinstalled destination's new SSH host key is no
+longer taken on trust -- the tool shows the fingerprint it sees, you
+compare it on the destination's console, and only a key with exactly that
+fingerprint is written to known_hosts. A different answer aborts before
+anything is sent.
+
+Guest migration keeps its plan on the server. The preflight registers what
+moves where and hands the browser an id; pre-copy, cutover, rollback, the
+snapshot clean-up and removing the guest from the source act only on that
+plan, for exactly the host pair it was made for. The storage rewrite is
+derived from the storage the preflight checked, bridge choices are checked
+against the bridges it saw. Changing any selection drops the plan.
+
+Login: a second brake per account name (20 failures in 15 minutes) next to
+the per-address one, so guessing spread over many addresses stops too. The
+trade-off -- anyone reaching the port can lock the account for 15 minutes --
+is stated in SECURITY.md.
+
+Sessions are registered on the server: logging out also invalidates a
+copied cookie. They live in memory, so after an update or restart everyone
+logs in again, and a migration in preparation needs its preflight again.
+With FORCE_HTTPS the response carries HSTS. The Content-Security-Policy no
+longer allows inline script; the remaining inline handlers are gone.
+
+Smaller: restoring a file from a host-config backup refuses member names
+that climb out with "..", before the host is asked anything; zfs set values
+are shell-quoted; Telegram, Matrix and e-mail show message text instead of
+rendering it as HTML; Gotify's token travels in a header; the backup
+overview's collection is a POST, one per host at a time, with a ceiling on
+parallel tasks; failed tasks no longer hand their traceback to the browser;
+no fixed file names under /tmp on the hosts.
+
+An independent pre-release review of this diff found three more issues,
+fixed before the tag: the lockout audit entry could be skipped under a
+concurrent burst, two simultaneous clicks could start two collections, and
+the migration steps could act on an earlier preflighted guest after the
+selection changed.
+
 ## v0.9.942 -- 2026-11-07
 
 v0.9.942 — no stale-snapshot alerts for a host that just booted
